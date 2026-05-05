@@ -77,10 +77,9 @@ export class OtpService {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          // Taqnyat expects digits only — strip the leading "+" we accept
-          // from clients in E.164 form.
           recipients: [target.replace('+', '')],
           body: message,
+          sender: process.env.TAQNYAT_SENDER ?? 'QIFT',
         }),
       });
       const data: unknown = await res.json();
