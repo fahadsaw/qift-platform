@@ -1,54 +1,61 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 
-// Cloud-ready bootstrap.
-//
-// Three things change vs. the local-default Nest scaffold:
-//   1. Port comes from `process.env.PORT` (Railway / Render / Fly /
-//      Heroku all inject this). Falls back to 4000 for local dev.
-//   2. We bind to `0.0.0.0` so the platform's load balancer can reach
-//      the process. Listening on the implicit default keeps the socket
-//      pinned to localhost on some platforms.
-//   3. CORS allow-list is read from `CORS_ORIGINS` (comma-separated).
-//      Local dev still works without setting it via the localhost
-//      defaults. Prod sets it explicitly to the deployed frontend URL.
-//
-// Config-only changes — no business behaviour shifted, only the runtime
-// surface a deploy target needs.
+const BOOT_TAG = 'qift-api/cors-v2';
+
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const logger = new Logger('Bootstrap');
 
-  // CORS origins: env-first, with localhost fallbacks so a fresh dev
-  // checkout works without copying .env files. Empty entries are
-  // dropped so trailing commas don't bite.
+  app.set('trust proxy', 1);
+
   const envOrigins = (process.env.CORS_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  const localOrigins = [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:3002',
-  ];
-  // De-dupe in case the env already includes a localhost entry.
-  const origins = Array.from(new Set([...envOrigins, ...localOrigins]));
+
+  const localhostRegex = /^http:\/\/localhost(:\d+)?$/;
+
+  const isAllowedOrigin = (origin: string | undefined): boolean => {
+    if (!origin) return true;
+    if (envOrigins.includes(origin)) return true;
+    if (localhostRegex.test(origin)) return true;
+    return false;
+  };
+
   app.enableCors({
-    origin: true,
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      logger.warn(`CORS blocked: origin "${origin}" not in allow-list`);
+      callback(new Error(`CORS blocked: ${origin}`));
+    },
     credentials: true,
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-    allowedHeaders: '*',
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Accept',
+      'Accept-Language',
+      'X-Requested-With',
+    ],
+    maxAge: 86400,
+    optionsSuccessStatus: 204,
   });
 
-  // PORT — every PaaS injects this. Default for local dev only.
   const port = Number(process.env.PORT) || 4000;
-  // 0.0.0.0 is required by most PaaS load balancers (Railway, Render,
-  // Fly). Localhost-only listeners are unreachable from the LB.
+
   await app.listen(port, '0.0.0.0');
 
   logger.log(
-    `Qift API listening on 0.0.0.0:${port} — CORS origins: ${origins.join(', ')}`,
+    `[${BOOT_TAG}] listening on 0.0.0.0:${port} — CORS allow-list: ${
+      envOrigins.length > 0 ? envOrigins.join(', ') : '(none)'
+    }`,
   );
 }
 
