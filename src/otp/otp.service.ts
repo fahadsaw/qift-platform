@@ -83,6 +83,7 @@ export class OtpService {
         }),
       });
       const data: unknown = await res.json();
+      this.logger.log(`Taqnyat status: ${res.status}`);
       this.logger.log(`Taqnyat response: ${JSON.stringify(data)}`);
     } catch (error) {
       this.logger.error(`SMS Error: ${String(error)}`);
