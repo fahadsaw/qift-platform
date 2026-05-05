@@ -1,0 +1,421 @@
+import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import {
+  NotificationsService,
+  NotificationType,
+} from '../notifications/notifications.service';
+import { assertTransition, type GiftStatus } from './gift-status';
+import {
+  applyGiftVisibility,
+  validateGiftMedia,
+  type GiftLike,
+} from './gift-visibility';
+export type { GiftStatus } from './gift-status';
+
+// `senderId` is intentionally omitted — we always use the JWT viewer as the
+// sender, so a client-supplied senderId would be ignored anyway.
+export type CreateGiftInput = {
+  receiverUsername?: string;
+  productName?: string;
+  storeName?: string;
+  // Buyer's gift message. Accepts the new `messageText` field name; the
+  // legacy `message` alias is also accepted to keep older callers (and
+  // PaymentsService) working without a coordinated rename.
+  messageText?: string;
+  message?: string;
+  // Optional media attachment. `mediaType` discriminates the renderer
+  // on the receiver side. Both fields are subject to the same delivery-
+  // time reveal gate as `messageText`.
+  mediaUrl?: string;
+  mediaType?: 'image' | 'video';
+  isAnonymous?: boolean;
+  // Sender-controlled surprise mode. When true, the receiver gets a
+  // mystery notification and `productName`/`storeName` are masked from
+  // their view of the gift until status === 'delivered'. Default false
+  // (visible immediately) — same semantics as before this flag existed.
+  isSurprise?: boolean;
+  // Fast-delivery context (flowers/chocolate/cake/perishables). Mirrors
+  // the OrdersService contract; we re-validate here so direct POSTs to
+  // /gifts can't bypass the city-match guard.
+  isFastDelivery?: boolean;
+  storeCity?: string;
+  // Catalog identifiers — propagated from Order via PaymentsService so
+  // the Gift inherits the right FKs and the store dashboard can filter.
+  productId?: string;
+  storeId?: string;
+};
+
+const PARTY_SELECT = {
+  id: true,
+  qiftUsername: true,
+  fullName: true,
+};
+
+const ADDRESS_SELECT = {
+  id: true,
+  label: true,
+  country: true,
+  region: true,
+  city: true,
+  governorate: true,
+  district: true,
+  street: true,
+  buildingNumber: true,
+  unitNumber: true,
+  postalCode: true,
+  additionalNumber: true,
+  shortAddress: true,
+  deliveryPhone: true,
+  details: true,
+  isDefault: true,
+};
+
+const GIFT_INCLUDE = {
+  sender: { select: PARTY_SELECT },
+  receiver: { select: PARTY_SELECT },
+  address: { select: ADDRESS_SELECT },
+};
+
+const FORBIDDEN_MSG = 'غير مصرح لك';
+
+// `GiftWithParties` is the shape Prisma returns when we include sender +
+// receiver. We re-export the type from the visibility module so every
+// helper agrees on the field names and tightening one place propagates
+// everywhere.
+type GiftWithParties = GiftLike;
+
+@Injectable()
+export class GiftsService {
+  constructor(
+    private prisma: PrismaService,
+    private notifications: NotificationsService,
+  ) {}
+
+  async create(body: CreateGiftInput, viewerUserId: string) {
+    // Sender is always the authenticated user — never trust client input.
+    const senderId = viewerUserId;
+    const receiverUsername = body.receiverUsername?.trim().toLowerCase();
+    const productName = body.productName?.trim();
+    const storeName = body.storeName?.trim();
+    // Accept either the new `messageText` name or the legacy `message`
+    // alias. Both PaymentsService (forwarding from Order.message) and
+    // older direct callers keep working without coordinated updates.
+    const messageText =
+      body.messageText?.trim() || body.message?.trim() || null;
+    // Media validation lives in gift-visibility.ts so a future upload
+    // endpoint can reuse the exact same rules. Throws BadRequestException
+    // when (mediaUrl, mediaType) is inconsistent.
+    const { mediaUrl, mediaType } = validateGiftMedia(
+      body.mediaUrl,
+      body.mediaType,
+    );
+    const isAnonymous = body.isAnonymous === true;
+    const isSurprise = body.isSurprise === true;
+
+    if (!receiverUsername || !productName || !storeName) {
+      throw new BadRequestException(
+        'receiverUsername, productName and storeName are required',
+      );
+    }
+
+    // Self-send guard: look up sender's username and compare.
+    const sender = await this.prisma.user.findUnique({
+      where: { id: senderId },
+      select: { qiftUsername: true },
+    });
+    if (!sender) {
+      throw new NotFoundException('Sender not found');
+    }
+    if (sender.qiftUsername.toLowerCase() === receiverUsername) {
+      throw new BadRequestException('لا يمكنك إرسال هدية لنفسك');
+    }
+
+    const receiver = await this.prisma.user.findUnique({
+      where: { qiftUsername: receiverUsername },
+      include: {
+        addresses: { where: { isDefault: true }, take: 1 },
+      },
+    });
+    if (!receiver) {
+      throw new NotFoundException('Receiver not found');
+    }
+
+    // Receiver must have a default delivery address before any gift can land.
+    // This is the hard guard mirroring the /send page warning.
+    //
+    // When this trips, we DON'T just throw — we ALSO:
+    //   1. Record a GiftAttempt row so we can notify the sender later
+    //      (when the receiver finally sets a default address).
+    //   2. Fire a receiver-side notification ("someone tried to send you a
+    //      gift, please set a default address").
+    //
+    // Both operations are best-effort: if either fails the request still
+    // rejects with the same typed error so the sender sees a clear UI.
+    // We use 422 (Unprocessable Entity) with a stable `code` so the
+    // frontend can switch on `code === 'receiver_no_default_address'`
+    // without parsing localized strings.
+    if (receiver.addresses.length === 0) {
+      try {
+        await this.prisma.giftAttempt.create({
+          data: {
+            senderId,
+            receiverId: receiver.id,
+            receiverUsername,
+            productName,
+            storeName,
+          },
+        });
+      } catch {
+        // Don't let attempt-logging failure mask the real 422 below.
+      }
+      void this.notifications.trigger({
+        userId: receiver.id,
+        type: NotificationType.GiftAttemptedNoAddress,
+        title:
+          'حاول شخص إرسال هدية لك، لكن لا يمكنك استلامها قبل تحديد عنوان افتراضي',
+        body: null,
+        link: '/profile',
+      });
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+          // Stable machine-readable code — frontend switches on this.
+          code: 'receiver_no_default_address',
+          message: 'لا يمكن إرسال الهدية: المستلم لا يملك عنوان توصيل افتراضي',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    // Fast-delivery gate. We don't have UsersService injected here (would
+    // be a circular import via OrdersModule), so we run the same privacy-
+    // safe city check inline. The error message stays generic — it never
+    // names a city.
+    if (body.isFastDelivery === true) {
+      const storeCity = body.storeCity?.trim();
+      if (!storeCity) {
+        throw new BadRequestException(
+          'storeCity is required for fast-delivery products',
+        );
+      }
+      const ok = await canDeliverFastInline(
+        this.prisma,
+        receiver.id,
+        storeCity,
+      );
+      if (!ok) {
+        throw new BadRequestException('لا يمكن التوصيل لهذا المستخدم');
+      }
+    }
+
+    // Out-of-stock guard, defensive duplicate of OrdersService. Inline
+    // (no ProductsService injection) to avoid a module-import cycle:
+    // GiftsModule already imports NotificationsModule, and Products
+    // depends on Stores, so adding it here would create a fragile graph.
+    if (body.productId) {
+      const product = await this.prisma.product.findUnique({
+        where: { id: body.productId },
+        select: { id: true, isAvailable: true, stockStatus: true },
+      });
+      if (!product) {
+        throw new BadRequestException('المنتج غير موجود');
+      }
+      if (!product.isAvailable || product.stockStatus !== 'in_stock') {
+        throw new BadRequestException('المنتج غير متوفر حاليًا');
+      }
+    }
+
+    const created = await this.prisma.gift.create({
+      data: {
+        senderId,
+        receiverId: receiver.id,
+        productName,
+        storeName,
+        // Persist catalog identifiers when available so the per-store
+        // dashboard can filter on storeId. Legacy / sample-product flows
+        // pass nothing and these stay null.
+        storeId: body.storeId?.trim() || null,
+        productId: body.productId?.trim() || null,
+        messageText,
+        mediaUrl,
+        mediaType,
+        isAnonymous,
+        isSurprise,
+        // Receiver still has to confirm or override the address.
+        status: 'pending_address',
+      },
+      include: GIFT_INCLUDE,
+    });
+
+    // Two notifications fire as soon as a gift is created:
+    //   1. "you have a new gift" — celebratory (or mystery, when surprise)
+    //   2. "please confirm the delivery address" — actionable
+    // Both go to the receiver. The notifications service swallows errors
+    // so a failed write here can never roll back the gift create.
+    //
+    // Surprise-mode privacy: the celebratory notification's `body` is
+    // `${productName} — ${storeName}` for normal gifts, but for surprise
+    // gifts that would leak the very thing we're hiding from the receiver.
+    // We swap to a generic mystery title with no body, identical for
+    // every surprise gift so even traffic-analysis can't infer the shop.
+    void this.notifications.trigger({
+      userId: receiver.id,
+      type: NotificationType.GiftReceived,
+      title: isSurprise ? 'وصلتك هدية مفاجأة 🎁' : 'وصلتك هدية جديدة 🎁',
+      body: isSurprise ? null : `${productName} — ${storeName}`,
+      link: '/gifts',
+    });
+    void this.notifications.trigger({
+      userId: receiver.id,
+      type: NotificationType.GiftConfirmAddress,
+      title: 'يرجى تأكيد عنوان استلام الهدية',
+      body: null,
+      link: '/gifts',
+    });
+
+    return created;
+  }
+
+  async findOne(giftId: string, viewerUserId: string) {
+    const gift = await this.prisma.gift.findUnique({
+      where: { id: giftId },
+      include: GIFT_INCLUDE,
+    });
+    if (!gift) throw new NotFoundException('Gift not found');
+    if (viewerUserId !== gift.senderId && viewerUserId !== gift.receiverId) {
+      throw new ForbiddenException(FORBIDDEN_MSG);
+    }
+    return applyGiftVisibility(gift as GiftWithParties, viewerUserId);
+  }
+
+  // Receiver locks in the delivery address. If they pass an addressId we
+  // use that one (after verifying ownership); otherwise we fall back to
+  // their default. This is the only `pending_address → address_confirmed`
+  // path; the 24h auto-default sweep handles the alternate edge.
+  async confirmAddress(
+    giftId: string,
+    viewerUserId: string,
+    addressId?: string,
+  ) {
+    const gift = await this.prisma.gift.findUnique({ where: { id: giftId } });
+    if (!gift) throw new NotFoundException('Gift not found');
+    if (gift.receiverId !== viewerUserId) {
+      throw new ForbiddenException(FORBIDDEN_MSG);
+    }
+    // Strict transition. Idempotent same-state confirms throw — clients
+    // that want forgiving behaviour can short-circuit before calling.
+    assertTransition(gift.status, 'address_confirmed');
+
+    let chosenAddressId: string | null = null;
+    if (addressId) {
+      const owned = await this.prisma.address.findFirst({
+        where: { id: addressId, userId: viewerUserId },
+        select: { id: true },
+      });
+      if (!owned) {
+        throw new BadRequestException('العنوان غير موجود أو لا يخصك');
+      }
+      chosenAddressId = owned.id;
+    } else {
+      const def = await this.prisma.address.findFirst({
+        where: { userId: viewerUserId, isDefault: true },
+        select: { id: true },
+      });
+      if (!def) {
+        throw new BadRequestException('لا يوجد عنوان افتراضي لتأكيده');
+      }
+      chosenAddressId = def.id;
+    }
+
+    const updated = await this.prisma.gift.update({
+      where: { id: giftId },
+      data: {
+        status: 'address_confirmed' satisfies GiftStatus,
+        addressId: chosenAddressId,
+        // Stamp once. If the gift is ever revisited later for any reason
+        // we keep the original confirmation timestamp.
+        confirmedAt: gift.confirmedAt ?? new Date(),
+      },
+      include: GIFT_INCLUDE,
+    });
+
+    void this.notifications.trigger({
+      userId: gift.senderId,
+      type: NotificationType.GiftAddressConfirmed,
+      title: 'تم تأكيد العنوان وجاري التجهيز',
+      body: updated.productName,
+      link: '/gifts',
+    });
+
+    // Visibility gate. The receiver is calling this — without the gate
+    // they'd see `messageText` + `mediaUrl` (and the anonymous sender's
+    // identity, on anonymous gifts) in the response, even though the
+    // gift hasn't been delivered yet. The fix is to route every gift
+    // return through the same helper as findOne / findSent / findReceived.
+    return applyGiftVisibility(updated as GiftWithParties, viewerUserId);
+  }
+
+  // Note: the unscoped `findAll()` method (used by the now-removed
+  // `GET /gifts` controller route) was deleted. It returned every gift
+  // in the system without any visibility filter, which would have
+  // leaked messages, media, and addresses across users.
+
+  async findSent(senderId: string, viewerUserId: string) {
+    if (senderId !== viewerUserId) {
+      throw new ForbiddenException(FORBIDDEN_MSG);
+    }
+    const list = (await this.prisma.gift.findMany({
+      where: { senderId },
+      include: GIFT_INCLUDE,
+      orderBy: { createdAt: 'desc' },
+    })) as GiftWithParties[];
+    return list.map((g) => applyGiftVisibility(g, senderId));
+  }
+
+  async findReceived(receiverId: string, viewerUserId: string) {
+    if (receiverId !== viewerUserId) {
+      throw new ForbiddenException(FORBIDDEN_MSG);
+    }
+    const list = (await this.prisma.gift.findMany({
+      where: { receiverId },
+      include: GIFT_INCLUDE,
+      orderBy: { createdAt: 'desc' },
+    })) as GiftWithParties[];
+    return list.map((g) => applyGiftVisibility(g, receiverId));
+  }
+}
+
+// Privacy-preserving city-match check, duplicated here so the gifts service
+// doesn't have to depend on UsersService (which would create a module
+// import cycle). The algorithm is identical to UsersService.canDeliverFast
+// — keep them in sync. Returns ONLY a boolean; we never log or surface the
+// matched address.
+async function canDeliverFastInline(
+  prisma: PrismaService,
+  receiverId: string,
+  storeCity: string,
+): Promise<boolean> {
+  const target = normaliseCity(storeCity);
+  if (!target) return false;
+  const rows = await prisma.address.findMany({
+    where: { userId: receiverId },
+    select: { city: true },
+  });
+  return rows.some((row) => normaliseCity(row.city) === target);
+}
+
+function normaliseCity(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/[ً-ْٰ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}

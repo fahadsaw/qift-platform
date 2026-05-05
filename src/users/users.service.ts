@@ -1,0 +1,517 @@
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+
+// Whitelist of fields that are safe to ship over the wire. `passwordHash`
+// is never included so it cannot leak through any user endpoint.
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  qiftUsername: true,
+  phone: true,
+  email: true,
+  defaultAddress: true,
+  createdAt: true,
+} satisfies Prisma.UserSelect;
+
+@Injectable()
+export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
+  constructor(private prisma: PrismaService) {}
+
+  // Canonical username normalisation. Used by every endpoint that looks up
+  // a user by qiftUsername — keeping this in one place means callers can't
+  // accidentally drift apart on rules.
+  //
+  //   "  @Sara.M  " → "sara.m"
+  //   "@@noura"     → "noura"      (defensive; multiple leading @s)
+  //   "  "          → null         (treat as missing)
+  //   undefined     → null
+  //
+  // Trim + strip leading "@" + lowercase. Registration already stores the
+  // username in this exact normal form (see AuthService.register) so a
+  // direct equality query against the column is safe after this pass.
+  private normalizeUsername(raw: string | undefined | null): string | null {
+    if (raw == null) return null;
+    let s = raw.trim();
+    while (s.startsWith('@')) s = s.slice(1);
+    s = s.trim().toLowerCase();
+    return s.length > 0 ? s : null;
+  }
+
+  create(data: Prisma.UserUncheckedCreateInput) {
+    return this.prisma.user.create({
+      data,
+      select: SAFE_USER_SELECT,
+    });
+  }
+
+  findAll() {
+    return this.prisma.user.findMany({
+      select: SAFE_USER_SELECT,
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  findOne(id: string) {
+    return this.prisma.user.findUnique({
+      where: { id },
+      select: SAFE_USER_SELECT,
+    });
+  }
+
+  findByUsername(qiftUsername: string) {
+    return this.prisma.user.findUnique({
+      where: { qiftUsername },
+      select: SAFE_USER_SELECT,
+    });
+  }
+
+  // Profile envelope for the authenticated viewer. Bundles the safe user
+  // fields with `hasDefaultAddress` and `isSuspended` so the UI can render
+  // the suspension banner without a follow-up call. Suspension is purely
+  // address-derived: no default address ⇒ suspended.
+  async getProfile(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        ...SAFE_USER_SELECT,
+        addresses: {
+          where: { isDefault: true },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    if (!user) throw new NotFoundException('User not found');
+    const { addresses, ...safe } = user;
+    const hasDefaultAddress = addresses.length > 0;
+    return {
+      ...safe,
+      hasDefaultAddress,
+      isSuspended: !hasDefaultAddress,
+    };
+  }
+
+  // Public-ish lookup used by the /send page to gate the form before any
+  // payment is attempted. We deliberately return only the minimum needed
+  // for the receiver-card preview — never the phone, email, or any PII.
+  //
+  // When `fastCity` is provided we ALSO compute `canDeliverFast`: a boolean
+  // saying whether the receiver has at least one address in that city. We
+  // never return WHICH city matched, the address id, or any other detail.
+  // This is the only fast-delivery signal the sender's UI receives.
+  async checkByUsername(qiftUsername: string, fastCity?: string) {
+    const username = this.normalizeUsername(qiftUsername);
+    if (!username) {
+      return {
+        exists: false as const,
+        hasDefaultAddress: false,
+        canDeliverFast: fastCity ? false : null,
+      };
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { qiftUsername: username },
+      select: {
+        id: true,
+        qiftUsername: true,
+        fullName: true,
+        addresses: {
+          where: { isDefault: true },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    if (!user) {
+      return {
+        exists: false as const,
+        hasDefaultAddress: false,
+        canDeliverFast: fastCity ? false : null,
+      };
+    }
+    const canDeliverFast = fastCity
+      ? await this.canDeliverFast(user.id, fastCity)
+      : null;
+    return {
+      exists: true as const,
+      qiftUsername: user.qiftUsername,
+      fullName: user.fullName,
+      hasDefaultAddress: user.addresses.length > 0,
+      // `null` when no fastCity was supplied — the UI uses `null` as the
+      // "this product isn't fast delivery, ignore the field" signal.
+      canDeliverFast,
+    };
+  }
+
+  // GET /users/@/:username — public profile lookup.
+  //
+  // Privacy is enforced here, not at the schema layer: the response only
+  // contains fields the viewer is allowed to see, and stats counts for
+  // disabled visibility flags are simply not included. The frontend
+  // distinguishes "hidden" from "zero" by field presence ("if 'followers'
+  // in stats" vs falling back).
+  //
+  // Self-viewing produces isFollowing=false and isFollowedBy=false naturally
+  // (no Follow row exists where followerId === followingId — that's also
+  // blocked by the FollowsService self-check). Self-viewing of one's own
+  // *private* account still returns the limited shape; the owner's full
+  // self-view lives at GET /users/me.
+  async getPublicProfile(viewerId: string, rawUsername: string) {
+    this.logger.log(
+      `getPublicProfile: incoming raw username=${JSON.stringify(rawUsername)}`,
+    );
+    const username = this.normalizeUsername(rawUsername);
+    this.logger.log(
+      `getPublicProfile: normalized username=${JSON.stringify(username)}`,
+    );
+
+    if (!username) {
+      this.logger.warn('getPublicProfile: empty after normalisation → 404');
+      throw new NotFoundException('user_not_found');
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: { qiftUsername: username, deletedAt: null },
+      select: {
+        id: true,
+        fullName: true,
+        qiftUsername: true,
+        bio: true,
+        avatarUrl: true,
+        profileVisibility: true,
+        showFollowers: true,
+        showFollowing: true,
+        showGiftsSent: true,
+        showGiftsReceived: true,
+      },
+    });
+    this.logger.log(
+      `getPublicProfile: db match for "${username}" → ${user ? `user ${user.id}` : 'none'}`,
+    );
+    if (!user) throw new NotFoundException('user_not_found');
+
+    const isPrivate = user.profileVisibility === 'private';
+
+    // Skip count queries entirely for stats the viewer can't see — saves
+    // both the round-trip and the chance of leakage via server-side logs.
+    const wantFollowers = !isPrivate && user.showFollowers;
+    const wantFollowing = !isPrivate && user.showFollowing;
+    const wantGiftsSent = !isPrivate && user.showGiftsSent;
+    const wantGiftsReceived = !isPrivate && user.showGiftsReceived;
+
+    const [
+      followingRow,
+      followedByRow,
+      followersCount,
+      followingCount,
+      giftsSentCount,
+      giftsReceivedCount,
+    ] = await Promise.all([
+      // isFollowing — does the viewer follow this user
+      this.prisma.follow.findFirst({
+        where: {
+          followerId: viewerId,
+          followingId: user.id,
+          status: 'accepted',
+        },
+        select: { followerId: true },
+      }),
+      // isFollowedBy — does this user follow the viewer
+      this.prisma.follow.findFirst({
+        where: {
+          followerId: user.id,
+          followingId: viewerId,
+          status: 'accepted',
+        },
+        select: { followerId: true },
+      }),
+      wantFollowers
+        ? this.prisma.follow.count({
+            where: {
+              followingId: user.id,
+              status: 'accepted',
+              follower: { deletedAt: null },
+            },
+          })
+        : Promise.resolve(undefined),
+      wantFollowing
+        ? this.prisma.follow.count({
+            where: {
+              followerId: user.id,
+              status: 'accepted',
+              following: { deletedAt: null },
+            },
+          })
+        : Promise.resolve(undefined),
+      wantGiftsSent
+        ? this.prisma.gift.count({
+            where: {
+              senderId: user.id,
+              // Cancelled gifts didn't actually happen — exclude from public
+              // counts. Status enum lives as String in the schema; allowed
+              // values are documented on Gift.status.
+              status: { not: 'cancelled' },
+            },
+          })
+        : Promise.resolve(undefined),
+      wantGiftsReceived
+        ? this.prisma.gift.count({
+            where: {
+              receiverId: user.id,
+              status: { not: 'cancelled' },
+            },
+          })
+        : Promise.resolve(undefined),
+    ]);
+
+    const isFollowing = !!followingRow;
+    const isFollowedBy = !!followedByRow;
+
+    if (isPrivate) {
+      // Limited shape. Bio and stats are deliberately omitted, regardless
+      // of show* flags — those flags only apply to public profiles.
+      return {
+        id: user.id,
+        fullName: user.fullName,
+        qiftUsername: user.qiftUsername,
+        avatarUrl: user.avatarUrl,
+        profileVisibility: user.profileVisibility,
+        isFollowing,
+        isFollowedBy,
+      };
+    }
+
+    // Public shape — privacy-gated stats. Each stat key is only present
+    // when the corresponding show* flag is true.
+    const stats: {
+      followers?: number;
+      following?: number;
+      giftsSent?: number;
+      giftsReceived?: number;
+    } = {};
+    if (followersCount !== undefined) stats.followers = followersCount;
+    if (followingCount !== undefined) stats.following = followingCount;
+    if (giftsSentCount !== undefined) stats.giftsSent = giftsSentCount;
+    if (giftsReceivedCount !== undefined)
+      stats.giftsReceived = giftsReceivedCount;
+
+    return {
+      id: user.id,
+      fullName: user.fullName,
+      qiftUsername: user.qiftUsername,
+      bio: user.bio,
+      avatarUrl: user.avatarUrl,
+      profileVisibility: user.profileVisibility,
+      stats,
+      isFollowing,
+      isFollowedBy,
+    };
+  }
+
+  // Loads the target user for the per-user list endpoints below, with the
+  // privacy fields the caller needs to gate access. Throws 404 for missing
+  // or soft-deleted users so callers can't probe deletion.
+  private async loadTargetWithFlags(userId: string) {
+    const target = await this.prisma.user.findFirst({
+      where: { id: userId, deletedAt: null },
+      select: {
+        id: true,
+        profileVisibility: true,
+        showGiftsReceived: true,
+        showGiftsSent: true,
+      },
+    });
+    if (!target) throw new NotFoundException('user_not_found');
+    return target;
+  }
+
+  // GET /users/:userId/gifts/received — public received-gifts list.
+  //
+  // Privacy: gated by both `showGiftsReceived` AND profileVisibility !==
+  // 'private'. Mirroring how getPublicProfile hides stats for private
+  // accounts — we don't want a private account's gift history to be
+  // browsable just because the granular flag was left on.
+  //
+  // Field surface: deliberately narrow. Excludes messageText, mediaUrl,
+  // mediaType, addressId, tracking fields — those are private-by-default
+  // on the Gift model. `otherUser` is the sender, masked entirely (set to
+  // null) when the gift is anonymous.
+  //
+  // Cancelled gifts and gifts whose sender has been soft-deleted are
+  // dropped. Newest first.
+  async listReceivedGifts(targetUserId: string) {
+    const target = await this.loadTargetWithFlags(targetUserId);
+    if (target.profileVisibility === 'private' || !target.showGiftsReceived) {
+      throw new ForbiddenException('gifts_received_hidden');
+    }
+
+    const gifts = await this.prisma.gift.findMany({
+      where: {
+        receiverId: targetUserId,
+        status: { not: 'cancelled' },
+        // Anonymous gifts are kept; non-anonymous ones must have a live sender.
+        OR: [{ isAnonymous: true }, { sender: { deletedAt: null } }],
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        productName: true,
+        storeName: true,
+        isAnonymous: true,
+        createdAt: true,
+        sender: {
+          select: {
+            id: true,
+            fullName: true,
+            qiftUsername: true,
+            avatarUrl: true,
+          },
+        },
+      },
+    });
+
+    const items = gifts.map((g) => ({
+      id: g.id,
+      productName: g.productName,
+      storeName: g.storeName,
+      isAnonymous: g.isAnonymous,
+      createdAt: g.createdAt,
+      // Anonymous → drop sender entirely. Frontend renders "Sent anonymously"
+      // and shows no avatar / username for these rows.
+      otherUser: g.isAnonymous ? null : g.sender,
+    }));
+
+    return { items, total: items.length };
+  }
+
+  // GET /users/:userId/gifts/sent — public sent-gifts list.
+  //
+  // Privacy: gated by both `showGiftsSent` AND profileVisibility !==
+  // 'private'. `isAnonymous` on a sent row is informational only — the
+  // sender (this profile) is the same as the target, so identity isn't
+  // hidden. The receiver is always shown.
+  //
+  // Same field-surface narrowing as listReceivedGifts. Cancelled and
+  // dead-receiver rows are dropped.
+  async listSentGifts(targetUserId: string) {
+    const target = await this.loadTargetWithFlags(targetUserId);
+    if (target.profileVisibility === 'private' || !target.showGiftsSent) {
+      throw new ForbiddenException('gifts_sent_hidden');
+    }
+
+    const gifts = await this.prisma.gift.findMany({
+      where: {
+        senderId: targetUserId,
+        status: { not: 'cancelled' },
+        receiver: { deletedAt: null },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        productName: true,
+        storeName: true,
+        isAnonymous: true,
+        createdAt: true,
+        receiver: {
+          select: {
+            id: true,
+            fullName: true,
+            qiftUsername: true,
+            avatarUrl: true,
+          },
+        },
+      },
+    });
+
+    const items = gifts.map((g) => ({
+      id: g.id,
+      productName: g.productName,
+      storeName: g.storeName,
+      isAnonymous: g.isAnonymous,
+      createdAt: g.createdAt,
+      otherUser: g.receiver,
+    }));
+
+    return { items, total: items.length };
+  }
+
+  // GET /users/:userId/wishes — public wishlist.
+  //
+  // Privacy: gated by profileVisibility !== 'private' (no per-user wish
+  // privacy flag — only per-row Wish.visibility). Private accounts hide
+  // all wishes regardless of per-row visibility, matching the gift list
+  // semantics above.
+  //
+  // Returns only Wish rows with visibility = 'public'. Per-row private
+  // wishes are owner-visible only and would be served by a separate
+  // /users/me/wishes endpoint when that lands.
+  async listWishes(targetUserId: string) {
+    const target = await this.loadTargetWithFlags(targetUserId);
+    if (target.profileVisibility === 'private') {
+      throw new ForbiddenException('wishes_hidden');
+    }
+
+    const wishes = await this.prisma.wish.findMany({
+      where: {
+        userId: targetUserId,
+        visibility: 'public',
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        title: true,
+        store: true,
+        createdAt: true,
+      },
+    });
+
+    return { items: wishes, total: wishes.length };
+  }
+
+  // Privacy-preserving city-match check for fast-delivery products.
+  //
+  // Returns ONLY a boolean. We never expose the matching address, the
+  // receiver's other cities, the count of matches, or anything else — the
+  // sender already knows the store's city, so the only new bit of info
+  // they learn is "yes/no, this gift can be delivered". That's the same
+  // information surface as `hasDefaultAddress`.
+  //
+  // Matching is case-insensitive and trim-tolerant. We use Prisma's `equals`
+  // with a normalised value so SQLite's default collation doesn't trip us up
+  // on Arabic strings.
+  async canDeliverFast(
+    receiverId: string,
+    storeCity: string,
+  ): Promise<boolean> {
+    const city = storeCity.trim();
+    if (!city) return false;
+    // Pull only the city field for the receiver's addresses, then compare
+    // in JS so we get reliable Arabic case/space normalisation. We never
+    // return these values to the caller — they stay inside the function.
+    const rows = await this.prisma.address.findMany({
+      where: { userId: receiverId },
+      select: { city: true },
+    });
+    const target = normaliseCity(city);
+    return rows.some((row) => normaliseCity(row.city) === target);
+  }
+}
+
+// Lower-case, collapse whitespace, strip Arabic diacritics so that
+// "الرياض  " matches "الرياض" matches "ٱلرياض". Same algorithm has to be
+// used on both sides of the equality check.
+function normaliseCity(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/[ً-ْٰ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}

@@ -1,0 +1,485 @@
+// Qift platform schema.
+//
+// Datasource is SQLite (see datasource block below). A few SQLite-specific
+// constraints to keep in mind when extending this file:
+//   - Prisma `enum` declarations are not used; allowed values for status-like
+//     columns are documented inline as comments next to each field.
+//   - All `@unique`/`@@unique` constraints are case-sensitive. Username and
+//     email are normalised to lowercase at the application layer.
+//   - Foreign-key cascade rules behave the same as Postgres in Prisma's
+//     emitted SQL, so `onDelete: Cascade | SetNull | Restrict` are honoured.
+//
+// Naming convention: camelCase fields in Prisma (Prisma maps these to the
+// same names in the SQLite tables — no `@@map` is used elsewhere in this
+// file, so we keep that consistency here too).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String  @id @default(cuid())
+  fullName       String?
+  phone          String  @unique
+  email          String? @unique
+  qiftUsername   String  @unique
+  passwordHash   String?
+  defaultAddress String?
+  // "user" | "store" — store-role users own at least one Store row and
+  // can access /store-dashboard. The role is mostly cosmetic (we still
+  // enforce ownership on every store/product mutation), but having it on
+  // the User makes it cheap to render the right UI without an extra
+  // round-trip.
+  role           String  @default("user")
+
+  // -- Profile content (added in Step 2) --
+  // Short biography rendered on /u/[username]. App-level cap of 280 chars
+  // (mirrors the frontend constraint). Null until the user fills it in.
+  bio       String?
+  // Public avatar URL (object storage). Until set, the UI falls back to
+  // a gradient + initials avatar derived from `fullName` / `qiftUsername`.
+  avatarUrl String?
+
+  // -- Privacy flags (added in Step 2) --
+  // "public" | "private". When private, /u/[username] returns the limited
+  // profile view (avatar + name + handle + private-account message).
+  profileVisibility String  @default("public")
+  // Per-section privacy. The API enforces these — the schema only stores
+  // them. When false, the corresponding count or list is omitted from
+  // /users/@/:username responses entirely (the client sees an absent field
+  // rather than a "0" or a forbidden flag).
+  showGiftsReceived Boolean @default(true)
+  showGiftsSent     Boolean @default(true)
+  showFollowers     Boolean @default(true)
+  showFollowing     Boolean @default(true)
+
+  // -- Account state --
+  // Read by /users/me. The frontend renders the red "address required"
+  // banner when this is true.
+  isSuspended Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  // Soft-delete sentinel. Required because Gift FKs use Cascade (see Gift
+  // relations below): hard-deleting a User would also delete every gift
+  // they were involved in. Soft-deleting (setting this column) preserves
+  // history; the API filters live users via `where deletedAt is null`.
+  deletedAt   DateTime?
+
+  addresses         Address[]
+  socialAccounts    SocialAccount[]
+  sentGifts         Gift[]             @relation("SenderGifts")
+  receivedGifts     Gift[]             @relation("ReceiverGifts")
+  orders            Order[]
+  notifications     Notification[]
+  ownedStores       Store[]
+  pushSubscriptions PushSubscription[]
+  // Follows (added in Step 2). `following` = rows where this user IS the
+  // follower; `followers` = rows where this user IS being followed.
+  following         Follow[]           @relation("OutgoingFollows")
+  followers         Follow[]           @relation("IncomingFollows")
+  // Wishlist items. Per-Wish visibility ("public" | "private") gates which
+  // ones appear on /u/:username; the owner sees them all on /profile.
+  wishes            Wish[]
+  // Failed gift-send attempts where this user was the sender or the
+  // receiver. We notify the sender once the receiver finally sets a
+  // default address. See model GiftAttempt below.
+  attemptedGifts    GiftAttempt[] @relation("SenderAttempts")
+  pendingAttempts   GiftAttempt[] @relation("ReceiverAttempts")
+}
+
+model Address {
+  id               String  @id @default(cuid())
+  userId           String
+  label            String?
+  country          String
+  region           String?
+  city             String
+  governorate      String?
+  district         String
+  street           String?
+  buildingNumber   String?
+  unitNumber       String?
+  postalCode       String?
+  additionalNumber String?
+  shortAddress     String?
+  deliveryPhone    String?
+  lat              Float?
+  lng              Float?
+  details          String
+  isDefault        Boolean @default(false)
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gifts Gift[] @relation("GiftDeliveryAddress")
+
+  @@index([userId])
+}
+
+model SocialAccount {
+  id        String   @id @default(cuid())
+  userId    String
+  platform  String
+  handle    String
+  url       String?
+  verified  Boolean  @default(false)
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([platform, handle])
+  @@index([userId])
+}
+
+model Gift {
+  id          String  @id @default(cuid())
+  senderId    String
+  receiverId  String
+  productName String
+  storeName   String
+  // Optional FK to the Store row that owns this order. Legacy gifts
+  // (and gifts shipped from sample/demo stores) leave this null and
+  // never appear in the per-store dashboard. New API-fed orders set it
+  // so the dashboard can filter by ownership.
+  storeId     String?
+  productId   String?
+  // Buyer's gift message — rendered in the receiver's gift detail AFTER
+  // delivery. The store NEVER sees this field; the message-reveal gate
+  // strips it from any non-sender, non-delivered viewer.
+  messageText String?
+  // Optional media attachment (image or video URL). Same privacy rules
+  // as messageText — masked for receiver until delivery, never exposed
+  // to the store. mediaType discriminates the renderer on the receiver
+  // side ("image" → <img>, "video" → <video>).
+  mediaUrl    String?
+  mediaType   String?
+  // Final v3 pipeline:
+  //   pending_address      → waiting on the receiver
+  //   address_confirmed    → receiver picked an address
+  //   default_address_used → 24h elapsed; we used their default
+  //   preparing            → store accepted the order
+  //   shipped              → courier handed off
+  //   delivered            → arrived
+  //   cancelled            → either party (or admin) cancelled
+  status      String  @default("pending_address")
+  isAnonymous Boolean @default(false)
+  // Sender-controlled "surprise mode". When true, the receiver is told a
+  // gift is on the way but `productName` / `storeName` are masked from
+  // their view until status === 'delivered'. Default `false` means
+  // visible-immediately (current pre-flag behaviour) so existing rows
+  // and existing callers don't change semantics. The store + sender
+  // ALWAYS see real values; the mask is purely a receiver-side reveal.
+  isSurprise  Boolean @default(false)
+  addressId   String?
+
+  // Tracking timestamps. Each one is written exactly once (the first time
+  // the gift enters that phase) so the timeline can render the full
+  // history regardless of later transitions.
+  confirmedAt    DateTime?
+  shippedAt      DateTime?
+  deliveredAt    DateTime?
+  trackingNumber String?
+  carrier        String?
+
+  createdAt DateTime @default(now())
+
+  sender   User     @relation("SenderGifts", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User     @relation("ReceiverGifts", fields: [receiverId], references: [id], onDelete: Cascade)
+  address  Address? @relation("GiftDeliveryAddress", fields: [addressId], references: [id], onDelete: SetNull)
+  store    Store?   @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  product  Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  order    Order?
+
+  @@index([senderId])
+  @@index([receiverId])
+  // Per-store dashboard query: find every order for stores X belongs to.
+  @@index([storeId, status])
+  // Used by the 24h auto-default sweep (find pending gifts past their TTL).
+  @@index([status, createdAt])
+}
+
+// Failed gift-send attempts. Created when a sender tries to send a gift
+// but the receiver has no default delivery address. We block the gift
+// (no Gift row is written) and instead persist enough context here to:
+//   1. Notify the receiver that someone tried to send them something.
+//   2. Notify the sender once the receiver fixes their address — this
+//      is the resolve-on-default-set hook in AddressesService.
+//
+// We deliberately do NOT store messageText / mediaUrl. Those are private
+// content the receiver hasn't earned the right to see, and they're
+// irrelevant to the "you can now retry" notification. productName /
+// storeName are safe — sender chose to share them and they'll be re-
+// entered when the sender retries the send anyway.
+//
+// `resolvedAt` is set when the sender has been pinged for this row (or
+// when the row was deliberately dropped — e.g. account deletion). The
+// resolve-on-default-set query filters on `resolvedAt IS NULL` so a row
+// is only ever notified once.
+model GiftAttempt {
+  id               String    @id @default(cuid())
+  senderId         String
+  receiverId       String
+  // Snapshot of the username at attempt time so a future receiver
+  // rename doesn't break the audit trail.
+  receiverUsername String
+  productName      String?
+  storeName        String?
+  createdAt        DateTime  @default(now())
+  notifiedAt       DateTime?
+  resolvedAt       DateTime?
+
+  sender   User @relation("SenderAttempts", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("ReceiverAttempts", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  // Resolve-on-default-set lookup: WHERE receiverId = ? AND resolvedAt IS NULL.
+  @@index([receiverId, resolvedAt])
+  @@index([senderId])
+}
+
+// First-class store catalog. Every Store has exactly one owner (the User
+// who registered it). Integration metadata lives here too so we can
+// migrate stores between manual / API / Shopify / etc. without touching
+// product rows.
+model Store {
+  id                String   @id @default(cuid())
+  name              String
+  ownerId           String
+  city              String
+  category          String
+  // "none" | "api" | "shopify" | "woocommerce" | "custom"
+  integrationType   String   @default("none")
+  // "disconnected" | "connected" | "error"
+  integrationStatus String   @default("disconnected")
+  // Used to verify webhook signatures from the upstream platform. Null
+  // for manual stores; generated when an integration is connected.
+  webhookSecret     String?
+  createdAt         DateTime @default(now())
+
+  owner    User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  products Product[]
+  gifts    Gift[]
+
+  @@index([ownerId])
+}
+
+// Catalog row. `sourceType` discriminates manually-created products from
+// products synced via an upstream integration. The (storeId,
+// externalProductId) unique index is what makes the sync idempotent —
+// re-syncing the same external row updates the same Product instead of
+// creating a duplicate.
+model Product {
+  id                String    @id @default(cuid())
+  storeId           String
+  name              String
+  price             Float
+  imageUrl          String?
+  category          String
+  isFastDelivery    Boolean   @default(false)
+  // "manual" | "api"
+  sourceType        String    @default("manual")
+  externalProductId String?
+  // "in_stock" | "out_of_stock"
+  stockStatus       String    @default("in_stock")
+  isAvailable       Boolean   @default(true)
+  lastSyncedAt      DateTime?
+  createdAt         DateTime  @default(now())
+
+  store Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  gifts Gift[]
+
+  // Upstream platforms use their own ids; pinning uniqueness per-store
+  // means the same Shopify product id can exist across two stores
+  // without colliding.
+  @@unique([storeId, externalProductId])
+  @@index([storeId])
+}
+
+model Order {
+  id               String   @id @default(cuid())
+  userId           String
+  giftId           String?  @unique
+  receiverUsername String
+  productName      String
+  storeName        String
+  // Optional FK to the catalog product / store. Persisted on Order so
+  // the value survives between create and payment-confirm time, when
+  // the Gift gets created and inherits them.
+  productId        String?
+  storeId          String?
+  productPrice     Float
+  serviceFee       Float
+  deliveryFee      Float
+  totalAmount      Float
+  currency         String
+  country          String
+  paymentProvider  String
+  message          String?
+  // Optional media attachment carried from /send → /checkout → POST
+  // /orders. Persisted on Order so the value survives between create
+  // and payment-confirm time, when the Gift gets created and inherits
+  // them. Same privacy rules as Gift.mediaUrl / mediaType — these are
+  // never exposed to the store; the receiver-side reveal gate strips
+  // them until status === 'delivered'.
+  mediaUrl         String?
+  mediaType        String?
+  // Sender's "surprise mode" flag. Carried through the order so the
+  // payment-confirmed Gift inherits it. Default false matches the
+  // Gift schema default.
+  isSurprise       Boolean  @default(false)
+  isAnonymous      Boolean  @default(false)
+  status           String   @default("pending")
+  createdAt        DateTime @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gift    Gift?    @relation(fields: [giftId], references: [id], onDelete: SetNull)
+  payment Payment?
+
+  @@index([userId])
+}
+
+model Otp {
+  id         String    @id @default(cuid())
+  // The phone (E.164) or email this code was sent to. Indexed; not unique
+  // because the same target can have multiple codes over time.
+  target     String
+  // SECURITY: in production this should store an Argon2id/bcrypt HASH of
+  // the code, not the plaintext. The verify endpoint compares the user-
+  // supplied code against the hash. Field name is preserved (rather than
+  // renamed to `codeHash`) to avoid breaking existing rows / NestJS code;
+  // the migration to hashed-at-rest is an app-layer rollout.
+  code       String
+  // "registration" | "login" | "password_reset" | "phone_change"
+  // Frontend currently only uses "registration" via /otp/send + /otp/verify.
+  type       String
+  expiresAt  DateTime
+  // -- Audit / safety fields (added in Step 2) --
+  // Set on successful verify. Once non-null, the code MUST be rejected on
+  // any subsequent verify attempt — one-time-code semantics.
+  consumedAt DateTime?
+  // Counts wrong-code attempts against this row. The verify endpoint
+  // increments on mismatch and locks the row when it crosses a threshold
+  // (e.g. 5). Default 0 keeps backfill trivial.
+  attempts   Int       @default(0)
+  // Captured at /otp/send time for abuse detection / per-IP throttling.
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([target])
+  // The verify endpoint asks "the most recent un-consumed code for this
+  // target + type"; this composite covers it.
+  @@index([target, type, createdAt])
+}
+
+// Browser Web Push subscription. One row per user-device pair, identified
+// by the push service `endpoint` URL. The endpoint is unique per row so
+// repeated `subscribe` calls from the same device upsert in place rather
+// than accumulating dead rows. p256dh + auth are the encryption keys
+// returned by the browser when a PushSubscription is minted.
+//
+// On a 404/410 from the push service (subscription expired/invalidated)
+// the row is deleted automatically — the PushService handles cleanup.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  // User-agent string captured at subscribe-time. Purely informational —
+  // helps the user recognise their own devices in a future settings UI.
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// In-app notifications. One row per delivered notification per user; we
+// don't dedupe so users can see "you got 3 gifts today" as 3 entries.
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  // Free-form discriminator (e.g. "gift.received", "gift.confirm_address",
+  // "gift.ready_for_delivery", "gift.delivered"). Lets the UI render an
+  // icon per category without baking the text into the backend.
+  type      String
+  title     String
+  body      String?
+  // App-relative path the bell/list should navigate to. Null = no action.
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+}
+
+model Payment {
+  id                String   @id @default(cuid())
+  orderId           String   @unique
+  provider          String
+  providerPaymentId String?
+  amount            Float
+  currency          String
+  status            String   @default("pending")
+  createdAt         DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+// Wishlist item. One row = one thing the user wants. Visibility is
+// per-row (not per-user) so a user can have a mix of public and private
+// wishes; the public profile endpoint filters to visibility = 'public'.
+//
+// `store` is a free-form string (mirrors the frontend Wish type — there's
+// no FK to the catalog yet, since wishes can refer to things outside the
+// connected stores). When wishes get linked to real Product rows later,
+// add an optional productId here next to `store`.
+model Wish {
+  id         String   @id @default(cuid())
+  userId     String
+  title      String
+  store      String?
+  // "public" | "private". Matches the frontend Wish.visibility convention.
+  visibility String   @default("public")
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  // Hot path: list a user's public wishes newest-first.
+  @@index([userId, visibility, createdAt])
+}
+
+// Many-to-many social graph (added in Step 2). One row = "follower
+// follows following". The composite primary key prevents duplicates
+// without a separate unique constraint.
+model Follow {
+  followerId  String
+  followingId String
+  // "pending" | "accepted". Public users transition straight to "accepted".
+  // Private users (User.profileVisibility = "private") may sit in
+  // "pending" until they approve the request — the API decides which
+  // value to store at follow-time.
+  status      String    @default("accepted")
+  createdAt   DateTime  @default(now())
+  // Set when status transitions to "accepted". For instant-accept rows
+  // it equals createdAt.
+  acceptedAt  DateTime?
+
+  follower  User @relation("OutgoingFollows", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("IncomingFollows", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followingId])
+  // "Who follows me, newest first" — the followers-list query.
+  @@index([followingId, createdAt])
+  // "Who am I following, newest first" — the following-list query.
+  @@index([followerId, createdAt])
+}
