@@ -35,8 +35,10 @@ async function bootstrap() {
   // De-dupe in case the env already includes a localhost entry.
   const origins = Array.from(new Set([...envOrigins, ...localOrigins]));
   app.enableCors({
-    origin: origins,
+    origin: true,
     credentials: true,
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: '*',
   });
 
   // PORT — every PaaS injects this. Default for local dev only.
