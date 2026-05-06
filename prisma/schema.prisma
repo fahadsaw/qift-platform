@@ -58,6 +58,29 @@ model User {
   showFollowers     Boolean @default(true)
   showFollowing     Boolean @default(true)
 
+  // -- Wishlist preferences (added for MVP private testing) --
+  // All optional; designed to seed AI gift recommendations later. We
+  // store sizes as free-form strings (e.g. "M", "44 EU", "Size 8")
+  // because clothing/shoe/ring sizing varies by region and brand —
+  // forcing a numeric type would lose information. Comma-separated
+  // taste fields (favorite_*) are simple strings for now; the future
+  // recommender can tokenize on commas without a schema migration.
+  preferredClothingSize String?
+  preferredShoeSize     String?
+  preferredRingSize     String?
+  preferredPerfume      String?
+  favoriteColors        String?
+  favoriteCategories    String?
+  favoriteBrands        String?
+  allergies             String?
+  // Sender-side default: when true, friends sending a gift can flip
+  // the "surprise" toggle and the receiver sees the mystery card
+  // (per the existing isSurprise flow). When false, the receiver has
+  // declared they don't want surprises — the /send page can warn
+  // senders. UI gate only; backend doesn't currently enforce it on
+  // gift create.
+  acceptsSurpriseGifts  Boolean @default(true)
+
   // -- Account state --
   // Read by /users/me. The frontend renders the red "address required"
   // banner when this is true.

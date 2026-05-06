@@ -60,6 +60,45 @@ export class UsersController {
     return this.usersService.updatePrivacy(req.user.userId, body);
   }
 
+  // PATCH /users/me/profile — edit display name, bio, avatar URL.
+  // Username/phone/email are intentionally NOT editable here (they
+  // have their own auth-bound flows). See UsersService.updateProfile
+  // for the validation rules.
+  @Patch('me/profile')
+  updateProfile(
+    @Body()
+    body: {
+      fullName?: string | null;
+      bio?: string | null;
+      avatarUrl?: string | null;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.updateProfile(req.user.userId, body);
+  }
+
+  // PATCH /users/me/preferences — wishlist preferences MVP.
+  // All fields optional; nullable strings; one boolean for the
+  // accepts-surprise toggle.
+  @Patch('me/preferences')
+  updatePreferences(
+    @Body()
+    body: {
+      preferredClothingSize?: string | null;
+      preferredShoeSize?: string | null;
+      preferredRingSize?: string | null;
+      preferredPerfume?: string | null;
+      favoriteColors?: string | null;
+      favoriteCategories?: string | null;
+      favoriteBrands?: string | null;
+      allergies?: string | null;
+      acceptsSurpriseGifts?: boolean;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.updatePreferences(req.user.userId, body);
+  }
+
   // Lightweight receiver-existence + address gate, used by /send to decide
   // whether to show the red-username warning before any payment intent. JWT
   // is required so we don't expose username enumeration to anonymous traffic.

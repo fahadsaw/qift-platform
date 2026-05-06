@@ -88,12 +88,24 @@ export class UsersService {
       where: { id: userId },
       select: {
         ...SAFE_USER_SELECT,
+        bio: true,
+        avatarUrl: true,
         // Privacy toggles surfaced to /settings.
         profileVisibility: true,
         showGiftsReceived: true,
         showGiftsSent: true,
         showFollowers: true,
         showFollowing: true,
+        // Wishlist preferences surfaced to /preferences.
+        preferredClothingSize: true,
+        preferredShoeSize: true,
+        preferredRingSize: true,
+        preferredPerfume: true,
+        favoriteColors: true,
+        favoriteCategories: true,
+        favoriteBrands: true,
+        allergies: true,
+        acceptsSurpriseGifts: true,
         addresses: {
           where: { isDefault: true },
           take: 1,
@@ -109,6 +121,127 @@ export class UsersService {
       hasDefaultAddress,
       isSuspended: !hasDefaultAddress,
     };
+  }
+
+  // PATCH /users/me/profile — update the editable identity fields:
+  // display name, bio, and avatar URL. Username + phone + email
+  // changes are NOT supported here; those have separate flows
+  // (username is set at register, phone is OTP-bound, email is a
+  // future verification flow).
+  //
+  // Validation is conservative: trim each input, drop empties to
+  // null, cap lengths to match what the public-profile UI is
+  // designed for. avatarUrl must be a parseable absolute URL —
+  // we don't do hotlink guarantees yet (that's a CDN-rewrite
+  // task), but we reject anything that's plainly not a URL so the
+  // public profile doesn't render broken.
+  async updateProfile(
+    viewerId: string,
+    body: {
+      fullName?: string | null;
+      bio?: string | null;
+      avatarUrl?: string | null;
+    },
+  ) {
+    const data: Prisma.UserUpdateInput = {};
+
+    if (body.fullName !== undefined) {
+      const v = (body.fullName ?? '').trim();
+      if (v.length > 80) {
+        throw new BadRequestException('fullName must be at most 80 chars');
+      }
+      data.fullName = v.length === 0 ? null : v;
+    }
+    if (body.bio !== undefined) {
+      const v = (body.bio ?? '').trim();
+      if (v.length > 280) {
+        throw new BadRequestException('bio must be at most 280 chars');
+      }
+      data.bio = v.length === 0 ? null : v;
+    }
+    if (body.avatarUrl !== undefined) {
+      const v = (body.avatarUrl ?? '').trim();
+      if (v.length === 0) {
+        data.avatarUrl = null;
+      } else {
+        // Reject anything that doesn't look like an http(s) URL.
+        // We don't validate reachability here — the browser's
+        // <img> error handler is the authoritative signal at view
+        // time and a transient CDN outage shouldn't block edits.
+        try {
+          const u = new URL(v);
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+            throw new BadRequestException('avatarUrl must be http(s)');
+          }
+        } catch {
+          throw new BadRequestException('avatarUrl is not a valid URL');
+        }
+        if (v.length > 1024) {
+          throw new BadRequestException('avatarUrl must be at most 1024 chars');
+        }
+        data.avatarUrl = v;
+      }
+    }
+
+    if (Object.keys(data).length === 0) return this.getProfile(viewerId);
+
+    await this.prisma.user.update({ where: { id: viewerId }, data });
+    return this.getProfile(viewerId);
+  }
+
+  // PATCH /users/me/preferences — wishlist preferences MVP. All
+  // fields optional, all lengths capped at 200 (seems generous for
+  // a size string or comma-separated taste list). Comma-separated
+  // strings are a deliberate MVP shape: the future recommender can
+  // tokenize on commas without a schema migration.
+  async updatePreferences(
+    viewerId: string,
+    body: {
+      preferredClothingSize?: string | null;
+      preferredShoeSize?: string | null;
+      preferredRingSize?: string | null;
+      preferredPerfume?: string | null;
+      favoriteColors?: string | null;
+      favoriteCategories?: string | null;
+      favoriteBrands?: string | null;
+      allergies?: string | null;
+      acceptsSurpriseGifts?: boolean;
+    },
+  ) {
+    const data: Prisma.UserUpdateInput = {};
+    const STR_FIELDS: Array<keyof typeof body> = [
+      'preferredClothingSize',
+      'preferredShoeSize',
+      'preferredRingSize',
+      'preferredPerfume',
+      'favoriteColors',
+      'favoriteCategories',
+      'favoriteBrands',
+      'allergies',
+    ];
+    for (const k of STR_FIELDS) {
+      const raw = body[k];
+      if (raw === undefined) continue;
+      if (raw === null) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (data as any)[k] = null;
+        continue;
+      }
+      const v = String(raw).trim();
+      if (v.length > 200) {
+        throw new BadRequestException(`${k} must be at most 200 chars`);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (data as any)[k] = v.length === 0 ? null : v;
+    }
+    if (body.acceptsSurpriseGifts !== undefined) {
+      data.acceptsSurpriseGifts = body.acceptsSurpriseGifts === true;
+    }
+
+    if (Object.keys(data).length === 0) return this.getProfile(viewerId);
+
+    await this.prisma.user.update({ where: { id: viewerId }, data });
+    return this.getProfile(viewerId);
   }
 
   // PATCH /users/me/privacy — update the viewer's privacy toggles.

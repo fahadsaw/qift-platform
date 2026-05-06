@@ -61,8 +61,16 @@ const ADDRESS_SELECT = {
 
 // Per-country required fields. The matrix lives here (server-side) so a
 // malicious client can't bypass it by editing the frontend.
+// Required fields per country. Tuned to match each country's
+// real-world address conventions:
+//   - Saudi Arabia: postal code is OPTIONAL. The Saudi National
+//     Address scheme makes it derivable from the short address
+//     (4-letter + 4-digit code), so requiring it on the form would
+//     block users who only know their short code. The column is
+//     still in the schema and surfaced once known (manually or via
+//     SPL autofill).
 const REQUIRED_BY_COUNTRY: Record<string, Array<keyof AddressInput>> = {
-  SA: ['city', 'district', 'street', 'buildingNumber', 'postalCode'],
+  SA: ['city', 'district', 'street', 'buildingNumber'],
   KW: ['city', 'district', 'street', 'buildingNumber'],
   AE: ['city', 'district', 'street', 'buildingNumber'],
   QA: ['city', 'district', 'street', 'buildingNumber'],
