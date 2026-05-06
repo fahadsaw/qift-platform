@@ -60,6 +60,21 @@ export class UsersController {
     );
   }
 
+  // GET /users/search — real-backend user search. Routed BEFORE the
+  // `@/:username` and `:id` routes so the static path doesn't get
+  // captured by the parameterised ones. JWT-protected so we never
+  // expose this surface anonymously (avoids username/email scraping).
+  // See UsersService.searchUsers for the type allow-list, min-length
+  // gates, projection rules, and viewer-self exclusion.
+  @Get('search')
+  search(
+    @Query('q') q: string,
+    @Query('type') type: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.searchUsers(req.user.userId, q ?? '', type ?? '');
+  }
+
   // GET /users/@/:username — public profile by username, privacy-aware.
   // Auth-protected to match the rest of /users/* and so that the viewer
   // identity is available for computing isFollowing / isFollowedBy. The

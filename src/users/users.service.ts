@@ -107,6 +107,157 @@ export class UsersService {
   // saying whether the receiver has at least one address in that city. We
   // never return WHICH city matched, the address id, or any other detail.
   // This is the only fast-delivery signal the sender's UI receives.
+  // ── User search for the gift-sending flow + the /search page ──────
+  // Real backend search across the User table (qift / phone / email)
+  // and SocialAccount.handle (every other platform).
+  //
+  // Return shape is intentionally minimal:
+  //   { id, qiftUsername, fullName, avatarUrl, matchedField, matchedValue }
+  // We never return phone or email in the payload — even if the search
+  // matched on phone, the response surface is still just the public
+  // identity (so a successful match doesn't leak which OTHER fields a
+  // user has). For social platforms, `matchedValue` IS the handle the
+  // user has explicitly published, so returning it is fine.
+  //
+  // Privacy + safety:
+  //   - Soft-deleted users (deletedAt != null) are filtered out.
+  //   - The viewer's own row is filtered out — searching for yourself
+  //     in a "send a gift" UI is meaningless.
+  //   - phone/email require a longer minimum query (5+ chars) to
+  //     discourage harvesting; qift/social require just 2.
+  //   - Hard cap of 20 rows so a 1-char query can't pull every user.
+  //   - Allow-list of accepted `type` values; anything unknown returns
+  //     an empty list rather than 500.
+  async searchUsers(viewerUserId: string, q: string, type: string) {
+    const term = (q ?? '').trim();
+    const normType = (type ?? '').trim().toLowerCase();
+
+    // Type allow-list. SOCIAL_TYPES are the platforms backed by the
+    // SocialAccount table.
+    const SOCIAL_TYPES = new Set([
+      'snapchat',
+      'tiktok',
+      'instagram',
+      'x',
+      'facebook',
+      'youtube',
+      'threads',
+      'telegram',
+    ]);
+    const SUPPORTED = new Set([
+      'qift',
+      'phone',
+      'email',
+      ...SOCIAL_TYPES,
+    ]);
+    if (!SUPPORTED.has(normType)) return [];
+
+    // Min-length gate. Phone / email leak more contact info per
+    // matched character, so we require a longer prefix.
+    const minLen = normType === 'phone' || normType === 'email' ? 5 : 2;
+    if (term.length < minLen) return [];
+
+    // Common projection — what the search row card actually renders.
+    // Selecting this explicitly (vs passing `include`) avoids ever
+    // serializing phone/email/passwordHash by accident.
+    const PUBLIC_PROJECTION = {
+      id: true,
+      qiftUsername: true,
+      fullName: true,
+      avatarUrl: true,
+    } as const;
+
+    type SearchRow = {
+      id: string;
+      qiftUsername: string;
+      fullName: string | null;
+      avatarUrl: string | null;
+      matchedField: string;
+      matchedValue: string;
+    };
+
+    if (normType === 'qift') {
+      const lower = term.toLowerCase();
+      const rows = await this.prisma.user.findMany({
+        where: {
+          deletedAt: null,
+          NOT: { id: viewerUserId },
+          OR: [
+            { qiftUsername: { contains: lower, mode: 'insensitive' } },
+            { fullName: { contains: term, mode: 'insensitive' } },
+          ],
+        },
+        select: PUBLIC_PROJECTION,
+        take: 20,
+      });
+      return rows.map<SearchRow>((u) => ({
+        ...u,
+        matchedField: 'qift',
+        // matchedValue is the public handle — fine to surface.
+        matchedValue: `@${u.qiftUsername}`,
+      }));
+    }
+
+    if (normType === 'phone') {
+      const rows = await this.prisma.user.findMany({
+        where: {
+          deletedAt: null,
+          NOT: { id: viewerUserId },
+          phone: { contains: term },
+        },
+        select: PUBLIC_PROJECTION,
+        take: 20,
+      });
+      // matchedValue intentionally generic — we don't echo phone back.
+      return rows.map<SearchRow>((u) => ({
+        ...u,
+        matchedField: 'phone',
+        matchedValue: '',
+      }));
+    }
+
+    if (normType === 'email') {
+      const rows = await this.prisma.user.findMany({
+        where: {
+          deletedAt: null,
+          NOT: { id: viewerUserId },
+          email: { contains: term, mode: 'insensitive' },
+        },
+        select: PUBLIC_PROJECTION,
+        take: 20,
+      });
+      return rows.map<SearchRow>((u) => ({
+        ...u,
+        matchedField: 'email',
+        matchedValue: '',
+      }));
+    }
+
+    // Social platform — search the SocialAccount table for matching
+    // handles on this platform, then resolve back to the owner.
+    const accounts = await this.prisma.socialAccount.findMany({
+      where: {
+        platform: normType,
+        handle: { contains: term, mode: 'insensitive' },
+        user: { deletedAt: null },
+        NOT: { userId: viewerUserId },
+      },
+      select: {
+        platform: true,
+        handle: true,
+        user: { select: PUBLIC_PROJECTION },
+      },
+      take: 20,
+    });
+    return accounts.map<SearchRow>((a) => ({
+      ...a.user,
+      matchedField: a.platform,
+      // Social handles are explicitly published by the user — safe to
+      // surface so the searcher can confirm they found the right person.
+      matchedValue: `@${a.handle}`,
+    }));
+  }
+
   async checkByUsername(qiftUsername: string, fastCity?: string) {
     const username = this.normalizeUsername(qiftUsername);
     if (!username) {
