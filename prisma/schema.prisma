@@ -30,6 +30,21 @@ model User {
   qiftUsername   String  @unique
   passwordHash   String?
   defaultAddress String?
+  // Verification timestamps for the canonical contact channels.
+  // Set when a fresh OTP successfully verifies the channel; cleared
+  // when the user changes the channel value (the new value needs a
+  // fresh proof of ownership).
+  //
+  //   phoneVerifiedAt — set at /auth/register (every account is
+  //                      OTP-bound at creation); the existing-rows
+  //                      backfill in the migration sets this to
+  //                      `createdAt` for accounts that pre-date the
+  //                      column.
+  //   emailVerifiedAt — null until an email-OTP flow lands. The
+  //                      /social-accounts page surfaces a Verified /
+  //                      Unverified chip from this column.
+  phoneVerifiedAt DateTime?
+  emailVerifiedAt DateTime?
   // "user" | "store" — store-role users own at least one Store row and
   // can access /store-dashboard. The role is mostly cosmetic (we still
   // enforce ownership on every store/product mutation), but having it on
@@ -161,6 +176,16 @@ model SocialAccount {
   handle    String
   url       String?
   verified  Boolean  @default(false)
+  // Tri-state ownership signal:
+  //   'unverified'    — manual link (current default for /social-accounts).
+  //   'verified'      — OTP / SMS / email OTP proved control (for the
+  //                     channels where that's possible).
+  //   'oauth_verified'— a future OAuth integration confirmed the
+  //                     account ID via the platform's API.
+  // We keep `verified: Boolean` for backward-compat — it should be `true`
+  // whenever verificationLevel != 'unverified'. Reads should prefer
+  // `verificationLevel` for the chip; writes should set both fields.
+  verificationLevel String   @default("unverified")
   isPrimary Boolean  @default(false)
   createdAt DateTime @default(now())
 

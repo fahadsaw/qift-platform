@@ -34,6 +34,10 @@ const PUBLIC_SELECT = {
   platform: true,
   handle: true,
   url: true,
+  // Tri-state ownership signal. The frontend renders a "Verified" /
+  // "Unverified" chip from this — keep it surfaced even while we still
+  // emit the legacy `verified` boolean for older clients.
+  verificationLevel: true,
   verified: true,
   isPrimary: true,
   createdAt: true,
@@ -99,8 +103,11 @@ export class SocialAccountsService {
           userId: viewerUserId,
           platform,
           handle,
-          // verified is FORCED to false. No OAuth, no claim.
+          // Manual links land at the new tri-state default. We set
+          // both columns in lockstep until the legacy `verified`
+          // boolean is removed in a follow-up cleanup PR.
           verified: false,
+          verificationLevel: 'unverified',
           isPrimary: false,
         },
         select: PUBLIC_SELECT,
@@ -148,9 +155,10 @@ export class SocialAccountsService {
         where: { id },
         data: {
           handle,
-          // Editing the handle invalidates any prior "verified" claim.
-          // We're already manual-only so this is just defensive.
+          // Editing the handle invalidates any prior verification claim.
+          // The new value needs its own proof of ownership.
           verified: false,
+          verificationLevel: 'unverified',
         },
         select: PUBLIC_SELECT,
       });

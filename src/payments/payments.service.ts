@@ -33,14 +33,46 @@ export class PaymentsService {
       throw new ForbiddenException(FORBIDDEN_MSG);
     }
 
-    // Idempotent: if already paid and we already created the gift, just
-    // return the latest snapshot.
+    // Idempotent fast-path: if a previous confirm already finished, return
+    // the same snapshot. This catches the common cause of duplicate
+    // payments — a network retry after the response was lost. The race
+    // between two parallel calls is handled below by a guarded UPDATE.
     if (order.status === 'paid' && order.gift) {
       return { order, gift: order.gift };
     }
 
     if (!validatePaymentProvider(order.country, order.paymentProvider)) {
       throw new BadRequestException('Invalid payment provider for country');
+    }
+
+    // Race-safe locking: flip the order from 'pending' → 'processing'
+    // BEFORE we touch the gateway. updateMany with a where-status filter
+    // is the standard "first writer wins" pattern in Prisma — the second
+    // caller's `count` comes back 0 and they bail to the fast-path.
+    //
+    // Without this guard, a double-clicked Pay button (or a network retry
+    // that reached the server twice) could race two gateway charges +
+    // two gift creations against the same order. The unique constraint
+    // on Order.giftId would then 500 the loser at the linking step,
+    // leaving a paid orphan gift behind.
+    const lockResult = await this.prisma.order.updateMany({
+      where: { id: order.id, status: 'pending' },
+      data: { status: 'processing' },
+    });
+    if (lockResult.count === 0) {
+      // Either another caller already moved the order forward, or the
+      // status isn't 'pending' (e.g. earlier 'failed'). Re-read and
+      // either return the paid snapshot or surface the failed state.
+      const refreshed = await this.prisma.order.findUnique({
+        where: { id: order.id },
+        include: { payment: true, gift: true },
+      });
+      if (refreshed?.status === 'paid' && refreshed.gift) {
+        return { order: refreshed, gift: refreshed.gift };
+      }
+      // Order is in some other state (failed / processing without gift);
+      // surface a clean error rather than silently retrying.
+      throw new BadRequestException('Order is not in a payable state');
     }
 
     // Run the (currently mocked) gateway for the provider on this order.
@@ -52,6 +84,8 @@ export class PaymentsService {
     });
     const result = await gateway.confirm(initiated.providerPaymentId);
     if (result.status !== 'paid') {
+      // Roll the lock back to 'failed' so retries can't re-enter; record
+      // the gateway failure on Payment for the dashboard.
       await this.recordFailedPayment(
         order.id,
         order,
@@ -65,34 +99,51 @@ export class PaymentsService {
     // JWT-bound senderId, surprise reveal gate). Every field captured
     // on the Order at /checkout time is forwarded here so the Gift
     // inherits the buyer's full intent.
-    const gift = await this.gifts.create(
-      {
-        receiverUsername: order.receiverUsername,
-        productName: order.productName,
-        storeName: order.storeName,
-        // Order.message is the legacy column name; GiftsService.create
-        // accepts both `messageText` (new) and `message` (legacy) for
-        // backward compatibility, so we can pass it as-is.
-        messageText: order.message ?? undefined,
-        isAnonymous: order.isAnonymous,
-        // Surprise mode is the receive-side reveal gate (productName +
-        // storeName masked until delivery). Carried from Order.
-        isSurprise: order.isSurprise,
-        // Optional media attachment. mediaType is only meaningful when
-        // mediaUrl is set; we forward both as captured.
-        mediaUrl: order.mediaUrl ?? undefined,
-        mediaType:
-          order.mediaType === 'image' || order.mediaType === 'video'
-            ? order.mediaType
-            : undefined,
-        // Forward catalog identifiers so the Gift inherits them. These
-        // were captured on the Order at create-time and survive into
-        // payment confirmation here.
-        productId: order.productId ?? undefined,
-        storeId: order.storeId ?? undefined,
-      },
-      viewerUserId,
-    );
+    let gift;
+    try {
+      gift = await this.gifts.create(
+        {
+          receiverUsername: order.receiverUsername,
+          productName: order.productName,
+          storeName: order.storeName,
+          // Order.message is the legacy column name; GiftsService.create
+          // accepts both `messageText` (new) and `message` (legacy) for
+          // backward compatibility, so we can pass it as-is.
+          messageText: order.message ?? undefined,
+          isAnonymous: order.isAnonymous,
+          // Surprise mode is the receive-side reveal gate (productName +
+          // storeName masked until delivery). Carried from Order.
+          isSurprise: order.isSurprise,
+          // Optional media attachment. mediaType is only meaningful when
+          // mediaUrl is set; we forward both as captured.
+          mediaUrl: order.mediaUrl ?? undefined,
+          mediaType:
+            order.mediaType === 'image' || order.mediaType === 'video'
+              ? order.mediaType
+              : undefined,
+          // Forward catalog identifiers so the Gift inherits them. These
+          // were captured on the Order at create-time and survive into
+          // payment confirmation here.
+          productId: order.productId ?? undefined,
+          storeId: order.storeId ?? undefined,
+        },
+        viewerUserId,
+      );
+    } catch (err) {
+      // Gift creation failed AFTER the gateway charged — record the
+      // failure on the order so the user (and ops) can investigate.
+      // We don't roll back the gateway charge here; that's the
+      // refund-flow's job, which is provider-specific and runs out of
+      // band of this request. The buyer sees a clear "payment captured
+      // but gift could not be created" error from the rethrown
+      // exception below.
+      await this.recordFailedPayment(
+        order.id,
+        order,
+        initiated.providerPaymentId,
+      );
+      throw err;
+    }
 
     // Persist the payment and link the gift to the order in a single
     // transaction so we never end up with a paid order without a gift.

@@ -19,6 +19,12 @@ const SAFE_USER_SELECT = {
   email: true,
   defaultAddress: true,
   createdAt: true,
+  // Verification timestamps. Null means the channel has not been
+  // verified through an OTP / proof-of-ownership flow yet. Set on
+  // /auth/register for phone; reset to null when the user changes
+  // their email (the new address needs a fresh proof).
+  phoneVerifiedAt: true,
+  emailVerifiedAt: true,
 } satisfies Prisma.UserSelect;
 
 @Injectable()
@@ -244,9 +250,11 @@ export class UsersService {
     if (body.email === undefined) return this.getProfile(viewerId);
     const raw = (body.email ?? '').trim();
     if (raw.length === 0) {
+      // Clearing the email also clears the verification stamp — the next
+      // address (if any) needs its own proof of ownership.
       await this.prisma.user.update({
         where: { id: viewerId },
-        data: { email: null },
+        data: { email: null, emailVerifiedAt: null },
       });
       return this.getProfile(viewerId);
     }
@@ -268,9 +276,21 @@ export class UsersService {
     if (existing) {
       throw new BadRequestException('email_taken');
     }
+    // Read the current email so we only invalidate the verification
+    // stamp when the value actually changes — saving the same email
+    // twice shouldn't downgrade an OTP-verified account back to
+    // unverified.
+    const current = await this.prisma.user.findUnique({
+      where: { id: viewerId },
+      select: { email: true },
+    });
+    const isChange = (current?.email ?? null) !== lower;
     await this.prisma.user.update({
       where: { id: viewerId },
-      data: { email: lower },
+      data: {
+        email: lower,
+        ...(isChange ? { emailVerifiedAt: null } : {}),
+      },
     });
     return this.getProfile(viewerId);
   }

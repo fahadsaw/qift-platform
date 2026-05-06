@@ -189,6 +189,11 @@ export class AuthService {
         email,
         passwordHash,
         defaultAddress,
+        // Phone is OTP-verified at this point — the only way to reach
+        // this `create` is through a successful OTP check above. Stamp
+        // phoneVerifiedAt so the social-accounts UI can show a real
+        // "Verified" chip without an extra round-trip.
+        phoneVerifiedAt: new Date(),
       },
     });
 
