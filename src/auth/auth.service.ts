@@ -5,7 +5,16 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcrypt';
+// `bcryptjs` is the pure-JS implementation of bcrypt. We use it
+// instead of the native `bcrypt` package because the latter requires
+// node-gyp + Python + a C++ toolchain at install time, which fails
+// silently on some Railway / Nixpacks builders — the install
+// completes but the .node binary is never produced, and the import
+// throws MODULE_NOT_FOUND at runtime. `bcryptjs` produces hashes in
+// the exact same `$2a$`/`$2b$` format and exposes the same `hash` /
+// `compare` signatures, so swapping is a one-line change with no
+// data migration. Existing password hashes verify identically.
+import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type RegisterInput = {
