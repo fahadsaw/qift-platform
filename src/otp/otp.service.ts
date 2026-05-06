@@ -60,7 +60,26 @@ export class OtpService {
       throw new BadRequestException('target is required');
     }
 
-    const code = this.generateCode();
+    // ── TEMPORARY (private testing) ─────────────────────────────────
+    // When OTP_DEV_MODE is explicitly on, pin the code to 1234 so
+    // testers don't have to dig through Railway logs to find a
+    // random 4-digit code. The Otp row is still inserted into the
+    // DB, verify() still runs the same expiry + single-use checks,
+    // and `resolveOtpMode()` below still routes us into the
+    // dev-banner branch (skipping Taqnyat). Production behaviour is
+    // unchanged — when OTP_DEV_MODE is unset (and a real Taqnyat
+    // token is present), the random code generation path runs as
+    // before.
+    //
+    // Remove this block (and the OTP_DEV_MODE env var) before the
+    // public launch.
+    const isFixedCodeMode =
+      ['1', 'true', 'yes'].includes(
+        process.env.OTP_DEV_MODE?.trim().toLowerCase() ?? '',
+      );
+    const code = isFixedCodeMode ? '1234' : this.generateCode();
+    // ────────────────────────────────────────────────────────────────
+
     const expiresAt = new Date(Date.now() + TTL_MINUTES * 60 * 1000);
 
     // Persist FIRST so the auth flow can verify against the row even if
