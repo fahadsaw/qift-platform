@@ -121,6 +121,10 @@ model User {
   // Reports filed by this user against another. We don't expose the
   // reverse relation publicly — reports are admin-only.
   filedReports      Report[]      @relation("Reporter")
+  // Profile posts (added in Step 3). Each post has one media item
+  // (photo or short video) stored on R2. Visible on /profile (owner)
+  // and on the user's public profile when profile visibility allows.
+  posts             Post[]
 }
 
 model Address {
@@ -557,4 +561,33 @@ model Report {
 
   @@index([status, createdAt])
   @@index([reportedUserId])
+}
+
+// Profile post — one media item (photo or short video) plus an
+// optional caption. Lives on the user's profile feed; the public-
+// profile endpoint filters by viewer privacy. Kept deliberately minimal
+// for the MVP: no comments, likes, or repost graph yet.
+//
+// `mediaType` is one of:
+//   - 'photo' — single image (jpg/png/webp/heic/avif)
+//   - 'video' — short MP4 / WebM clip
+// We store the type explicitly rather than guessing from the URL so
+// signed-URL rotations and CDN rewrites don't break the UI's renderer
+// selection.
+//
+// `mediaUrl` is the public URL returned by MediaService; the bucket
+// itself stays private — only the configured public domain serves
+// reads.
+model Post {
+  id        String   @id @default(cuid())
+  userId    String
+  mediaUrl  String
+  mediaType String
+  caption   String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Hot path: list a user's posts newest-first.
+  @@index([userId, createdAt])
 }

@@ -79,40 +79,71 @@ export class UsersService {
   }
 
   // Profile envelope for the authenticated viewer. Bundles the safe user
-  // fields with `hasDefaultAddress`, `isSuspended`, and the privacy
-  // toggles so the UI can render the suspension banner + the privacy
-  // section without a follow-up call. Suspension is purely
-  // address-derived: no default address ⇒ suspended.
+  // fields with `hasDefaultAddress`, `isSuspended`, the privacy
+  // toggles, and the same `stats` block exposed on the public profile
+  // — so the self-profile UI can render real follower/following/gift
+  // counts without a second round-trip to /users/@/:username. (Before
+  // this, /profile rendered mock zeroes while /u/:username rendered
+  // the real counts.) Suspension is purely address-derived: no
+  // default address ⇒ suspended.
   async getProfile(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        ...SAFE_USER_SELECT,
-        bio: true,
-        avatarUrl: true,
-        // Privacy toggles surfaced to /settings.
-        profileVisibility: true,
-        showGiftsReceived: true,
-        showGiftsSent: true,
-        showFollowers: true,
-        showFollowing: true,
-        // Wishlist preferences surfaced to /preferences.
-        preferredClothingSize: true,
-        preferredShoeSize: true,
-        preferredRingSize: true,
-        preferredPerfume: true,
-        favoriteColors: true,
-        favoriteCategories: true,
-        favoriteBrands: true,
-        allergies: true,
-        acceptsSurpriseGifts: true,
-        addresses: {
-          where: { isDefault: true },
-          take: 1,
-          select: { id: true },
-        },
-      },
-    });
+    const [user, followersCount, followingCount, giftsSentCount, giftsReceivedCount] =
+      await Promise.all([
+        this.prisma.user.findUnique({
+          where: { id: userId },
+          select: {
+            ...SAFE_USER_SELECT,
+            bio: true,
+            avatarUrl: true,
+            // Privacy toggles surfaced to /settings.
+            profileVisibility: true,
+            showGiftsReceived: true,
+            showGiftsSent: true,
+            showFollowers: true,
+            showFollowing: true,
+            // Wishlist preferences surfaced to /preferences.
+            preferredClothingSize: true,
+            preferredShoeSize: true,
+            preferredRingSize: true,
+            preferredPerfume: true,
+            favoriteColors: true,
+            favoriteCategories: true,
+            favoriteBrands: true,
+            allergies: true,
+            acceptsSurpriseGifts: true,
+            addresses: {
+              where: { isDefault: true },
+              take: 1,
+              select: { id: true },
+            },
+          },
+        }),
+        // Followers / following exclude soft-deleted accounts on either
+        // side so the count matches what the user would actually see if
+        // they tapped through to the list.
+        this.prisma.follow.count({
+          where: {
+            followingId: userId,
+            status: 'accepted',
+            follower: { deletedAt: null },
+          },
+        }),
+        this.prisma.follow.count({
+          where: {
+            followerId: userId,
+            status: 'accepted',
+            following: { deletedAt: null },
+          },
+        }),
+        // Cancelled gifts didn't actually happen — exclude from public
+        // counts. Same rule applied in getPublicProfile.
+        this.prisma.gift.count({
+          where: { senderId: userId, status: { not: 'cancelled' } },
+        }),
+        this.prisma.gift.count({
+          where: { receiverId: userId, status: { not: 'cancelled' } },
+        }),
+      ]);
     if (!user) throw new NotFoundException('User not found');
     const { addresses, ...safe } = user;
     const hasDefaultAddress = addresses.length > 0;
@@ -120,6 +151,15 @@ export class UsersService {
       ...safe,
       hasDefaultAddress,
       isSuspended: !hasDefaultAddress,
+      // Self-view: privacy toggles do NOT redact your own counts —
+      // you always see the full picture. Public viewers see the
+      // privacy-gated shape via getPublicProfile.
+      stats: {
+        followers: followersCount,
+        following: followingCount,
+        giftsSent: giftsSentCount,
+        giftsReceived: giftsReceivedCount,
+      },
     };
   }
 
@@ -186,6 +226,52 @@ export class UsersService {
     if (Object.keys(data).length === 0) return this.getProfile(viewerId);
 
     await this.prisma.user.update({ where: { id: viewerId }, data });
+    return this.getProfile(viewerId);
+  }
+
+  // PATCH /users/me/email — set or clear the viewer's email address.
+  //
+  // Kept separate from updateProfile because email lives on a unique
+  // index and merits its own validation/error path (the only way to
+  // hit a 409 here is a duplicate-email collision; bundling that into
+  // updateProfile blurred the failure semantics).
+  //
+  // The email is stored UNVERIFIED. We don't have an email-OTP flow
+  // yet — when one lands, this endpoint should clear an
+  // `emailVerifiedAt` column on update so the next ownership proof
+  // re-issues the verification challenge.
+  async updateEmail(viewerId: string, body: { email?: string | null }) {
+    if (body.email === undefined) return this.getProfile(viewerId);
+    const raw = (body.email ?? '').trim();
+    if (raw.length === 0) {
+      await this.prisma.user.update({
+        where: { id: viewerId },
+        data: { email: null },
+      });
+      return this.getProfile(viewerId);
+    }
+    // Conservative shape check. Catches typos like missing @ or
+    // missing TLD without rejecting valid uncommon shapes (we don't
+    // do full RFC 5322 — that's a tarpit). The DB unique index is
+    // the authoritative final check.
+    const lower = raw.toLowerCase();
+    if (lower.length > 254) {
+      throw new BadRequestException('email must be at most 254 chars');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lower)) {
+      throw new BadRequestException('email is not a valid address');
+    }
+    const existing = await this.prisma.user.findFirst({
+      where: { email: lower, id: { not: viewerId } },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new BadRequestException('email_taken');
+    }
+    await this.prisma.user.update({
+      where: { id: viewerId },
+      data: { email: lower },
+    });
     return this.getProfile(viewerId);
   }
 
@@ -404,11 +490,33 @@ export class UsersService {
     }
 
     if (normType === 'phone') {
+      // Normalize so the same user is findable regardless of whether
+      // the searcher typed the local Saudi format (`05XXXXXXXX`), the
+      // E.164-without-plus (`9665XXXXXXXX`), or the full E.164
+      // (`+9665XXXXXXXX`). All three collapse to a digits-only string
+      // (no `+`, no leading zeros) which is then matched as a
+      // substring against the stored E.164 phone.
+      //
+      //   `+966 50 123 4567` → `966501234567`
+      //   `0501234567`       → `501234567`
+      //   `501234567`        → `501234567`
+      //
+      // Stored phones are E.164 (`+9665...`), so the digits-only
+      // search string is always a substring of the stored value when
+      // the numbers actually match.
+      //
+      // Privacy: re-check length on the NORMALISED digits, not the
+      // raw input. `+9665` looked like 5 chars but is really only 4
+      // digits — we want at least 5 digits of signal before exposing
+      // any matches, otherwise a single common prefix (e.g. country
+      // code) would enumerate huge swathes of the user table.
+      const normalized = term.replace(/[^\d+]/g, '').replace(/^\+/, '').replace(/^0+/, '');
+      if (normalized.length < 5) return [];
       const rows = await this.prisma.user.findMany({
         where: {
           deletedAt: null,
           id: { not: viewerUserId, ...(excludedFilter ?? {}) },
-          phone: { contains: term },
+          phone: { contains: normalized },
         },
         select: PUBLIC_PROJECTION,
         take: 20,

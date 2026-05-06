@@ -77,6 +77,18 @@ export class UsersController {
     return this.usersService.updateProfile(req.user.userId, body);
   }
 
+  // PATCH /users/me/email — set or clear the viewer's email address.
+  // Stored unverified (no email-OTP flow yet). Returns the same
+  // /users/me envelope so the social-accounts page can re-hydrate
+  // without a follow-up call.
+  @Patch('me/email')
+  updateEmail(
+    @Body() body: { email?: string | null },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.updateEmail(req.user.userId, body);
+  }
+
   // PATCH /users/me/preferences — wishlist preferences MVP.
   // All fields optional; nullable strings; one boolean for the
   // accepts-surprise toggle.
