@@ -3,7 +3,43 @@ import { Logger } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 
-const BOOT_TAG = 'qift-api/cors-v2';
+// Bump on every CORS / bootstrap change so the Railway log line
+// confirms which build is live. Search Railway logs for this string
+// after a deploy — if you don't see it, the new build didn't take.
+const BOOT_TAG = 'qift-api/cors-v3';
+
+// Always-allowed local dev origins. Matches any port so Next can pick
+// 3000/3001/3002 freely without breaking CORS.
+const LOCALHOST_REGEX = /^http:\/\/localhost(:\d+)?$/;
+
+// Vercel preview / production aliases for THIS frontend project.
+//
+// Vercel generates a fresh per-deploy URL on every push (including
+// previews from feature branches), and the deletes them when the deploy
+// is removed — so pinning a single URL in CORS_ORIGINS leads to
+// constant breakage. We instead match the family of URLs that Vercel
+// hands out for this project.
+//
+// Pattern breakdown (anchored both ends, HTTPS-only):
+//   ^https:\/\/      → must be HTTPS (no plain-HTTP impostors)
+//   qift-ui-v2       → exact project prefix (rename here if the Vercel
+//                       project is renamed)
+//   [a-z0-9-]*       → optional Vercel-canonical chars only — letters,
+//                       digits, hyphens. NO dots, so a hostile origin
+//                       like `qift-ui-v2.attacker.vercel.app` does NOT
+//                       match.
+//   \.vercel\.app$   → must end exactly at .vercel.app
+//
+// Examples that match:
+//   https://qift-ui-v2.vercel.app
+//   https://qift-ui-v2-git-main-faahad.vercel.app
+//   https://qift-ui-v2-04a3ab46-faahads-projects-0e8d20ec.vercel.app
+// Examples that do NOT match:
+//   https://qift-ui-v2.attacker.vercel.app  (dot in variable part)
+//   https://evil-qift-ui-v2.vercel.app      (wrong prefix)
+//   https://qift-ui-v2.vercel.app.evil.com  (anchor at end)
+//   http://qift-ui-v2.vercel.app            (HTTP, not HTTPS)
+const VERCEL_PROJECT_REGEX = /^https:\/\/qift-ui-v2[a-z0-9-]*\.vercel\.app$/;
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -16,12 +52,21 @@ async function bootstrap() {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const localhostRegex = /^http:\/\/localhost(:\d+)?$/;
-
+  // Origin allow-list. Layered so each layer is independently
+  // verifiable in the boot log (see the closing logger.log call):
+  //   1. No-origin requests (curl, server-to-server, mobile webviews) —
+  //      browsers always send Origin, so missing-Origin is not a CORS
+  //      attack vector. Allow.
+  //   2. Exact match against CORS_ORIGINS env (operator override).
+  //   3. Localhost regex — local dev convenience.
+  //   4. Vercel project regex — covers every preview / production /
+  //      branch URL Vercel hands out for this frontend project.
+  // Anything else falls through to a logged WARN + a CORS rejection.
   const isAllowedOrigin = (origin: string | undefined): boolean => {
     if (!origin) return true;
     if (envOrigins.includes(origin)) return true;
-    if (localhostRegex.test(origin)) return true;
+    if (LOCALHOST_REGEX.test(origin)) return true;
+    if (VERCEL_PROJECT_REGEX.test(origin)) return true;
     return false;
   };
 
@@ -53,9 +98,11 @@ async function bootstrap() {
   await app.listen(port, '0.0.0.0');
 
   logger.log(
-    `[${BOOT_TAG}] listening on 0.0.0.0:${port} — CORS allow-list: ${
-      envOrigins.length > 0 ? envOrigins.join(', ') : '(none)'
-    }`,
+    `[${BOOT_TAG}] listening on 0.0.0.0:${port} — ` +
+      `CORS layers: ` +
+      `envOrigins=[${envOrigins.join(', ') || '(none)'}] ` +
+      `localhost=${LOCALHOST_REGEX.source} ` +
+      `vercelProject=${VERCEL_PROJECT_REGEX.source}`,
   );
 }
 
