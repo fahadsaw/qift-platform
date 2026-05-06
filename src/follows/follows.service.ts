@@ -1,9 +1,19 @@
 import {
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { RateLimiter } from '../common/rate-limiter';
+
+// Per-actor follow rate limit: 30 follow/unfollow actions per minute.
+// Idempotent re-follow doesn't add a row but still costs a hit; that's
+// fine — we want to throttle the action, not the data shape. Tuned
+// generous enough that scrolling-through-search-and-tapping-follow
+// behaves naturally; tight enough that scripted abuse hits the wall.
+const followLimiter = new RateLimiter(30, 60 * 1000);
 
 // Whitelist of fields shipped over the wire for follower / following rows.
 // Mirrors the response shape the frontend SocialListModal already consumes
@@ -39,6 +49,16 @@ export class FollowsService {
   async follow(actorId: string, targetUserId: string) {
     if (actorId === targetUserId) {
       throw new BadRequestException('cannot_follow_self');
+    }
+    if (!followLimiter.hit(`follow:${actorId}`)) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          code: 'follow_rate_limited',
+          message: 'Too many follow actions — slow down for a moment',
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     const target = await this.prisma.user.findFirst({
@@ -82,6 +102,16 @@ export class FollowsService {
   async unfollow(actorId: string, targetUserId: string) {
     if (actorId === targetUserId) {
       throw new BadRequestException('cannot_unfollow_self');
+    }
+    if (!followLimiter.hit(`follow:${actorId}`)) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          code: 'follow_rate_limited',
+          message: 'Too many follow actions — slow down for a moment',
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     await this.prisma.follow.deleteMany({

@@ -1,5 +1,19 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { RateLimiter } from '../common/rate-limiter';
+
+// Per-phone OTP rate limit: 5 sends per 5 minutes. Stops obvious SMS
+// pumping / harassment without burdening normal usage (a typical user
+// hits send once or twice per session). Process-local; under multi-
+// replica deployment the effective ceiling is N×5 — acceptable for
+// the demo. See common/rate-limiter.ts for the implementation note.
+const otpSendLimiter = new RateLimiter(5, 5 * 60 * 1000);
 
 export type OtpType = 'phone' | 'email';
 
@@ -58,6 +72,21 @@ export class OtpService {
 
     if (!target) {
       throw new BadRequestException('target is required');
+    }
+
+    // Rate limit BEFORE writing the row. Returns 429 with a stable code
+    // so the frontend can render a friendly "you've requested too many
+    // codes — try again in a few minutes" message without parsing
+    // localized strings.
+    if (!otpSendLimiter.hit(`otp:${target}`)) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          code: 'otp_rate_limited',
+          message: 'Too many OTP requests — please wait a few minutes',
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     // ── TEMPORARY (private testing) ─────────────────────────────────

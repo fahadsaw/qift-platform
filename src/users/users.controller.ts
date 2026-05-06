@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -37,6 +38,26 @@ export class UsersController {
   @Get('me')
   me(@Req() req: AuthedRequest) {
     return this.usersService.getProfile(req.user.userId);
+  }
+
+  // PATCH /users/me/privacy — update the viewer's privacy toggles.
+  // Body fields are all optional (PATCH semantics); see
+  // UsersService.updatePrivacy for the allow-list + coercion rules.
+  // Returns the same envelope as GET /users/me so the settings UI can
+  // re-hydrate without a follow-up call.
+  @Patch('me/privacy')
+  updatePrivacy(
+    @Body()
+    body: {
+      profileVisibility?: string;
+      showGiftsReceived?: boolean;
+      showGiftsSent?: boolean;
+      showFollowers?: boolean;
+      showFollowing?: boolean;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.updatePrivacy(req.user.userId, body);
   }
 
   // Lightweight receiver-existence + address gate, used by /send to decide

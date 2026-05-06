@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -115,26 +117,66 @@ export class AuthService {
     const password = body.password;
     const defaultAddress = body.defaultAddress?.trim() || null;
 
-    if (!qiftUsername || qiftUsername.length < 3) {
-      throw new BadRequestException('qiftUsername is required (min 3)');
+    // Username rules: 3-20 chars, lowercase letters/digits/underscore
+    // only. Same regex the public profile route validates against, so
+    // a username that creates here will always be reachable at /u/:username.
+    // Disallowed: dots (`a.b`), hyphens (`a-b`), Unicode (`نورة`),
+    // uppercase (normalized away above but explicit anyway). Min length
+    // chosen because <3 chars makes phishing usernames trivial.
+    const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+    if (!qiftUsername) {
+      throw this.fieldError(
+        HttpStatus.BAD_REQUEST,
+        'username_required',
+        'username is required',
+      );
+    }
+    if (!USERNAME_REGEX.test(qiftUsername)) {
+      throw this.fieldError(
+        HttpStatus.BAD_REQUEST,
+        'username_invalid',
+        'username must be 3–20 characters: a-z, 0-9, underscore',
+      );
     }
     if (!password || password.length < 8) {
-      throw new BadRequestException('password must be at least 8 characters');
+      throw this.fieldError(
+        HttpStatus.BAD_REQUEST,
+        'password_too_short',
+        'password must be at least 8 characters',
+      );
     }
 
-    // Uniqueness for username + email (phone uniqueness is implicit —
-    // we know no row exists for this phone, the existing-user branch
-    // above caught that case).
+    // Uniqueness check. Phone is in the OR list defensively even though
+    // the existing-user branch above caught the typical case — a TOCTOU
+    // window between that branch and the create() below would otherwise
+    // surface as a generic Prisma P2002. We want a clean stable code.
     const conflict = await this.prisma.user.findFirst({
       where: {
-        OR: [{ qiftUsername }, ...(email ? [{ email }] : [])],
+        OR: [
+          { qiftUsername },
+          ...(email ? [{ email }] : []),
+          { phone },
+        ],
       },
-      select: { qiftUsername: true, email: true },
+      select: { qiftUsername: true, email: true, phone: true },
     });
     if (conflict) {
-      const field =
-        conflict.qiftUsername === qiftUsername ? 'qiftUsername' : 'email';
-      throw new ConflictException(`${field} already in use`);
+      // Decide which field collided. Order matters when multiple rows
+      // could match — but `findFirst` returns one row, so we just check
+      // each field in priority order against the input.
+      const code =
+        conflict.qiftUsername === qiftUsername
+          ? 'username_taken'
+          : email && conflict.email === email
+            ? 'email_taken'
+            : 'phone_taken';
+      const message =
+        code === 'username_taken'
+          ? 'اسم المستخدم محجوز'
+          : code === 'email_taken'
+            ? 'البريد الإلكتروني مستخدم'
+            : 'رقم الهاتف مستخدم';
+      throw this.fieldError(HttpStatus.CONFLICT, code, message);
     }
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -199,6 +241,18 @@ export class AuthService {
 
   private signToken(sub: string, qiftUsername: string) {
     return this.jwtService.signAsync({ sub, qiftUsername });
+  }
+
+  // Typed error envelope for the auth flow. Pairs a stable
+  // machine-readable `code` with a localized `message`. The frontend
+  // switches on `code` (e.g. `username_taken`) to render the right
+  // inline field error without parsing localized strings — a pattern
+  // already used by /gifts → `receiver_no_default_address`.
+  private fieldError(status: HttpStatus, code: string, message: string) {
+    return new HttpException(
+      { statusCode: status, code, message },
+      status,
+    );
   }
 
   private sanitize<T extends { passwordHash?: string | null }>(user: T) {

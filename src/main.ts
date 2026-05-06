@@ -6,7 +6,7 @@ import { AppModule } from './app.module';
 // Bump on every CORS / bootstrap change so the Railway log line
 // confirms which build is live. Search Railway logs for this string
 // after a deploy — if you don't see it, the new build didn't take.
-const BOOT_TAG = 'qift-api/cors-v5';
+const BOOT_TAG = 'qift-api/cors-v6';
 
 // Always-allowed local dev origins. Matches any port so Next can pick
 // 3000/3001/3002 freely without breaking CORS.

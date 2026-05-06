@@ -89,6 +89,15 @@ model User {
   // default address. See model GiftAttempt below.
   attemptedGifts    GiftAttempt[] @relation("SenderAttempts")
   pendingAttempts   GiftAttempt[] @relation("ReceiverAttempts")
+  // Block relations. `outgoingBlocks` = rows where this user IS the
+  // blocker; `incomingBlocks` = rows where this user IS being blocked.
+  // Search + public-profile + send-gift surfaces filter both directions
+  // out so blocked users can't interact in either direction.
+  outgoingBlocks    Block[]       @relation("Blocker")
+  incomingBlocks    Block[]       @relation("Blocked")
+  // Reports filed by this user against another. We don't expose the
+  // reverse relation publicly — reports are admin-only.
+  filedReports      Report[]      @relation("Reporter")
 }
 
 model Address {
@@ -482,4 +491,47 @@ model Follow {
   @@index([followingId, createdAt])
   // "Who am I following, newest first" — the following-list query.
   @@index([followerId, createdAt])
+}
+
+// User-to-user block. Composite PK on (blockerId, blockedId) so
+// duplicate blocks collapse to a no-op insert. Search + public-profile
+// + send-gift gates filter on this table in BOTH directions: A blocked
+// B means A doesn't see B's content AND B doesn't see A's content
+// (mirrors how every modern social app handles blocks). Cascades clean
+// up on user deletion.
+model Block {
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@id([blockerId, blockedId])
+  // Reverse-direction lookup — "who has blocked ME" — needed by the
+  // search filter to exclude the blocker from the blocked user's view.
+  @@index([blockedId])
+}
+
+// User report. Admin-only surface (no GET endpoint exposed to
+// non-admin users). `reason` is a short discriminator from a
+// frontend-defined allow-list; `details` is optional free text.
+// `status` lifecycle: open → reviewed → (dismissed | actioned).
+//
+// We index by (status, createdAt) so an admin queue UI can fetch the
+// open backlog efficiently. We also index by reportedUserId so a
+// safety dashboard can count reports per user.
+model Report {
+  id             String   @id @default(cuid())
+  reporterId     String
+  reportedUserId String
+  reason         String
+  details        String?
+  status         String   @default("open")
+  createdAt      DateTime @default(now())
+
+  reporter User @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([reportedUserId])
 }

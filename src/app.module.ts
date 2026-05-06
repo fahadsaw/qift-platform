@@ -19,6 +19,8 @@ import { StoreIntegrationsModule } from './store-integrations/store-integrations
 import { PushModule } from './push/push.module';
 import { FollowsModule } from './follows/follows.module';
 import { WishesModule } from './wishes/wishes.module';
+import { BlocksModule } from './blocks/blocks.module';
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -37,6 +39,8 @@ import { WishesModule } from './wishes/wishes.module';
     PushModule,
     FollowsModule,
     WishesModule,
+    BlocksModule,
+    ReportsModule,
   ],
   controllers: [AppController, UsersController],
   providers: [AppService, PrismaService, UsersService],

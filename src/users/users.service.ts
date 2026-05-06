@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -6,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { BlocksService } from '../blocks/blocks.service';
 
 // Whitelist of fields that are safe to ship over the wire. `passwordHash`
 // is never included so it cannot leak through any user endpoint.
@@ -23,7 +25,10 @@ const SAFE_USER_SELECT = {
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private blocks: BlocksService,
+  ) {}
 
   // Canonical username normalisation. Used by every endpoint that looks up
   // a user by qiftUsername — keeping this in one place means callers can't
@@ -74,14 +79,21 @@ export class UsersService {
   }
 
   // Profile envelope for the authenticated viewer. Bundles the safe user
-  // fields with `hasDefaultAddress` and `isSuspended` so the UI can render
-  // the suspension banner without a follow-up call. Suspension is purely
+  // fields with `hasDefaultAddress`, `isSuspended`, and the privacy
+  // toggles so the UI can render the suspension banner + the privacy
+  // section without a follow-up call. Suspension is purely
   // address-derived: no default address ⇒ suspended.
   async getProfile(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
         ...SAFE_USER_SELECT,
+        // Privacy toggles surfaced to /settings.
+        profileVisibility: true,
+        showGiftsReceived: true,
+        showGiftsSent: true,
+        showFollowers: true,
+        showFollowing: true,
         addresses: {
           where: { isDefault: true },
           take: 1,
@@ -97,6 +109,58 @@ export class UsersService {
       hasDefaultAddress,
       isSuspended: !hasDefaultAddress,
     };
+  }
+
+  // PATCH /users/me/privacy — update the viewer's privacy toggles.
+  //
+  // Each field is optional: missing keys keep their current value
+  // (PATCH semantics). `profileVisibility` is constrained to the
+  // 'public' | 'private' allow-list; the four show* flags are coerced
+  // to booleans (truthy → true, falsey → false) so a buggy frontend
+  // can't store a non-boolean string.
+  //
+  // Only the JWT viewer is allowed to call this — enforced at the
+  // controller layer via `req.user.userId`. We never accept a userId
+  // from the body.
+  async updatePrivacy(
+    viewerId: string,
+    body: {
+      profileVisibility?: string;
+      showGiftsReceived?: boolean;
+      showGiftsSent?: boolean;
+      showFollowers?: boolean;
+      showFollowing?: boolean;
+    },
+  ) {
+    const data: Prisma.UserUpdateInput = {};
+
+    if (body.profileVisibility !== undefined) {
+      const v = String(body.profileVisibility).trim().toLowerCase();
+      if (v !== 'public' && v !== 'private') {
+        throw new BadRequestException('profileVisibility must be public|private');
+      }
+      data.profileVisibility = v;
+    }
+    if (body.showGiftsReceived !== undefined) {
+      data.showGiftsReceived = body.showGiftsReceived === true;
+    }
+    if (body.showGiftsSent !== undefined) {
+      data.showGiftsSent = body.showGiftsSent === true;
+    }
+    if (body.showFollowers !== undefined) {
+      data.showFollowers = body.showFollowers === true;
+    }
+    if (body.showFollowing !== undefined) {
+      data.showFollowing = body.showFollowing === true;
+    }
+
+    if (Object.keys(data).length === 0) {
+      // No-op — return the current state instead of writing nothing.
+      return this.getProfile(viewerId);
+    }
+
+    await this.prisma.user.update({ where: { id: viewerId }, data });
+    return this.getProfile(viewerId);
   }
 
   // Public-ish lookup used by the /send page to gate the form before any
@@ -176,12 +240,20 @@ export class UsersService {
       matchedValue: string;
     };
 
+    // Block filter — exclude users I blocked AND users who blocked me.
+    // Both directions: a blocked user can't appear in my search and I
+    // can't appear in theirs. Loaded once and reused across every type
+    // branch so a single search never fans out to N+1 block lookups.
+    const excludedIds = await this.blocks.listExcludedIds(viewerUserId);
+    const excludedFilter =
+      excludedIds.length > 0 ? { notIn: excludedIds } : undefined;
+
     if (normType === 'qift') {
       const lower = term.toLowerCase();
       const rows = await this.prisma.user.findMany({
         where: {
           deletedAt: null,
-          NOT: { id: viewerUserId },
+          id: { not: viewerUserId, ...(excludedFilter ?? {}) },
           OR: [
             { qiftUsername: { contains: lower, mode: 'insensitive' } },
             { fullName: { contains: term, mode: 'insensitive' } },
@@ -202,7 +274,7 @@ export class UsersService {
       const rows = await this.prisma.user.findMany({
         where: {
           deletedAt: null,
-          NOT: { id: viewerUserId },
+          id: { not: viewerUserId, ...(excludedFilter ?? {}) },
           phone: { contains: term },
         },
         select: PUBLIC_PROJECTION,
@@ -220,7 +292,7 @@ export class UsersService {
       const rows = await this.prisma.user.findMany({
         where: {
           deletedAt: null,
-          NOT: { id: viewerUserId },
+          id: { not: viewerUserId, ...(excludedFilter ?? {}) },
           email: { contains: term, mode: 'insensitive' },
         },
         select: PUBLIC_PROJECTION,
@@ -240,7 +312,7 @@ export class UsersService {
         platform: normType,
         handle: { contains: term, mode: 'insensitive' },
         user: { deletedAt: null },
-        NOT: { userId: viewerUserId },
+        userId: { not: viewerUserId, ...(excludedFilter ?? {}) },
       },
       select: {
         platform: true,
