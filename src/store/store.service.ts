@@ -212,14 +212,14 @@ export class StoreService {
       type: NotificationType.GiftPreparing,
       title: 'هديتك قيد التجهيز',
       body: updated.productName,
-      link: '/gifts',
+      link: `/gifts/${gift.id}`,
     });
     void this.notifications.trigger({
       userId: gift.senderId,
       type: NotificationType.GiftPreparing,
       title: 'الهدية قيد التجهيز لدى المتجر',
       body: updated.productName,
-      link: '/gifts',
+      link: `/gifts/${gift.id}`,
     });
 
     return toSafeStoreMutationResult(updated);
@@ -251,19 +251,22 @@ export class StoreService {
       },
     });
 
+    // Deep-link both notifications to the specific gift so receiver
+    // and sender land directly on the timeline / tracking row.
+    const shippedLink = `/gifts/${gift.id}`;
     void this.notifications.trigger({
       userId: gift.receiverId,
       type: NotificationType.GiftShipped,
       title: 'تم شحن هديتك 🚚',
       body: updated.productName,
-      link: '/gifts',
+      link: shippedLink,
     });
     void this.notifications.trigger({
       userId: gift.senderId,
       type: NotificationType.GiftShipped,
       title: 'تم شحن الهدية',
       body: updated.productName,
-      link: '/gifts',
+      link: shippedLink,
     });
 
     return toSafeStoreMutationResult(updated);
@@ -291,19 +294,20 @@ export class StoreService {
     //     message reveal gate flips and they can now read what was sent.
     //   - Sender:   "تم استلام هديتك بنجاح 🎉" — confirmation that the
     //     other side actually received it.
+    const deliveredLink = `/gifts/${gift.id}`;
     void this.notifications.trigger({
       userId: gift.receiverId,
       type: NotificationType.GiftDelivered,
       title: 'لديك رسالة من مرسل الهدية 💌',
       body: updated.productName,
-      link: '/gifts',
+      link: deliveredLink,
     });
     void this.notifications.trigger({
       userId: gift.senderId,
       type: NotificationType.GiftDelivered,
       title: 'تم استلام هديتك بنجاح 🎉',
       body: updated.productName,
-      link: '/gifts',
+      link: deliveredLink,
     });
 
     return toSafeStoreMutationResult(updated);

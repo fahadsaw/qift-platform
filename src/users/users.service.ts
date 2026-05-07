@@ -29,6 +29,12 @@ const SAFE_USER_SELECT = {
   // their email (the new address needs a fresh proof).
   phoneVerifiedAt: true,
   emailVerifiedAt: true,
+  // Role discriminator: 'user' (default) or 'store'. The frontend
+  // uses this to surface the merchant fulfilment dashboard link
+  // only for store-role users — non-merchants don't see the entry.
+  // Authoritative authorization still happens server-side via
+  // StoreGuard / ownedStoreIds; this field is purely a UI hint.
+  role: true,
 } satisfies Prisma.UserSelect;
 
 @Injectable()
