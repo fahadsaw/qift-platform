@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -148,8 +150,23 @@ export class OrdersService {
     });
     if (!receiver) throw new NotFoundException('Receiver not found');
     if (receiver.addresses.length === 0) {
-      throw new BadRequestException(
-        'لا يمكن إرسال الهدية: المستلم لا يملك عنوان توصيل افتراضي',
+      // Hard rule (intentional): we refuse to charge the buyer when the
+      // recipient has no default delivery address. Without one, the
+      // store order can sit indefinitely waiting on the recipient,
+      // creating refund problems for the buyer and operational issues
+      // for the merchant. Keep this gate strict.
+      //
+      // Same shape as the gifts.service equivalent: 422 with a stable
+      // machine-readable `code` so the frontend doesn't have to match
+      // localized strings to identify the failure.
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+          code: 'recipient_no_default_address',
+          message:
+            'المستلم لم يحدد عنوانًا افتراضيًا بعد، لذلك لا يمكن إرسال الهدية له حاليًا.',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
       );
     }
 

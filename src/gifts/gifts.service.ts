@@ -147,20 +147,26 @@ export class GiftsService {
       throw new NotFoundException('Receiver not found');
     }
 
-    // Receiver must have a default delivery address before any gift can land.
-    // This is the hard guard mirroring the /send page warning.
+    // Recipient must have a default delivery address before any gift
+    // can land. This is the hard guard mirroring the /send page warning
+    // and the same gate is duplicated in OrdersService.create — both
+    // sides have to enforce it because a buyer who calls POST /gifts
+    // directly skips OrdersService entirely.
     //
-    // When this trips, we DON'T just throw — we ALSO:
+    // We keep this rule strict on purpose: without a default address
+    // the store order can sit indefinitely waiting on the recipient,
+    // creating refund headaches for the buyer and operational issues
+    // for the merchant. Better to fail fast with clear UI copy than
+    // to charge first and untangle later.
+    //
+    // When this trips we ALSO:
     //   1. Record a GiftAttempt row so we can notify the sender later
-    //      (when the receiver finally sets a default address).
-    //   2. Fire a receiver-side notification ("someone tried to send you a
-    //      gift, please set a default address").
+    //      (when the recipient finally sets a default address).
+    //   2. Fire a recipient-side notification asking them to add one.
     //
-    // Both operations are best-effort: if either fails the request still
-    // rejects with the same typed error so the sender sees a clear UI.
-    // We use 422 (Unprocessable Entity) with a stable `code` so the
-    // frontend can switch on `code === 'receiver_no_default_address'`
-    // without parsing localized strings.
+    // Both side-effects are best-effort and never roll back the 422.
+    // The `code` is stable so the frontend can map it to the localized
+    // copy without string-matching the message.
     if (receiver.addresses.length === 0) {
       try {
         await this.prisma.giftAttempt.create({
@@ -187,8 +193,13 @@ export class GiftsService {
         {
           statusCode: HttpStatus.UNPROCESSABLE_ENTITY,
           // Stable machine-readable code — frontend switches on this.
-          code: 'receiver_no_default_address',
-          message: 'لا يمكن إرسال الهدية: المستلم لا يملك عنوان توصيل افتراضي',
+          // Renamed from `receiver_no_default_address` for consistency
+          // with the rest of the codebase (we say "recipient" in
+          // copy + comments). The old name is no longer emitted; if
+          // an operator needs it we'd add a temporary alias here.
+          code: 'recipient_no_default_address',
+          message:
+            'المستلم لم يحدد عنوانًا افتراضيًا بعد، لذلك لا يمكن إرسال الهدية له حاليًا.',
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       );

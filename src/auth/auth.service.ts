@@ -252,7 +252,7 @@ export class AuthService {
   // machine-readable `code` with a localized `message`. The frontend
   // switches on `code` (e.g. `username_taken`) to render the right
   // inline field error without parsing localized strings — a pattern
-  // already used by /gifts → `receiver_no_default_address`.
+  // already used by /gifts → `recipient_no_default_address`.
   private fieldError(status: HttpStatus, code: string, message: string) {
     return new HttpException(
       { statusCode: status, code, message },
