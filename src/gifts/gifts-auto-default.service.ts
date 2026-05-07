@@ -118,19 +118,23 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
         // Notify both sides. The receiver's message is more apologetic
         // ("we used your default") because they're the one who could have
         // confirmed; the sender's is informational.
+        // Deep-link both notifications to the specific gift so the
+        // recipient lands on the timeline (already-confirmed state)
+        // and the sender lands on the same row from their inbox.
+        const giftLink = `/gifts/${gift.id}`;
         void this.notifications.trigger({
           userId: gift.receiverId,
           type: NotificationType.GiftDefaultAddressUsed,
           title: 'تم استخدام العنوان الافتراضي لإرسال الهدية',
           body: gift.productName,
-          link: '/gifts',
+          link: giftLink,
         });
         void this.notifications.trigger({
           userId: gift.senderId,
           type: NotificationType.GiftDefaultAddressUsed,
           title: 'تم استخدام العنوان الافتراضي للتوصيل',
           body: gift.productName,
-          link: '/gifts',
+          link: giftLink,
         });
       } catch (err) {
         // One bad row shouldn't take the whole sweep down.

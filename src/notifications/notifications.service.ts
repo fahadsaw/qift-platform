@@ -17,6 +17,10 @@ export const NotificationType = {
   GiftPreparing: 'gift.preparing',
   GiftShipped: 'gift.shipped',
   GiftDelivered: 'gift.delivered',
+  // Sender or admin cancelled the gift before the store accepted it.
+  // Receiver gets a heads-up so they don't keep waiting on a phantom
+  // "Confirm address" CTA.
+  GiftCancelled: 'gift.cancelled',
   // Kept as alias so existing notification rows render correctly.
   GiftReadyForDelivery: 'gift.address_confirmed',
   // Receiver: someone tried to send you a gift but you don't yet have a

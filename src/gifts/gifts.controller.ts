@@ -39,6 +39,16 @@ export class GiftsController {
     return this.service.confirmAddress(id, req.user.userId, body?.addressId);
   }
 
+  // Sender-only. Cancel a gift before the store has accepted it
+  // (status in pending_address / address_confirmed / default_address_used).
+  // Idempotent: a second call on an already-cancelled gift returns the
+  // current snapshot. See GiftsService.cancel for the state-machine
+  // rules and the receiver-side notification.
+  @Post(':id/cancel')
+  cancel(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.service.cancel(id, req.user.userId);
+  }
+
   // Note: a `mark-delivered` route used to live here for either party to
   // flip a gift to delivered. v3 makes delivery store-driven (POST
   // /store/orders/:id/delivered), so the user-facing route was removed to

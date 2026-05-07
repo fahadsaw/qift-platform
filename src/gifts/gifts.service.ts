@@ -265,19 +265,24 @@ export class GiftsService {
     // gifts that would leak the very thing we're hiding from the receiver.
     // We swap to a generic mystery title with no body, identical for
     // every surprise gift so even traffic-analysis can't infer the shop.
+    // Deep-link straight to the new gift's detail page so the receiver
+    // lands on the action card without hunting through a list. The list
+    // route stays as a fallback for older notifications that pre-date
+    // this change.
+    const giftLink = `/gifts/${created.id}`;
     void this.notifications.trigger({
       userId: receiver.id,
       type: NotificationType.GiftReceived,
       title: isSurprise ? 'وصلتك هدية مفاجأة 🎁' : 'وصلتك هدية جديدة 🎁',
       body: isSurprise ? null : `${productName} — ${storeName}`,
-      link: '/gifts',
+      link: giftLink,
     });
     void this.notifications.trigger({
       userId: receiver.id,
       type: NotificationType.GiftConfirmAddress,
       title: 'يرجى تأكيد عنوان استلام الهدية',
       body: null,
-      link: '/gifts',
+      link: giftLink,
     });
 
     return created;
@@ -299,6 +304,14 @@ export class GiftsService {
   // use that one (after verifying ownership); otherwise we fall back to
   // their default. This is the only `pending_address → address_confirmed`
   // path; the 24h auto-default sweep handles the alternate edge.
+  //
+  // Idempotency: a gift that's already past `pending_address` (because
+  // the receiver double-clicked Confirm, the auto-default sweep got
+  // there first, or the request retried after a successful response was
+  // lost mid-flight) returns the current row unchanged instead of 400.
+  // This is what the frontend optimistic-update pattern needs — a
+  // network blip on the second tap shouldn't roll the receiver back to
+  // a "Confirm address" CTA when their gift is already accepted.
   async confirmAddress(
     giftId: string,
     viewerUserId: string,
@@ -309,8 +322,17 @@ export class GiftsService {
     if (gift.receiverId !== viewerUserId) {
       throw new ForbiddenException(FORBIDDEN_MSG);
     }
-    // Strict transition. Idempotent same-state confirms throw — clients
-    // that want forgiving behaviour can short-circuit before calling.
+    // Idempotent fast-path: the gift has already moved past pending. We
+    // return the current snapshot (with visibility applied) instead of
+    // throwing — the only legitimate caller is the receiver retrying.
+    if (gift.status !== 'pending_address') {
+      const fresh = await this.prisma.gift.findUnique({
+        where: { id: giftId },
+        include: GIFT_INCLUDE,
+      });
+      if (!fresh) throw new NotFoundException('Gift not found');
+      return applyGiftVisibility(fresh as GiftWithParties, viewerUserId);
+    }
     assertTransition(gift.status, 'address_confirmed');
 
     let chosenAddressId: string | null = null;
@@ -351,7 +373,9 @@ export class GiftsService {
       type: NotificationType.GiftAddressConfirmed,
       title: 'تم تأكيد العنوان وجاري التجهيز',
       body: updated.productName,
-      link: '/gifts',
+      // Deep-link to the gift detail so the sender lands on the
+      // accepted-state timeline directly.
+      link: `/gifts/${gift.id}`,
     });
 
     // Visibility gate. The receiver is calling this — without the gate
@@ -359,6 +383,87 @@ export class GiftsService {
     // identity, on anonymous gifts) in the response, even though the
     // gift hasn't been delivered yet. The fix is to route every gift
     // return through the same helper as findOne / findSent / findReceived.
+    return applyGiftVisibility(updated as GiftWithParties, viewerUserId);
+  }
+
+  // Sender cancels a gift before the store has accepted it. Allowed
+  // states are `pending_address`, `address_confirmed`, and
+  // `default_address_used` — once the gift is `preparing` or beyond,
+  // the store has the order and cancellation needs the refund flow
+  // (out of scope for this endpoint).
+  //
+  // Race-safety: we use `updateMany` with a status filter so two
+  // concurrent cancel calls (or a cancel racing with the auto-default
+  // sweep) only succeed once. A non-zero `count` means we won the race
+  // and the row is now cancelled; zero means another writer already
+  // moved the row, in which case we return the latest snapshot
+  // unchanged (idempotent — same shape as confirmAddress).
+  //
+  // The receiver gets a "your gift was cancelled" notification with
+  // a deep-link to /gifts so they aren't left with a stale "Confirm
+  // address" CTA. Notifications swallow errors so a failure here can't
+  // roll back the cancellation.
+  async cancel(giftId: string, viewerUserId: string) {
+    const gift = await this.prisma.gift.findUnique({
+      where: { id: giftId },
+      include: GIFT_INCLUDE,
+    });
+    if (!gift) throw new NotFoundException('Gift not found');
+    if (gift.senderId !== viewerUserId) {
+      throw new ForbiddenException(FORBIDDEN_MSG);
+    }
+    // Idempotent: already cancelled → return the current snapshot.
+    if (gift.status === 'cancelled') {
+      return applyGiftVisibility(gift as GiftWithParties, viewerUserId);
+    }
+    // Past the point of no return — the store has the order.
+    const cancellable = new Set([
+      'pending_address',
+      'address_confirmed',
+      'default_address_used',
+    ]);
+    if (!cancellable.has(gift.status)) {
+      throw new BadRequestException(
+        'لا يمكن إلغاء الهدية في هذه المرحلة',
+      );
+    }
+
+    const result = await this.prisma.gift.updateMany({
+      where: {
+        id: giftId,
+        status: { in: Array.from(cancellable) },
+      },
+      data: { status: 'cancelled' satisfies GiftStatus },
+    });
+    if (result.count === 0) {
+      // Lost the race to another writer (sweep, second cancel call) —
+      // re-read and return whatever the row is now.
+      const fresh = await this.prisma.gift.findUnique({
+        where: { id: giftId },
+        include: GIFT_INCLUDE,
+      });
+      if (!fresh) throw new NotFoundException('Gift not found');
+      return applyGiftVisibility(fresh as GiftWithParties, viewerUserId);
+    }
+
+    // Notify the receiver. We don't notify the sender — they just
+    // performed the action and don't need a self-notification.
+    void this.notifications.trigger({
+      userId: gift.receiverId,
+      type: NotificationType.GiftCancelled,
+      title: 'تم إلغاء الهدية',
+      body: gift.productName,
+      // Deep-link to the gift detail when possible — receiver lands
+      // on the cancelled-state card directly instead of bouncing to
+      // a list and hunting for it.
+      link: `/gifts/${gift.id}`,
+    });
+
+    const updated = await this.prisma.gift.findUnique({
+      where: { id: giftId },
+      include: GIFT_INCLUDE,
+    });
+    if (!updated) throw new NotFoundException('Gift not found');
     return applyGiftVisibility(updated as GiftWithParties, viewerUserId);
   }
 

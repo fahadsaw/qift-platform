@@ -1,6 +1,24 @@
 import { BadRequestException } from '@nestjs/common';
 
 // Final tracking pipeline. Order matches the timeline rendered in the UI.
+//
+// Forward (happy) path:
+//   pending_address → address_confirmed   (receiver picked an address)
+//                  ↘ default_address_used (24h sweep used their default)
+//   address_confirmed | default_address_used → preparing (store accepts)
+//   preparing → shipped → delivered
+//
+// Terminal:
+//   delivered  — happy-path end.
+//   cancelled  — sender cancelled (only allowed before `preparing` —
+//                once the store has the order, cancellation needs the
+//                refund flow which is not modeled as a state edge yet).
+//
+// `cancelled` is only reachable from the pre-store-accept statuses
+// (pending_address / address_confirmed / default_address_used). Both
+// terminal states have an empty allow-list so a future caller can't
+// silently transition a delivered or cancelled gift back into the
+// pipeline.
 export const GIFT_STATUSES = [
   'pending_address',
   'address_confirmed',
@@ -8,19 +26,21 @@ export const GIFT_STATUSES = [
   'preparing',
   'shipped',
   'delivered',
+  'cancelled',
 ] as const;
 
 export type GiftStatus = (typeof GIFT_STATUSES)[number];
 
 // Allowed `from -> to` edges. Anything not listed here throws via
-// `assertTransition`. The empty array on `delivered` makes it terminal.
+// `assertTransition`. `delivered` and `cancelled` are terminal.
 export const ALLOWED_TRANSITIONS: Record<GiftStatus, GiftStatus[]> = {
-  pending_address: ['address_confirmed', 'default_address_used'],
-  address_confirmed: ['preparing'],
-  default_address_used: ['preparing'],
+  pending_address: ['address_confirmed', 'default_address_used', 'cancelled'],
+  address_confirmed: ['preparing', 'cancelled'],
+  default_address_used: ['preparing', 'cancelled'],
   preparing: ['shipped'],
   shipped: ['delivered'],
   delivered: [],
+  cancelled: [],
 };
 
 export function isGiftStatus(value: string): value is GiftStatus {
