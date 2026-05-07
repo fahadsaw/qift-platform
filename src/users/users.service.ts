@@ -8,6 +8,10 @@ import {
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
+import {
+  getDefaultAddressForUser,
+  userHasDefaultAddress,
+} from '../addresses/default-address.helper';
 
 // Whitelist of fields that are safe to ship over the wire. `passwordHash`
 // is never included so it cannot leak through any user endpoint.
@@ -624,17 +628,15 @@ export class UsersService {
         canDeliverFast: fastCity ? false : null,
       };
     }
-    const user = await this.prisma.user.findUnique({
-      where: { qiftUsername: username },
+    // Soft-deleted accounts shouldn't show up to senders — they can't
+    // receive gifts anyway. The previous query missed this filter,
+    // which would have returned a stale result for a deleted user.
+    const user = await this.prisma.user.findFirst({
+      where: { qiftUsername: username, deletedAt: null },
       select: {
         id: true,
         qiftUsername: true,
         fullName: true,
-        addresses: {
-          where: { isDefault: true },
-          take: 1,
-          select: { id: true },
-        },
       },
     });
     if (!user) {
@@ -644,14 +646,26 @@ export class UsersService {
         canDeliverFast: fastCity ? false : null,
       };
     }
+    // Canonical default-address resolver. Every other gift-flow caller
+    // routes through the same helper so a future rule change (e.g.
+    // soft-deleted addresses, regional gating) lands in one place.
+    const hasDefaultAddress = await userHasDefaultAddress(
+      this.prisma,
+      user.id,
+    );
     const canDeliverFast = fastCity
       ? await this.canDeliverFast(user.id, fastCity)
       : null;
+    if (process.env.GIFT_FLOW_DEBUG === '1') {
+      this.logger.log(
+        `[gift-flow] checkByUsername username="${username}" userId=${user.id} hasDefaultAddress=${hasDefaultAddress} fastCity=${fastCity ?? '-'} canDeliverFast=${canDeliverFast}`,
+      );
+    }
     return {
       exists: true as const,
       qiftUsername: user.qiftUsername,
       fullName: user.fullName,
-      hasDefaultAddress: user.addresses.length > 0,
+      hasDefaultAddress,
       // `null` when no fastCity was supplied — the UI uses `null` as the
       // "this product isn't fast delivery, ignore the field" signal.
       canDeliverFast,

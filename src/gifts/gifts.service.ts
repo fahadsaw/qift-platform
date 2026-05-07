@@ -6,6 +6,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   NotificationsService,
@@ -17,6 +18,7 @@ import {
   validateGiftMedia,
   type GiftLike,
 } from './gift-visibility';
+import { getDefaultAddressForUser } from '../addresses/default-address.helper';
 export type { GiftStatus } from './gift-status';
 
 // `senderId` is intentionally omitted — we always use the JWT viewer as the
@@ -93,6 +95,8 @@ type GiftWithParties = GiftLike;
 
 @Injectable()
 export class GiftsService {
+  private readonly logger = new Logger(GiftsService.name);
+
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
@@ -137,14 +141,30 @@ export class GiftsService {
       throw new BadRequestException('لا يمكنك إرسال هدية لنفسك');
     }
 
-    const receiver = await this.prisma.user.findUnique({
-      where: { qiftUsername: receiverUsername },
-      include: {
-        addresses: { where: { isDefault: true }, take: 1 },
-      },
+    const receiver = await this.prisma.user.findFirst({
+      where: { qiftUsername: receiverUsername, deletedAt: null },
+      select: { id: true },
     });
     if (!receiver) {
       throw new NotFoundException('Receiver not found');
+    }
+    // Canonical default-address resolver. Same helper as
+    // /users/check?username=, so the pre-flight gate and the create
+    // gate can never disagree on whether a recipient is ready.
+    const defaultAddress = await getDefaultAddressForUser(
+      this.prisma,
+      receiver.id,
+    );
+    if (process.env.GIFT_FLOW_DEBUG === '1') {
+      const totalCount = await this.prisma.address.count({
+        where: { userId: receiver.id },
+      });
+      const defaultCount = await this.prisma.address.count({
+        where: { userId: receiver.id, isDefault: true },
+      });
+      this.logger.log(
+        `[gift-flow] gifts.create receiverId=${receiver.id} username="${receiverUsername}" addressCount=${totalCount} defaultCount=${defaultCount} resolvedDefaultId=${defaultAddress?.id ?? null}`,
+      );
     }
 
     // Recipient must have a default delivery address before any gift
@@ -167,7 +187,7 @@ export class GiftsService {
     // Both side-effects are best-effort and never roll back the 422.
     // The `code` is stable so the frontend can map it to the localized
     // copy without string-matching the message.
-    if (receiver.addresses.length === 0) {
+    if (!defaultAddress) {
       try {
         await this.prisma.giftAttempt.create({
           data: {
@@ -357,10 +377,7 @@ export class GiftsService {
       }
       chosenAddressId = owned.id;
     } else {
-      const def = await this.prisma.address.findFirst({
-        where: { userId: viewerUserId, isDefault: true },
-        select: { id: true },
-      });
+      const def = await getDefaultAddressForUser(this.prisma, viewerUserId);
       if (!def) {
         throw new BadRequestException('لا يوجد عنوان افتراضي لتأكيده');
       }

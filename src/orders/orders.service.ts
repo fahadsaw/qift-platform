@@ -6,6 +6,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   validatePaymentProvider,
@@ -14,6 +15,7 @@ import {
 import { UsersService } from '../users/users.service';
 import { ProductsService } from '../products/products.service';
 import { validateGiftMedia } from '../gifts/gift-visibility';
+import { getDefaultAddressForUser } from '../addresses/default-address.helper';
 
 // `userId` is intentionally not in the input — it's always taken from the
 // JWT viewer in the controller layer.
@@ -63,6 +65,8 @@ const ORDER_INCLUDE = {
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private prisma: PrismaService,
     private users: UsersService,
@@ -137,19 +141,32 @@ export class OrdersService {
     // before we charge anyone. This is the same hard guard the gifts service
     // applies; we duplicate it here so we never even open a payment intent
     // against a suspended/incomplete receiver account.
-    const receiver = await this.prisma.user.findUnique({
-      where: { qiftUsername: receiverUsername },
-      select: {
-        id: true,
-        addresses: {
-          where: { isDefault: true },
-          take: 1,
-          select: { id: true },
-        },
-      },
+    //
+    // Both the existence query and the default-address resolver run
+    // through the canonical helpers so the pre-flight /users/check
+    // endpoint and this gate cannot disagree about a recipient's
+    // readiness.
+    const receiver = await this.prisma.user.findFirst({
+      where: { qiftUsername: receiverUsername, deletedAt: null },
+      select: { id: true },
     });
     if (!receiver) throw new NotFoundException('Receiver not found');
-    if (receiver.addresses.length === 0) {
+    const defaultAddress = await getDefaultAddressForUser(
+      this.prisma,
+      receiver.id,
+    );
+    if (process.env.GIFT_FLOW_DEBUG === '1') {
+      const totalCount = await this.prisma.address.count({
+        where: { userId: receiver.id },
+      });
+      const defaultCount = await this.prisma.address.count({
+        where: { userId: receiver.id, isDefault: true },
+      });
+      this.logger.log(
+        `[gift-flow] orders.create receiverId=${receiver.id} username="${receiverUsername}" addressCount=${totalCount} defaultCount=${defaultCount} resolvedDefaultId=${defaultAddress?.id ?? null}`,
+      );
+    }
+    if (!defaultAddress) {
       // Hard rule (intentional): we refuse to charge the buyer when the
       // recipient has no default delivery address. Without one, the
       // store order can sit indefinitely waiting on the recipient,

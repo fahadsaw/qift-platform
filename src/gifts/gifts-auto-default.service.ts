@@ -10,6 +10,7 @@ import {
   NotificationType,
 } from '../notifications/notifications.service';
 import type { GiftStatus } from './gift-status';
+import { getDefaultAddressForUser } from '../addresses/default-address.helper';
 
 // How long a gift is allowed to sit in `pending_address` before we auto-
 // flip it onto the receiver's default address.
@@ -86,11 +87,12 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
       try {
         // Look up the receiver's default address now (not at gift create
         // time) so we honour any address changes they made in the
-        // meantime.
-        const def = await this.prisma.address.findFirst({
-          where: { userId: gift.receiverId, isDefault: true },
-          select: { id: true },
-        });
+        // meantime. Routes through the canonical helper — same gate
+        // every other gift-flow caller uses.
+        const def = await getDefaultAddressForUser(
+          this.prisma,
+          gift.receiverId,
+        );
         if (!def) {
           // Receiver still has no default address — nothing we can do
           // without their input, so leave it pending. The /profile
