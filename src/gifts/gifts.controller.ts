@@ -39,15 +39,18 @@ export class GiftsController {
     return this.service.confirmAddress(id, req.user.userId, body?.addressId);
   }
 
-  // Sender-only. Cancel a gift before the store has accepted it
-  // (status in pending_address / address_confirmed / default_address_used).
-  // Idempotent: a second call on an already-cancelled gift returns the
-  // current snapshot. See GiftsService.cancel for the state-machine
-  // rules and the receiver-side notification.
-  @Post(':id/cancel')
-  cancel(@Param('id') id: string, @Req() req: AuthedRequest) {
-    return this.service.cancel(id, req.user.userId);
-  }
+  // Sender-facing self-cancel was deliberately removed.
+  //
+  // Once a gift has been purchased the buyer cannot cancel it through
+  // the app: that flow is too easy to abuse, disrupts the merchant
+  // mid-fulfilment, and pushes refund complexity onto support without
+  // a real audit trail. Cancellation is an admin / support operation
+  // — when that surface lands it should expose a separate
+  // /admin/gifts/:id/cancel route, not this one.
+  //
+  // GiftsService.cancel + the `cancelled` status + frontend rendering
+  // for already-cancelled gifts all stay in place so admin tooling
+  // can call it later without touching the state machine.
 
   // Note: a `mark-delivered` route used to live here for either party to
   // flip a gift to delivered. v3 makes delivery store-driven (POST

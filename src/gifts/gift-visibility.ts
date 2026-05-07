@@ -11,6 +11,11 @@
 //   3. applyMessageReveal  — strips messageText + mediaUrl + mediaType
 //                            from a receiver until status === 'delivered'.
 //                            Sender always sees their own content.
+//   4. applyAddressPrivacy — strips the recipient's delivery address
+//                            from any sender-side response. Senders
+//                            must NEVER see street / building / city
+//                            details / phone — only that fulfilment is
+//                            ready. Receiver sees their own address.
 //
 // `applyGiftVisibility(gift, viewerUserId)` is the function every gift-
 // returning endpoint MUST call before responding. The combined helper
@@ -20,6 +25,28 @@
 //   - `messageVisible` — false ⇒ render the locked-message card.
 
 import { BadRequestException } from '@nestjs/common';
+
+// Shape we strip for sender views. Mirrors ADDRESS_SELECT in
+// gifts.service.ts. The exported version is `Partial<>` so callers
+// don't need to track field-level optionality through the chain.
+export type GiftAddress = {
+  id: string;
+  label: string | null;
+  country: string;
+  region: string | null;
+  city: string;
+  governorate: string | null;
+  district: string;
+  street: string | null;
+  buildingNumber: string | null;
+  unitNumber: string | null;
+  postalCode: string | null;
+  additionalNumber: string | null;
+  shortAddress: string | null;
+  deliveryPhone: string | null;
+  details: string | null;
+  isDefault: boolean;
+};
 
 export type GiftLike = {
   id: string;
@@ -34,6 +61,10 @@ export type GiftLike = {
   isAnonymous: boolean;
   isSurprise: boolean;
   addressId: string | null;
+  // The actual delivery address row, if one is linked. Stripped for
+  // the sender by applyAddressPrivacy below — so even though Prisma
+  // includes it, the wire format hides it for non-recipient viewers.
+  address?: GiftAddress | null;
   confirmedAt: Date | null;
   shippedAt: Date | null;
   deliveredAt: Date | null;
@@ -118,20 +149,75 @@ export function applyMessageReveal<T extends GiftLike>(
   };
 }
 
+// Strip the recipient's delivery address from any sender-side
+// response. Sender must NEVER see street / building / city details /
+// phone — only that fulfilment is ready. The receiver sees their own
+// address (so they can verify which one was selected); admin / store
+// fulfilment paths use a different code path and aren't filtered
+// here.
+//
+// We zero out BOTH `address` (the inline relation Prisma returns) and
+// `addressId` (the FK column). The id alone isn't useful to a sender
+// — `/addresses/:id` enforces ownership — but stripping it keeps the
+// wire format clean of "the gift has SOME address pinned" metadata.
+//
+// Output adds `addressConfirmed: boolean` (positive flag). The sender
+// UI reads this to decide between "Recipient confirmed the delivery
+// address — preparing soon" copy and the earlier "Waiting for
+// recipient" copy without ever needing the address itself.
+export function applyAddressPrivacy<T extends GiftLike>(
+  gift: T,
+  viewerUserId: string | null,
+): T & { addressConfirmed: boolean } {
+  const isReceiverView =
+    viewerUserId !== null && viewerUserId === gift.receiverId;
+  // Status discriminator. Once an address has been pinned (either by
+  // the receiver via confirm-address or by the 24h auto-default
+  // sweep) the gift moves to one of these statuses.
+  const ADDRESS_LOCKED_STATUSES = new Set([
+    'address_confirmed',
+    'default_address_used',
+    'preparing',
+    'shipped',
+    'delivered',
+  ]);
+  const addressConfirmed =
+    !!gift.addressId && ADDRESS_LOCKED_STATUSES.has(gift.status);
+  if (isReceiverView) {
+    // Receiver gets to see their own address as-is.
+    return { ...gift, addressConfirmed };
+  }
+  // Sender view (or anyone non-receiver): scrub every address-shaped
+  // field. Even the FK is stripped so the response shape carries no
+  // implicit "an address exists" hint beyond the positive boolean.
+  return {
+    ...gift,
+    address: null,
+    addressId: null,
+    addressConfirmed,
+  };
+}
+
 // Apply every mask in the canonical order. Every gift-returning service
 // method MUST call this before returning to the controller.
 //
 // Order matters only for readability — none of the helpers depend on
-// each other's output. We keep anonymity → surprise → message because
-// that's roughly "identity → product → contents", which mirrors how a
-// real receiver mentally peels the gift.
+// each other's output. We keep anonymity → surprise → message →
+// address because that's roughly "identity → product → contents →
+// fulfilment", which mirrors how a real receiver mentally peels the
+// gift while a sender experiences progress milestones.
 export function applyGiftVisibility<T extends GiftLike>(
   gift: T,
   viewerUserId: string | null,
-): T & { productVisible: boolean; messageVisible: boolean } {
+): T & {
+  productVisible: boolean;
+  messageVisible: boolean;
+  addressConfirmed: boolean;
+} {
   const a = maskAnonymous(gift, viewerUserId);
   const b = applySurpriseReveal(a, viewerUserId);
-  return applyMessageReveal(b, viewerUserId);
+  const c = applyMessageReveal(b, viewerUserId);
+  return applyAddressPrivacy(c, viewerUserId);
 }
 
 // --- Media validation ---
