@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpException,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -12,8 +14,18 @@ import {
 import type { Prisma } from '@prisma/client';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
+import { RateLimiter } from '../common/rate-limiter';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
+
+// Per-viewer rate limit for the contact-channel branches of
+// `/users/search` (phone + email — the two surfaces where each query
+// reveals an exact contact-record hit). 30 attempts per 5 minutes is
+// generous for legitimate use (the frontend only fires once per
+// "Search" button click) but throttles a script trying to brute-force
+// through a list. Username + social-handle searches are unrestricted
+// — those handles are explicitly published by the user.
+const contactSearchLimiter = new RateLimiter(30, 5 * 60 * 1000);
 
 // All user routes require authentication. Public account creation belongs on
 // `POST /auth/register`, which hashes the password and issues a JWT.
@@ -138,13 +150,47 @@ export class UsersController {
   // expose this surface anonymously (avoids username/email scraping).
   // See UsersService.searchUsers for the type allow-list, min-length
   // gates, projection rules, and viewer-self exclusion.
+  //
+  // The optional `dial` query param scopes a phone search to a
+  // specific country code (e.g. `dial=+966`) so the frontend can
+  // submit a local-format number (`5XXXXXXXX` / `0501234567`) without
+  // burning the privacy gate. See UsersService.resolvePhoneE164 for
+  // the canonicalisation rules.
+  //
+  // Rate limit: phone + email search attempts are throttled per-viewer
+  // (30 / 5 min). Other types (username, social handles) bypass it —
+  // social handles are published by the user, and username search is
+  // the primary discovery flow.
   @Get('search')
   search(
     @Query('q') q: string,
     @Query('type') type: string,
+    @Query('dial') dial: string | undefined,
     @Req() req: AuthedRequest,
   ) {
-    return this.usersService.searchUsers(req.user.userId, q ?? '', type ?? '');
+    const normType = (type ?? '').trim().toLowerCase();
+    if (normType === 'phone' || normType === 'email') {
+      const ok = contactSearchLimiter.hit(`contact:${req.user.userId}`);
+      if (!ok) {
+        // 429 with a stable `code` so the frontend can surface a
+        // friendly "try again in a moment" toast without parsing the
+        // localised message string.
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.TOO_MANY_REQUESTS,
+            code: 'search_rate_limited',
+            message: 'Too many search attempts. Try again in a few minutes.',
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+    }
+    return this.usersService.searchUsers(
+      req.user.userId,
+      q ?? '',
+      type ?? '',
+      dial,
+    );
   }
 
   // GET /users/@/:username — public profile by username, privacy-aware.

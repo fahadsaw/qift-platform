@@ -72,6 +72,14 @@ model User {
   showGiftsSent     Boolean @default(true)
   showFollowers     Boolean @default(true)
   showFollowing     Boolean @default(true)
+  // Phone-discoverability switch. When false this account is hidden
+  // from `/users/search?type=phone` even if the searcher knows the
+  // exact number. Phone is the most privacy-sensitive contact channel
+  // — a user may want to be findable by username while staying
+  // unreachable by raw phone-number lookups (e.g. account is in a
+  // contact list of someone they no longer interact with). Defaults
+  // to true so existing demo accounts keep their current behaviour.
+  allowPhoneDiscovery Boolean @default(true)
 
   // -- Wishlist preferences (added for MVP private testing) --
   // All optional; designed to seed AI gift recommendations later. We

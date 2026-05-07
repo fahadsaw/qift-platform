@@ -431,7 +431,12 @@ export class UsersService {
   //   - Hard cap of 20 rows so a 1-char query can't pull every user.
   //   - Allow-list of accepted `type` values; anything unknown returns
   //     an empty list rather than 500.
-  async searchUsers(viewerUserId: string, q: string, type: string) {
+  async searchUsers(
+    viewerUserId: string,
+    q: string,
+    type: string,
+    dial?: string,
+  ) {
     const term = (q ?? '').trim();
     const normType = (type ?? '').trim().toLowerCase();
 
@@ -455,10 +460,14 @@ export class UsersService {
     ]);
     if (!SUPPORTED.has(normType)) return [];
 
-    // Min-length gate. Phone / email leak more contact info per
-    // matched character, so we require a longer prefix.
-    const minLen = normType === 'phone' || normType === 'email' ? 5 : 2;
-    if (term.length < minLen) return [];
+    // Min-length gate. Phone has its own dedicated path below (exact
+    // E.164 match — no partial query is ever accepted). Email keeps
+    // the longer prefix so a single-letter "@a" can't enumerate the
+    // domain. Username + social handles get the standard 2-char gate.
+    if (normType !== 'phone') {
+      const minLen = normType === 'email' ? 5 : 2;
+      if (term.length < minLen) return [];
+    }
 
     // Common projection — what the search row card actually renders.
     // Selecting this explicitly (vs passing `include`) avoids ever
@@ -510,36 +519,51 @@ export class UsersService {
     }
 
     if (normType === 'phone') {
-      // Normalize so the same user is findable regardless of whether
-      // the searcher typed the local Saudi format (`05XXXXXXXX`), the
-      // E.164-without-plus (`9665XXXXXXXX`), or the full E.164
-      // (`+9665XXXXXXXX`). All three collapse to a digits-only string
-      // (no `+`, no leading zeros) which is then matched as a
-      // substring against the stored E.164 phone.
+      // Phone search is EXACT-match only — never substring. Two
+      // accepted query shapes:
       //
-      //   `+966 50 123 4567` → `966501234567`
-      //   `0501234567`       → `501234567`
-      //   `501234567`        → `501234567`
+      //   1. (preferred) `dial` query param + local digits in `q`.
+      //      Frontend's dial-picker uses this. We compose the E.164
+      //      from the dial code + normalised local part.
+      //   2. `q` already in E.164 form (starts with `+`). Used by
+      //      legacy callers and direct API users.
       //
-      // Stored phones are E.164 (`+9665...`), so the digits-only
-      // search string is always a substring of the stored value when
-      // the numbers actually match.
+      // Anything else (bare local number without dial, partial
+      // digits, country-code-only) returns an empty list. This makes
+      // it impossible to enumerate the user table by typing a
+      // common prefix and reading off who shows up.
       //
-      // Privacy: re-check length on the NORMALISED digits, not the
-      // raw input. `+9665` looked like 5 chars but is really only 4
-      // digits — we want at least 5 digits of signal before exposing
-      // any matches, otherwise a single common prefix (e.g. country
-      // code) would enumerate huge swathes of the user table.
-      const normalized = term.replace(/[^\d+]/g, '').replace(/^\+/, '').replace(/^0+/, '');
-      if (normalized.length < 5) return [];
+      // After resolving an E.164 candidate, we sanity-check the
+      // total length against the stored E.164 format (between 8
+      // and 16 digits inclusive of country code) and the SA-specific
+      // mobile shape (`+9665XXXXXXXX` — 9 digits after +966 starting
+      // with 5). The shape check is intentionally loose for non-SA
+      // numbers; we don't have authoritative MSISDN tables for every
+      // country, and a stricter check would block legit foreign
+      // numbers without protecting privacy.
+      const e164 = resolvePhoneE164(term, dial);
+      if (!e164) return [];
+
       const rows = await this.prisma.user.findMany({
         where: {
           deletedAt: null,
           id: { not: viewerUserId, ...(excludedFilter ?? {}) },
-          phone: { contains: normalized },
+          // Stored phones are unique + E.164. Exact match means at
+          // most one row — no harvesting possible.
+          phone: e164,
+          // Per-user phone-discoverability switch. Adds a second
+          // privacy gate on top of the exact-match requirement: a
+          // user who has opted out is invisible to phone search even
+          // if the searcher knows the literal number.
+          allowPhoneDiscovery: true,
+          // Profile visibility = 'private' accounts are also hidden
+          // from phone search. They can still be reached by the
+          // people they explicitly follow / are followed by, via the
+          // username path.
+          profileVisibility: { not: 'private' },
         },
         select: PUBLIC_PROJECTION,
-        take: 20,
+        take: 1,
       });
       // matchedValue intentionally generic — we don't echo phone back.
       return rows.map<SearchRow>((u) => ({
@@ -998,4 +1022,97 @@ function normaliseCity(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+// Per-country mobile-MSISDN length. The number stored in `User.phone`
+// is the E.164 form `+<dial><local>`, so the total digit count we
+// expect for a complete record is `dial.length + local`. Loose by
+// design — we only encode shapes we're confident about; everything
+// else falls back to the generic E.164 7..15 digit range.
+const COUNTRY_LOCAL_LENGTHS: Record<string, number> = {
+  '966': 9, // Saudi Arabia: 5XXXXXXXX
+  '971': 9, // UAE
+  '965': 8, // Kuwait
+  '974': 8, // Qatar
+  '973': 8, // Bahrain
+  '968': 8, // Oman
+};
+
+// Saudi-specific extra rule: mobile numbers MUST start with 5 after
+// the country code. Encoded separately from the length table because
+// it's a digit-prefix check, not a length check.
+const SA_MOBILE_PREFIX = /^\+9665\d{8}$/;
+
+// Resolve a (q, dial) pair into a fully-qualified E.164 phone string,
+// returning `null` whenever the input isn't complete enough to do an
+// exact-match lookup. This is the core privacy gate: any path that
+// could produce a partial query exits with `null` so the search
+// returns zero rows rather than substring-matching the user table.
+//
+// Accepted inputs:
+//   - dial="+966", q="0501234567" → "+966501234567"
+//   - dial="+966", q="501234567"  → "+966501234567"
+//   - dial="+966", q="+966501234567" → ignored dial; uses q as-is
+//   - dial="",     q="+966501234567" → "+966501234567"
+//   - dial="",     q="0501234567"    → null (no country context)
+//   - dial="+966", q="555"           → null (incomplete local)
+export function resolvePhoneE164(
+  q: string,
+  dial: string | undefined,
+): string | null {
+  const term = (q ?? '').trim();
+  const dialTrim = (dial ?? '').trim();
+
+  // Build a candidate E.164 string.
+  let candidate: string | null = null;
+  if (term.startsWith('+')) {
+    // Caller supplied a full E.164 — use it directly. We strip non-
+    // digits from the local portion (spaces, dashes, parens) but
+    // KEEP the leading `+` because it's the marker that this is a
+    // complete number.
+    const cleaned = '+' + term.slice(1).replace(/\D+/g, '');
+    candidate = cleaned;
+  } else if (dialTrim) {
+    // Compose dial + local. Strip non-digits + leading zeros from the
+    // local part — Saudis often paste `0501234567`; that leading 0
+    // must die before concatenation.
+    const dialWithPlus = dialTrim.startsWith('+') ? dialTrim : `+${dialTrim}`;
+    const localDigits = term.replace(/\D+/g, '').replace(/^0+/, '');
+    if (!localDigits) return null;
+    candidate = `${dialWithPlus}${localDigits}`;
+  } else {
+    // No dial AND no leading `+` — we can't tell which country this
+    // belongs to. Refuse the query rather than guess.
+    return null;
+  }
+
+  // Sanity-check shape against the E.164 envelope.
+  if (!/^\+[1-9]\d{6,14}$/.test(candidate)) return null;
+
+  // Country-aware completeness. Pull the dial code by trying the
+  // longest known prefix first (3 then 2 then 1 digit) — we don't
+  // have a full country-code table, but COUNTRY_LOCAL_LENGTHS covers
+  // the GCC where we have authoritative shape rules.
+  const digits = candidate.slice(1); // drop the +
+  for (const dialCode of Object.keys(COUNTRY_LOCAL_LENGTHS)) {
+    if (digits.startsWith(dialCode)) {
+      const expectedLocal = COUNTRY_LOCAL_LENGTHS[dialCode];
+      const localLen = digits.length - dialCode.length;
+      if (localLen !== expectedLocal) return null;
+      // Saudi extra rule.
+      if (dialCode === '966' && !SA_MOBILE_PREFIX.test(candidate)) {
+        return null;
+      }
+      return candidate;
+    }
+  }
+
+  // Unknown country code — fall back to a permissive 7..15-digit
+  // total length (E.164 envelope) so legitimate foreign numbers
+  // still resolve. The exact-match `phone: equals` filter at the
+  // call site means a too-short or too-long candidate just returns
+  // zero rows; the only privacy concern is enumeration via partial
+  // matching, which we already prevented above.
+  if (digits.length < 7 || digits.length > 15) return null;
+  return candidate;
 }
