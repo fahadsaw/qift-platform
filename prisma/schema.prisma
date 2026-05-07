@@ -45,11 +45,15 @@ model User {
   //                      Unverified chip from this column.
   phoneVerifiedAt DateTime?
   emailVerifiedAt DateTime?
-  // "user" | "store" — store-role users own at least one Store row and
-  // can access /store-dashboard. The role is mostly cosmetic (we still
-  // enforce ownership on every store/product mutation), but having it on
-  // the User makes it cheap to render the right UI without an extra
-  // round-trip.
+  // "user" | "store" | "admin"
+  //   user   — default. Regular gifting account.
+  //   store  — owns at least one Store row; sees /store-dashboard.
+  //   admin  — internal Qift staff. Sees /admin and can promote
+  //            other accounts. Promotion happens via PATCH
+  //            /admin/users/:id/role and is persisted here. Only
+  //            another admin can grant the role; the very first
+  //            admin is set manually in the DB (UPDATE "User" SET
+  //            role='admin' WHERE id='…').
   role           String  @default("user")
 
   // -- Profile content (added in Step 2) --
@@ -322,6 +326,17 @@ model Store {
   integrationType   String   @default("none")
   // "disconnected" | "connected" | "error"
   integrationStatus String   @default("disconnected")
+  // Approval lifecycle — drives the merchant fulfilment dashboard
+  // visibility and admin actions.
+  //   pending   — newly created, awaiting admin review.
+  //   approved  — live; appears in the merchant fulfilment queue and
+  //               on the public /stores listing.
+  //   rejected  — admin denied the listing; stays in DB for audit.
+  //   suspended — was approved but later disabled by admin.
+  // Existing rows are backfilled to "approved" so the migration is
+  // non-destructive (every store created before this column existed
+  // was implicitly live).
+  status            String   @default("pending")
   // Used to verify webhook signatures from the upstream platform. Null
   // for manual stores; generated when an integration is connected.
   webhookSecret     String?
