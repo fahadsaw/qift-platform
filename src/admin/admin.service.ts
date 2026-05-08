@@ -269,8 +269,8 @@ export class AdminService {
         // Cloudflare R2 (avatar + post media).
         r2: Boolean(
           process.env.R2_BUCKET &&
-            process.env.R2_ACCESS_KEY_ID &&
-            process.env.R2_PUBLIC_BASE_URL,
+          process.env.R2_ACCESS_KEY_ID &&
+          process.env.R2_PUBLIC_BASE_URL,
         ),
         // Push notifications (VAPID keys).
         push: Boolean(

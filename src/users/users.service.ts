@@ -8,10 +8,7 @@ import {
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
-import {
-  getDefaultAddressForUser,
-  userHasDefaultAddress,
-} from '../addresses/default-address.helper';
+import { userHasDefaultAddress } from '../addresses/default-address.helper';
 
 // Whitelist of fields that are safe to ship over the wire. `passwordHash`
 // is never included so it cannot leak through any user endpoint.
@@ -103,63 +100,68 @@ export class UsersService {
   // the real counts.) Suspension is purely address-derived: no
   // default address ⇒ suspended.
   async getProfile(userId: string) {
-    const [user, followersCount, followingCount, giftsSentCount, giftsReceivedCount] =
-      await Promise.all([
-        this.prisma.user.findUnique({
-          where: { id: userId },
-          select: {
-            ...SAFE_USER_SELECT,
-            bio: true,
-            avatarUrl: true,
-            // Privacy toggles surfaced to /settings.
-            profileVisibility: true,
-            showGiftsReceived: true,
-            showGiftsSent: true,
-            showFollowers: true,
-            showFollowing: true,
-            // Wishlist preferences surfaced to /preferences.
-            preferredClothingSize: true,
-            preferredShoeSize: true,
-            preferredRingSize: true,
-            preferredPerfume: true,
-            favoriteColors: true,
-            favoriteCategories: true,
-            favoriteBrands: true,
-            allergies: true,
-            acceptsSurpriseGifts: true,
-            addresses: {
-              where: { isDefault: true },
-              take: 1,
-              select: { id: true },
-            },
+    const [
+      user,
+      followersCount,
+      followingCount,
+      giftsSentCount,
+      giftsReceivedCount,
+    ] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          ...SAFE_USER_SELECT,
+          bio: true,
+          avatarUrl: true,
+          // Privacy toggles surfaced to /settings.
+          profileVisibility: true,
+          showGiftsReceived: true,
+          showGiftsSent: true,
+          showFollowers: true,
+          showFollowing: true,
+          // Wishlist preferences surfaced to /preferences.
+          preferredClothingSize: true,
+          preferredShoeSize: true,
+          preferredRingSize: true,
+          preferredPerfume: true,
+          favoriteColors: true,
+          favoriteCategories: true,
+          favoriteBrands: true,
+          allergies: true,
+          acceptsSurpriseGifts: true,
+          addresses: {
+            where: { isDefault: true },
+            take: 1,
+            select: { id: true },
           },
-        }),
-        // Followers / following exclude soft-deleted accounts on either
-        // side so the count matches what the user would actually see if
-        // they tapped through to the list.
-        this.prisma.follow.count({
-          where: {
-            followingId: userId,
-            status: 'accepted',
-            follower: { deletedAt: null },
-          },
-        }),
-        this.prisma.follow.count({
-          where: {
-            followerId: userId,
-            status: 'accepted',
-            following: { deletedAt: null },
-          },
-        }),
-        // Cancelled gifts didn't actually happen — exclude from public
-        // counts. Same rule applied in getPublicProfile.
-        this.prisma.gift.count({
-          where: { senderId: userId, status: { not: 'cancelled' } },
-        }),
-        this.prisma.gift.count({
-          where: { receiverId: userId, status: { not: 'cancelled' } },
-        }),
-      ]);
+        },
+      }),
+      // Followers / following exclude soft-deleted accounts on either
+      // side so the count matches what the user would actually see if
+      // they tapped through to the list.
+      this.prisma.follow.count({
+        where: {
+          followingId: userId,
+          status: 'accepted',
+          follower: { deletedAt: null },
+        },
+      }),
+      this.prisma.follow.count({
+        where: {
+          followerId: userId,
+          status: 'accepted',
+          following: { deletedAt: null },
+        },
+      }),
+      // Cancelled gifts didn't actually happen — exclude from public
+      // counts. Same rule applied in getPublicProfile.
+      this.prisma.gift.count({
+        where: { senderId: userId, status: { not: 'cancelled' } },
+      }),
+      this.prisma.gift.count({
+        where: { receiverId: userId, status: { not: 'cancelled' } },
+      }),
+    ]);
     if (!user) throw new NotFoundException('User not found');
     const { addresses, ...safe } = user;
     const hasDefaultAddress = addresses.length > 0;
@@ -324,8 +326,14 @@ export class UsersService {
       acceptsSurpriseGifts?: boolean;
     },
   ) {
+    // The string-field loop writes through a typed bag instead of
+    // `(data as any)[k]` so the lint stays clean. We narrow to a
+    // record of optional `string | null` values keyed by the field
+    // names we'll touch — Prisma accepts any subset of the
+    // UserUpdateInput shape, so the final assignment back to `data`
+    // is safe.
     const data: Prisma.UserUpdateInput = {};
-    const STR_FIELDS: Array<keyof typeof body> = [
+    const STR_FIELDS = [
       'preferredClothingSize',
       'preferredShoeSize',
       'preferredRingSize',
@@ -334,22 +342,23 @@ export class UsersService {
       'favoriteCategories',
       'favoriteBrands',
       'allergies',
-    ];
+    ] as const;
+    type StrField = (typeof STR_FIELDS)[number];
+    const strBag: Partial<Record<StrField, string | null>> = {};
     for (const k of STR_FIELDS) {
       const raw = body[k];
       if (raw === undefined) continue;
       if (raw === null) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (data as any)[k] = null;
+        strBag[k] = null;
         continue;
       }
       const v = String(raw).trim();
       if (v.length > 200) {
         throw new BadRequestException(`${k} must be at most 200 chars`);
       }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (data as any)[k] = v.length === 0 ? null : v;
+      strBag[k] = v.length === 0 ? null : v;
     }
+    Object.assign(data, strBag);
     if (body.acceptsSurpriseGifts !== undefined) {
       data.acceptsSurpriseGifts = body.acceptsSurpriseGifts === true;
     }
@@ -386,7 +395,9 @@ export class UsersService {
     if (body.profileVisibility !== undefined) {
       const v = String(body.profileVisibility).trim().toLowerCase();
       if (v !== 'public' && v !== 'private') {
-        throw new BadRequestException('profileVisibility must be public|private');
+        throw new BadRequestException(
+          'profileVisibility must be public|private',
+        );
       }
       data.profileVisibility = v;
     }
@@ -462,12 +473,7 @@ export class UsersService {
       'threads',
       'telegram',
     ]);
-    const SUPPORTED = new Set([
-      'qift',
-      'phone',
-      'email',
-      ...SOCIAL_TYPES,
-    ]);
+    const SUPPORTED = new Set(['qift', 'phone', 'email', ...SOCIAL_TYPES]);
     if (!SUPPORTED.has(normType)) return [];
 
     // Min-length gate. Phone has its own dedicated path below (exact
@@ -655,10 +661,7 @@ export class UsersService {
     // Canonical default-address resolver. Every other gift-flow caller
     // routes through the same helper so a future rule change (e.g.
     // soft-deleted addresses, regional gating) lands in one place.
-    const hasDefaultAddress = await userHasDefaultAddress(
-      this.prisma,
-      user.id,
-    );
+    const hasDefaultAddress = await userHasDefaultAddress(this.prisma, user.id);
     const canDeliverFast = fastCity
       ? await this.canDeliverFast(user.id, fastCity)
       : null;

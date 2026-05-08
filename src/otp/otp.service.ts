@@ -102,10 +102,9 @@ export class OtpService {
     //
     // Remove this block (and the OTP_DEV_MODE env var) before the
     // public launch.
-    const isFixedCodeMode =
-      ['1', 'true', 'yes'].includes(
-        process.env.OTP_DEV_MODE?.trim().toLowerCase() ?? '',
-      );
+    const isFixedCodeMode = ['1', 'true', 'yes'].includes(
+      process.env.OTP_DEV_MODE?.trim().toLowerCase() ?? '',
+    );
     const code = isFixedCodeMode ? '1234' : this.generateCode();
     // ────────────────────────────────────────────────────────────────
 

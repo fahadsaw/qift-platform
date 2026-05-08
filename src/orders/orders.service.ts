@@ -8,10 +8,7 @@ import {
 } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  validatePaymentProvider,
-  type PaymentProvider,
-} from '../payments/providers';
+import { validatePaymentProvider } from '../payments/providers';
 import { UsersService } from '../users/users.service';
 import { ProductsService } from '../products/products.service';
 import { validateGiftMedia } from '../gifts/gift-visibility';

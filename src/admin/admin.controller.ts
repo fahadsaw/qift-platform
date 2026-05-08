@@ -47,10 +47,7 @@ export class AdminController {
   }
 
   @Patch('stores/:id/status')
-  setStoreStatus(
-    @Param('id') id: string,
-    @Body() body: { status?: string },
-  ) {
+  setStoreStatus(@Param('id') id: string, @Body() body: { status?: string }) {
     return this.admin.setStoreStatus(id, body?.status ?? '');
   }
 
@@ -69,10 +66,7 @@ export class AdminController {
   }
 
   @Patch('reports/:id/status')
-  setReportStatus(
-    @Param('id') id: string,
-    @Body() body: { status?: string },
-  ) {
+  setReportStatus(@Param('id') id: string, @Body() body: { status?: string }) {
     return this.admin.setReportStatus(id, body?.status ?? '');
   }
 

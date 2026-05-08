@@ -451,9 +451,7 @@ export class GiftsService {
       'default_address_used',
     ]);
     if (!cancellable.has(gift.status)) {
-      throw new BadRequestException(
-        'لا يمكن إلغاء الهدية في هذه المرحلة',
-      );
+      throw new BadRequestException('لا يمكن إلغاء الهدية في هذه المرحلة');
     }
 
     const result = await this.prisma.gift.updateMany({

@@ -23,6 +23,7 @@ import { ReportsModule } from './reports/reports.module';
 import { MediaModule } from './media/media.module';
 import { PostsModule } from './posts/posts.module';
 import { AdminModule } from './admin/admin.module';
+import { MailModule } from './mail/mail.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { AdminModule } from './admin/admin.module';
     MediaModule,
     PostsModule,
     AdminModule,
+    MailModule,
   ],
   // UsersController + UsersService now live inside UsersModule —
   // imported above. Registering them here would create a duplicate

@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { GiftsService } from '../gifts/gifts.service';
-import { validatePaymentProvider, type PaymentProvider } from './providers';
+import { validatePaymentProvider } from './providers';
 import { getGateway } from './gateways/registry';
 
 const FORBIDDEN_MSG = 'غير مصرح لك';
@@ -99,7 +99,11 @@ export class PaymentsService {
     // JWT-bound senderId, surprise reveal gate). Every field captured
     // on the Order at /checkout time is forwarded here so the Gift
     // inherits the buyer's full intent.
-    let gift;
+    // GiftsService.create returns the Prisma row + visibility flags;
+    // the only thing we need here is `id` for the linking update
+    // below. Narrowing to `{ id: string }` keeps the lint clean
+    // without pulling in the full Gift type from another module.
+    let gift: { id: string };
     try {
       gift = await this.gifts.create(
         {

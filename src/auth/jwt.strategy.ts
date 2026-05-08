@@ -23,10 +23,22 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: any) {
-    return {
-      userId: payload.sub,
-      qiftUsername: payload.qiftUsername,
-    };
+  // Passport calls this after a JWT signature passes. The shape of
+  // `payload` is whatever AuthService.signToken() encoded, narrowed
+  // here so the rest of the codebase reads `req.user` as a typed
+  // record. `validate()` is sync but Passport's typings require
+  // returning a Promise — wrapping the literal in Promise.resolve
+  // satisfies both without forcing an unused `await`.
+  validate(
+    payload: unknown,
+  ): Promise<{ userId: string; qiftUsername: string }> {
+    const p =
+      typeof payload === 'object' && payload !== null
+        ? (payload as { sub?: unknown; qiftUsername?: unknown })
+        : {};
+    return Promise.resolve({
+      userId: typeof p.sub === 'string' ? p.sub : '',
+      qiftUsername: typeof p.qiftUsername === 'string' ? p.qiftUsername : '',
+    });
   }
 }

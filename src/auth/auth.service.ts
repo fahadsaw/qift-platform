@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   HttpException,
   HttpStatus,
   Injectable,
@@ -152,11 +151,7 @@ export class AuthService {
     // surface as a generic Prisma P2002. We want a clean stable code.
     const conflict = await this.prisma.user.findFirst({
       where: {
-        OR: [
-          { qiftUsername },
-          ...(email ? [{ email }] : []),
-          { phone },
-        ],
+        OR: [{ qiftUsername }, ...(email ? [{ email }] : []), { phone }],
       },
       select: { qiftUsername: true, email: true, phone: true },
     });
@@ -254,10 +249,7 @@ export class AuthService {
   // inline field error without parsing localized strings — a pattern
   // already used by /gifts → `recipient_no_default_address`.
   private fieldError(status: HttpStatus, code: string, message: string) {
-    return new HttpException(
-      { statusCode: status, code, message },
-      status,
-    );
+    return new HttpException({ statusCode: status, code, message }, status);
   }
 
   private sanitize<T extends { passwordHash?: string | null }>(user: T) {

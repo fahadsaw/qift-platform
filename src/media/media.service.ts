@@ -46,9 +46,10 @@ export class MediaService {
   private readonly logger = new Logger(MediaService.name);
   private client: S3Client | null = null;
   private readonly bucket = process.env.R2_BUCKET ?? '';
-  private readonly publicBase = (
-    process.env.R2_PUBLIC_BASE_URL ?? ''
-  ).replace(/\/+$/, '');
+  private readonly publicBase = (process.env.R2_PUBLIC_BASE_URL ?? '').replace(
+    /\/+$/,
+    '',
+  );
 
   // Lazy-init the S3 client so a missing-config boot still starts
   // (every other module is independent of media). The first upload

@@ -126,11 +126,7 @@ export class SocialAccountsService {
   // PATCH /social-accounts/:id — update the handle of an existing row.
   // Scoped to the JWT viewer (must own the row). Platform can't be
   // edited — to change platform, delete + re-link.
-  async updateHandle(
-    viewerUserId: string,
-    id: string,
-    body: UpdateInput,
-  ) {
+  async updateHandle(viewerUserId: string, id: string, body: UpdateInput) {
     const handle = normalizeHandle(body.handle);
     if (!handle) {
       throw new BadRequestException('handle_required');

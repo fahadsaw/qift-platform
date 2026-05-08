@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MediaService } from '../media/media.service';
 
@@ -25,7 +29,12 @@ export class PostsService {
   // elsewhere (e.g. server-side worker uploads).
   async createPost(args: {
     userId: string;
-    file: { mimetype: string; originalname: string; buffer: Buffer; size: number };
+    file: {
+      mimetype: string;
+      originalname: string;
+      buffer: Buffer;
+      size: number;
+    };
     caption?: string | null;
   }) {
     const { file, userId } = args;

@@ -15,6 +15,11 @@ export class MockGateway implements PaymentGateway {
   initiate(
     input: PaymentGatewayInitiateInput,
   ): Promise<PaymentGatewayInitiateResult> {
+    // The mock doesn't need the input fields — real provider
+    // implementations will hit the bank/PSP API with `input` here.
+    // The `void` suppresses the unused-parameter lint without
+    // changing the interface signature.
+    void input;
     return Promise.resolve({
       providerPaymentId: `mock_${this.key}_${randomUUID()}`,
     });
