@@ -17,6 +17,8 @@ import { JwtService } from '@nestjs/jwt';
 // data migration. Existing password hashes verify identically.
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { MailService } from '../mail/mail.service';
+import { normalizePhone } from './phone-normalize';
 
 export type RegisterInput = {
   fullName?: string;
@@ -43,6 +45,7 @@ export class AuthService {
   constructor(
     private prisma: PrismaService,
     private jwtService: JwtService,
+    private mail: MailService,
   ) {}
 
   // POST /auth/register — register OR login via phone OTP.
@@ -64,11 +67,16 @@ export class AuthService {
   // completes successfully, so a username conflict (or any other failure
   // after OTP verify) doesn't force the user to re-request a code.
   async register(body: RegisterInput) {
-    const phone = body.phone?.trim();
+    // Canonicalise the phone first so the OTP-row lookup, the
+    // duplicate-account check, and the eventual create() all read
+    // the same E.164 string. A user who typed "0501234567" at OTP
+    // send time and "+966 50 123 4567" at register time still
+    // resolves to one row.
+    const phone = normalizePhone(body.phone);
     const code = body.code?.trim();
 
-    if (!phone || phone.length < 6) {
-      throw new BadRequestException('phone is required');
+    if (!phone) {
+      throw new BadRequestException('invalid_phone');
     }
     if (!code) {
       throw new BadRequestException('code is required');
