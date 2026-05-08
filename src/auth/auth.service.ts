@@ -27,10 +27,18 @@ export type RegisterInput = {
   email?: string;
   password?: string;
   defaultAddress?: string;
-  // OTP code paired with `phone`. Required for every call. The backend
-  // verifies (phone, code) against the Otp table BEFORE issuing any JWT
-  // — this is the only credential proving ownership of the phone number.
+  // OTP code. Required for every call. The backend verifies
+  // (channel-target, code) against the Otp table BEFORE issuing any
+  // JWT — this is the only credential proving ownership of the
+  // chosen channel.
   code?: string;
+  // Which channel the OTP was sent to. Defaults to 'phone' for
+  // back-compat with older clients. When 'email', the verify lookup
+  // and the existing-user search both key off `email` instead of
+  // `phone`, and `emailVerifiedAt` is stamped on the new user
+  // (phone stays unverified until a future flow proves it). When
+  // 'phone', the historic behaviour applies.
+  channel?: 'phone' | 'email';
 };
 
 export type LoginInput = {
@@ -48,20 +56,34 @@ export class AuthService {
     private mail: MailService,
   ) {}
 
-  // POST /auth/register — register OR login via phone OTP.
+  // POST /auth/register — register OR login via phone OR email OTP.
   //
   // The endpoint is the only place a JWT can be minted via the OTP path,
-  // so OTP verification happens HERE (not on the client). Phone + code
-  // are mandatory; everything else is conditional on whether the phone
-  // already belongs to a user:
+  // so OTP verification happens HERE (not on the client). The caller
+  // chooses a channel ('phone' or 'email') — Taqnyat is currently the
+  // SMS provider but isn't always activated, so the email path exists
+  // as a first-class alternative, not just a fallback.
   //
-  //   phone exists  → log in. username/email/password from the body are
-  //                   IGNORED (we don't trust client-supplied data to
-  //                   override existing account fields). JWT for the
-  //                   existing user is returned.
-  //   phone is new  → register. username + password are required;
-  //                   uniqueness is enforced for username/email; a new
-  //                   user row is created and a JWT is returned.
+  // Mandatory regardless of channel: `code`, `phone` (because the User
+  // schema requires a unique phone on every row even when the OTP
+  // proved a different channel).
+  // Mandatory when channel='email': `email`. The OTP row is keyed off
+  // the canonical email (lowercased) and that's what we look up.
+  //
+  // Existing-user behaviour:
+  //
+  //   target exists  → log in. username/email/password from the body are
+  //                    IGNORED (we don't trust client-supplied data to
+  //                    override existing account fields). JWT for the
+  //                    existing user is returned.
+  //   target is new  → register. username + password are required;
+  //                    uniqueness is enforced for username/email/phone;
+  //                    a new user row is created and a JWT is returned.
+  //                    The matching `*VerifiedAt` timestamp is stamped
+  //                    only for the channel that was actually proven —
+  //                    a phone-OTP signup leaves the email unverified
+  //                    until a future verify flow proves it, and vice
+  //                    versa.
   //
   // The OTP row is consumed (deleted) only after the register/login
   // completes successfully, so a username conflict (or any other failure
@@ -71,9 +93,13 @@ export class AuthService {
     // duplicate-account check, and the eventual create() all read
     // the same E.164 string. A user who typed "0501234567" at OTP
     // send time and "+966 50 123 4567" at register time still
-    // resolves to one row.
+    // resolves to one row. Phone is required even on the email
+    // channel because the User schema requires it.
     const phone = normalizePhone(body.phone);
     const code = body.code?.trim();
+    const channel: 'phone' | 'email' =
+      body.channel === 'email' ? 'email' : 'phone';
+    const email = body.email?.trim().toLowerCase() || null;
 
     if (!phone) {
       throw new BadRequestException('invalid_phone');
@@ -81,13 +107,29 @@ export class AuthService {
     if (!code) {
       throw new BadRequestException('code is required');
     }
+    if (channel === 'email' && !email) {
+      // Email channel can't verify against an empty target. The
+      // frontend should have blocked this client-side, but defend
+      // anyway — better a clear 400 than a misleading invalid_code.
+      throw new BadRequestException('email is required for email OTP');
+    }
 
-    // --- 1. Server-side OTP verification --------------------------------
+    // --- 1. Pick the OTP target for the chosen channel -----------------
+    // The Otp row was keyed by the same string OtpService.send wrote:
+    // the normalised E.164 phone OR the lowercased email. Using the
+    // wrong target here means the verify can never match, even with
+    // a real code in hand.
+    const otpTarget = channel === 'email' ? email! : phone;
+
+    // --- 2. Server-side OTP verification --------------------------------
     // Same matching rules as OtpService.verify: latest row for this
-    // target, equal code, not expired. The OTP is NOT deleted here yet
-    // — see the consume step at the bottom of each branch.
+    // target, equal code, not expired, AND row.type matches the
+    // channel. The type check defends against a hypothetical case
+    // where the same string (very unlikely for phone vs email) ever
+    // appeared as both — we want to honour ONLY the channel the
+    // caller proved.
     const otp = await this.prisma.otp.findFirst({
-      where: { target: phone },
+      where: { target: otpTarget, type: channel },
       orderBy: { createdAt: 'desc' },
     });
     if (!otp || otp.code !== code) {
@@ -97,15 +139,24 @@ export class AuthService {
       throw new BadRequestException('expired_code');
     }
 
-    // --- 2. Branch on phone existence ----------------------------------
+    // --- 3. Branch on existing-user lookup -----------------------------
+    // Look up by the channel that was proven — the user typed an OTP
+    // that landed at THIS target, so this target is what they own.
+    // For phone-channel, that's the historic behaviour. For
+    // email-channel, an existing account with this email logs in
+    // even if the body's phone differs (the client may not even have
+    // it).
     const existing = await this.prisma.user.findFirst({
-      where: { phone, deletedAt: null },
+      where:
+        channel === 'email'
+          ? { email: email!, deletedAt: null }
+          : { phone, deletedAt: null },
     });
 
     if (existing) {
-      // Login path. Body fields other than phone+code are intentionally
-      // ignored — the client cannot use this endpoint to overwrite an
-      // existing account's fullName/email/password.
+      // Login path. Body fields other than the channel+code are
+      // intentionally ignored — the client cannot use this endpoint
+      // to overwrite an existing account's fullName/email/password.
       await this.prisma.otp.delete({ where: { id: otp.id } }).catch(() => {});
       const accessToken = await this.signToken(
         existing.id,
@@ -117,10 +168,12 @@ export class AuthService {
       };
     }
 
-    // --- 3. Register path ----------------------------------------------
+    // --- 4. Register path ----------------------------------------------
+    // Note: `email` was already canonicalised at the top of register()
+    // because the email-channel verify step needed it. Re-using that
+    // variable here keeps a single source of truth.
     const fullName = body.fullName?.trim() || null;
     const qiftUsername = body.qiftUsername?.trim().toLowerCase();
-    const email = body.email?.trim().toLowerCase() || null;
     const password = body.password;
     const defaultAddress = body.defaultAddress?.trim() || null;
 
@@ -184,6 +237,15 @@ export class AuthService {
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
+    // Stamp the verification timestamp ONLY for the channel that was
+    // actually proven by the OTP we matched above. A phone-OTP signup
+    // proves the phone (phoneVerifiedAt = now); the email is set but
+    // unverified (emailVerifiedAt = null). An email-OTP signup is the
+    // mirror: emailVerifiedAt = now, phoneVerifiedAt = null. The
+    // social-accounts UI reads these timestamps to show a "Verified"
+    // chip on the proven channel and an unobtrusive "Verify" prompt
+    // on the other.
+    const verifiedAt = new Date();
     const user = await this.prisma.user.create({
       data: {
         fullName,
@@ -192,11 +254,8 @@ export class AuthService {
         email,
         passwordHash,
         defaultAddress,
-        // Phone is OTP-verified at this point — the only way to reach
-        // this `create` is through a successful OTP check above. Stamp
-        // phoneVerifiedAt so the social-accounts UI can show a real
-        // "Verified" chip without an extra round-trip.
-        phoneVerifiedAt: new Date(),
+        phoneVerifiedAt: channel === 'phone' ? verifiedAt : null,
+        emailVerifiedAt: channel === 'email' ? verifiedAt : null,
       },
     });
 

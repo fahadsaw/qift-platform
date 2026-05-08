@@ -42,19 +42,22 @@ export class OtpService {
 
   // Core OTP send. Always:
   //   1. Normalises target (phone → E.164; email → lowercase).
-  //   2. Generates a real random 4-digit code.
-  //   3. Persists it to the Otp table.
-  //   4. Dispatches to the right transport (Taqnyat for phone,
+  //   2. Refuses up-front when the requested transport isn't
+  //      configured (503 with `sms_unavailable` / `email_unavailable`)
+  //      so the frontend can immediately offer the other channel
+  //      instead of accepting the request, persisting an Otp row,
+  //      and silently failing to deliver. The previous behaviour
+  //      (return ok=true even when dispatch was impossible) made
+  //      the user type a code that never arrived.
+  //   3. Generates a real random 4-digit code.
+  //   4. Persists it to the Otp table.
+  //   5. Dispatches to the right transport (Taqnyat for phone,
   //      Resend for email).
-  //   5. Returns { ok, expiresAt }. The code is NEVER returned to
-  //      the caller — it has to land via the real channel.
+  //   6. Returns { ok, expiresAt, dispatched, channel }. The code is
+  //      NEVER returned to the caller — it has to land via the real
+  //      channel.
   //
-  // No dev-mode bypass, no fixed code, no auto-verify shortcut. If
-  // the transport isn't configured we LOG an error and still return
-  // ok (the row is persisted; an admin can pull the code from the
-  // DB if absolutely necessary), but a normal user will never
-  // receive the code and the verify step will reject them. This is
-  // the safer default — never silently auto-verify.
+  // No dev-mode bypass, no fixed code, no auto-verify shortcut.
   async send(body: SendOtpInput) {
     const rawTarget = body.target?.trim();
     const type = body.type === 'email' ? 'email' : 'phone';
@@ -83,6 +86,41 @@ export class OtpService {
         `[otp:reject] type=email reason=invalid-shape raw="${rawTarget}"`,
       );
       throw new BadRequestException('invalid_email');
+    }
+
+    // Transport-availability gate. Refuse the send if the provider
+    // for the requested channel isn't configured — better to surface
+    // the fallback choice immediately than to swallow the request and
+    // leave the user staring at an OTP screen for a code that will
+    // never arrive. The frontend reads the typed `code` to switch the
+    // toggle to the other channel.
+    if (type === 'phone' && !this.smsConfigured()) {
+      this.logger.warn(
+        `[otp:reject] type=phone target=${target} reason=sms-unavailable`,
+      );
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+          code: 'sms_unavailable',
+          message:
+            'SMS delivery is not configured on the server — try email instead.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    if (type === 'email' && !this.mail.isConfigured()) {
+      this.logger.warn(
+        `[otp:reject] type=email target=${target} reason=email-unavailable`,
+      );
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+          code: 'email_unavailable',
+          message:
+            'Email delivery is not configured on the server — try SMS instead.',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
     }
 
     // Rate limit BEFORE writing the row. Returns 429 with a stable
@@ -120,27 +158,29 @@ export class OtpService {
     // a phone delivery failure can't break the email path and
     // vice-versa. Errors are LOGGED loudly so an ops alert can
     // grep "[otp:dispatch-failed]" in production.
-    if (type === 'phone') {
-      await this.dispatchSms(target, code);
-    } else {
-      await this.dispatchEmail(target, code);
-    }
+    const dispatched =
+      type === 'phone'
+        ? await this.dispatchSms(target, code)
+        : await this.dispatchEmail(target, code);
 
-    return { ok: true, expiresAt };
+    return { ok: true, expiresAt, dispatched, channel: type };
+  }
+
+  // Cheap availability check for the SMS path. Lives next to send()
+  // so it can be reused by the up-front transport gate above and the
+  // dispatch path below — keeping both readings in sync.
+  private smsConfigured(): boolean {
+    return !!process.env.TAQNYAT_BEARER_TOKEN?.trim();
   }
 
   // Email dispatch via Resend. MailService.sendOtpEmail returns
   // `{ ok, id, reason }` and never throws — we surface the result
   // here as a structured log line per attempt so ops can correlate
-  // user complaints with Resend's dashboard.
-  private async dispatchEmail(target: string, code: string) {
-    if (!this.mail.isConfigured()) {
-      this.logger.error(
-        `[otp:dispatch-failed] type=email target=${target} reason=mail-not-configured ` +
-          'set RESEND_API_KEY on the API to enable real email OTP delivery.',
-      );
-      return;
-    }
+  // user complaints with Resend's dashboard. Returns true only when
+  // Resend acknowledged the send; the caller threads this back as
+  // `dispatched` on the response so the frontend can warn the user
+  // when delivery is uncertain.
+  private async dispatchEmail(target: string, code: string): Promise<boolean> {
     this.logger.log(`[otp:dispatch] type=email target=${target} via=resend`);
     const result = await this.mail.sendOtpEmail({
       to: target,
@@ -152,23 +192,27 @@ export class OtpService {
       this.logger.log(
         `[otp:sent] type=email target=${target} provider-id=${result.id ?? '(none)'}`,
       );
-    } else {
-      this.logger.error(
-        `[otp:dispatch-failed] type=email target=${target} reason=${result.reason ?? 'unknown'}`,
-      );
+      return true;
     }
+    this.logger.error(
+      `[otp:dispatch-failed] type=email target=${target} reason=${result.reason ?? 'unknown'}`,
+    );
+    return false;
   }
 
   // SMS dispatch via Taqnyat. Same pattern as email: structured log
-  // line per attempt; never throws back to the caller.
-  private async dispatchSms(target: string, code: string) {
+  // line per attempt; never throws back to the caller. The token
+  // presence check is duplicated here as belt-and-braces — the up-
+  // front gate in send() already refused with `sms_unavailable`, but
+  // a hot-rotation that yanks the token between gate + dispatch
+  // shouldn't crash the request.
+  private async dispatchSms(target: string, code: string): Promise<boolean> {
     const token = process.env.TAQNYAT_BEARER_TOKEN?.trim();
     if (!token) {
       this.logger.error(
-        `[otp:dispatch-failed] type=phone target=${target} reason=taqnyat-not-configured ` +
-          'set TAQNYAT_BEARER_TOKEN on the API to enable real SMS OTP delivery.',
+        `[otp:dispatch-failed] type=phone target=${target} reason=taqnyat-not-configured`,
       );
-      return;
+      return false;
     }
     const message = `رمز التحقق الخاص بك هو: ${code}`;
     this.logger.log(`[otp:dispatch] type=phone target=${target} via=taqnyat`);
@@ -190,17 +234,19 @@ export class OtpService {
         this.logger.log(
           `[otp:sent] type=phone target=${target} taqnyat-status=${res.status}`,
         );
-      } else {
-        this.logger.error(
-          `[otp:dispatch-failed] type=phone target=${target} ` +
-            `taqnyat-status=${res.status} body=${JSON.stringify(data)}`,
-        );
+        return true;
       }
+      this.logger.error(
+        `[otp:dispatch-failed] type=phone target=${target} ` +
+          `taqnyat-status=${res.status} body=${JSON.stringify(data)}`,
+      );
+      return false;
     } catch (err) {
       this.logger.error(
         `[otp:dispatch-failed] type=phone target=${target} ` +
           `error=${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 
