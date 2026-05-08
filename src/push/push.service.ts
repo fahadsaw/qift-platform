@@ -45,7 +45,7 @@ export class PushService implements OnModuleInit {
   onModuleInit() {
     const publicKey = process.env.VAPID_PUBLIC_KEY?.trim();
     const privateKey = process.env.VAPID_PRIVATE_KEY?.trim();
-    const subject = process.env.VAPID_SUBJECT?.trim() || 'mailto:test@qift.app';
+    const subject = process.env.VAPID_SUBJECT?.trim() || 'mailto:ops@qift.net';
 
     if (!publicKey || !privateKey) {
       this.logger.warn(

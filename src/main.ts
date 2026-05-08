@@ -6,11 +6,21 @@ import { AppModule } from './app.module';
 // Bump on every CORS / bootstrap change so the Railway log line
 // confirms which build is live. Search Railway logs for this string
 // after a deploy — if you don't see it, the new build didn't take.
-const BOOT_TAG = 'qift-api/cors-v7';
+const BOOT_TAG = 'qift-api/cors-v8';
 
 // Always-allowed local dev origins. Matches any port so Next can pick
 // 3000/3001/3002 freely without breaking CORS.
 const LOCALHOST_REGEX = /^http:\/\/localhost(:\d+)?$/;
+
+// Production origins for qift.net + the www. variant. Hardcoded so a
+// missing CORS_ORIGINS env var on Railway doesn't quietly kill the
+// app the moment it points at the production domain. Operators can
+// still extend the list via CORS_ORIGINS for staging / preview /
+// alternate domains.
+const PRODUCTION_ORIGINS = new Set([
+  'https://qift.net',
+  'https://www.qift.net',
+]);
 
 // Vercel preview / production aliases for THIS frontend project.
 //
@@ -57,13 +67,17 @@ async function bootstrap() {
   //   1. No-origin requests (curl, server-to-server, mobile webviews) —
   //      browsers always send Origin, so missing-Origin is not a CORS
   //      attack vector. Allow.
-  //   2. Exact match against CORS_ORIGINS env (operator override).
-  //   3. Localhost regex — local dev convenience.
-  //   4. Vercel project regex — covers every preview / production /
+  //   2. Production qift.net domain (hardcoded — survives a missing
+  //      CORS_ORIGINS env var).
+  //   3. Exact match against CORS_ORIGINS env (operator override for
+  //      staging / preview / alternate domains).
+  //   4. Localhost regex — local dev convenience.
+  //   5. Vercel project regex — covers every preview / production /
   //      branch URL Vercel hands out for this frontend project.
   // Anything else falls through to a logged WARN + a CORS rejection.
   const isAllowedOrigin = (origin: string | undefined): boolean => {
     if (!origin) return true;
+    if (PRODUCTION_ORIGINS.has(origin)) return true;
     if (envOrigins.includes(origin)) return true;
     if (LOCALHOST_REGEX.test(origin)) return true;
     if (VERCEL_PROJECT_REGEX.test(origin)) return true;
@@ -100,6 +114,7 @@ async function bootstrap() {
   logger.log(
     `[${BOOT_TAG}] listening on 0.0.0.0:${port} — ` +
       `CORS layers: ` +
+      `production=[${[...PRODUCTION_ORIGINS].join(', ')}] ` +
       `envOrigins=[${envOrigins.join(', ') || '(none)'}] ` +
       `localhost=${LOCALHOST_REGEX.source} ` +
       `vercelProject=${VERCEL_PROJECT_REGEX.source}`,
