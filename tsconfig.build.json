@@ -1,10 +1,28 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Pin rootDir so the compiled output is always rooted at `src/` —
+    // i.e. `dist/main.js`, not `dist/src/main.js`. TypeScript otherwise
+    // auto-computes the common rootDir from every included file, so
+    // adding even one `.ts` file outside `src/` (an ops script, a
+    // config file, anything) silently shifts every output path under
+    // `dist/src/...` and breaks the production start command
+    // (`node dist/main` becomes a 404). Pinning + the `scripts`
+    // exclude below give defence in depth: exclude is the primary
+    // fix; rootDir turns any future regression into a hard build error
+    // instead of a silent runtime crash on Railway.
+    "rootDir": "./src"
+  },
   "exclude": [
     "node_modules",
     "test",
     "dist",
     "**/*spec.ts",
-    "prisma"
+    "prisma",
+    // Ops-only scripts (e.g. cleanup-test-users.ts) are run with
+    // `npx ts-node scripts/...` — never compiled into the production
+    // bundle. Including them would force rootDir to broaden to the
+    // project root and relocate `dist/main.js` to `dist/src/main.js`.
+    "scripts"
   ]
 }
