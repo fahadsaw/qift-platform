@@ -643,12 +643,24 @@ export class UsersService {
     // Soft-deleted accounts shouldn't show up to senders — they can't
     // receive gifts anyway. The previous query missed this filter,
     // which would have returned a stale result for a deleted user.
+    //
+    // Selection: every field returned here MUST be public-safe. The
+    // sender uses this endpoint to confirm "is this the right
+    // person?" before paying — they need enough to recognise the
+    // recipient (avatar, display name, public/private chip) but
+    // absolutely nothing private. Phone, email, address, default-
+    // address city, gift counts, wishlist, sizes — none of these
+    // ever flow through this endpoint, even when the recipient's
+    // privacy flags would otherwise allow them. The contract here
+    // is narrower than getPublicProfile by design.
     const user = await this.prisma.user.findFirst({
       where: { qiftUsername: username, deletedAt: null },
       select: {
         id: true,
         qiftUsername: true,
         fullName: true,
+        avatarUrl: true,
+        profileVisibility: true,
       },
     });
     if (!user) {
@@ -674,6 +686,13 @@ export class UsersService {
       exists: true as const,
       qiftUsername: user.qiftUsername,
       fullName: user.fullName,
+      avatarUrl: user.avatarUrl,
+      // 'public' | 'private'. Lets the sender's UI show a small chip
+      // ("public profile" / "private profile") so they can sanity-
+      // check that the recipient they're sending to is the one they
+      // think — a private account with the same username will read
+      // differently and stop a wrong-person mistake.
+      profileVisibility: user.profileVisibility,
       hasDefaultAddress,
       // `null` when no fastCity was supplied — the UI uses `null` as the
       // "this product isn't fast delivery, ignore the field" signal.
