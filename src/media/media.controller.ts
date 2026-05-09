@@ -17,9 +17,14 @@ type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 // Hard caps. Mirror the frontend's preflight check so honest clients
 // don't bother POSTing oversized payloads, but never trust the client
 // — we re-validate here and Multer will already have rejected
-// anything > MAX_BYTES at parse time.
-const MAX_BYTES = 8 * 1024 * 1024; // 8 MB
-const ALLOWED_MIME = /^image\/(png|jpe?g|gif|webp|heic|heif|avif)$/i;
+// anything > the larger ceiling at parse time.
+const MAX_PHOTO_BYTES = 8 * 1024 * 1024; // 8 MB — same ceiling as posts.
+const MAX_VIDEO_BYTES = 50 * 1024 * 1024; // 50 MB — short reveal clips.
+const ALLOWED_PHOTO_MIME = /^image\/(png|jpe?g|gif|webp|heic|heif|avif)$/i;
+const ALLOWED_VIDEO_MIME = /^video\/(mp4|webm|quicktime)$/i;
+// Avatar endpoint stays photo-only — we don't surface video avatars.
+const ALLOWED_MIME = ALLOWED_PHOTO_MIME;
+const MAX_BYTES = MAX_PHOTO_BYTES;
 
 @Controller('media')
 @UseGuards(JwtAuthGuard)
@@ -91,5 +96,83 @@ export class MediaController {
     });
 
     return { avatarUrl: url };
+  }
+
+  // POST /media/gift — multipart/form-data with a single `file` part.
+  //
+  // Accepts an image OR a short video. Returns the public URL plus a
+  // `mediaType` discriminator ('image' | 'video') so the gift-create
+  // call can pass both to /gifts without the client having to inspect
+  // the mime type itself.
+  //
+  // Storage path is `gifts/<userId>/...` so an account-deletion sweep
+  // can wildcard-purge a user's gift media without touching avatars
+  // or posts. The object is publicly readable on R2 — privacy lives
+  // at the API layer (the gift-visibility module strips `mediaUrl`
+  // from the receiver's view until status === 'delivered'). The R2
+  // URL itself is unguessable (timestamp + randomBytes(4) in the
+  // key) so the unauthenticated public origin is fine.
+  //
+  // We deliberately do NOT mutate any DB row here — the caller owns
+  // the gift create and binds (mediaUrl, mediaType) to the Gift row
+  // in the same /gifts request. Decoupling means an upload that
+  // succeeds but is then abandoned (user closed the tab between
+  // upload + submit) only burns an R2 object, not a half-formed
+  // gift.
+  @Post('gift')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      // Multer's outer ceiling is the larger of the two so video
+      // payloads get past it; the per-mime check below enforces the
+      // smaller photo cap.
+      limits: { fileSize: MAX_VIDEO_BYTES, files: 1 },
+    }),
+  )
+  async uploadGift(
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Req() req: AuthedRequest,
+  ): Promise<{ url: string; mediaType: 'image' | 'video' }> {
+    if (!file) {
+      throw new BadRequestException('Missing file field "file".');
+    }
+    if (!file.buffer || file.buffer.length === 0) {
+      throw new BadRequestException('Empty file.');
+    }
+
+    const isPhoto = ALLOWED_PHOTO_MIME.test(file.mimetype || '');
+    const isVideo = ALLOWED_VIDEO_MIME.test(file.mimetype || '');
+    if (!isPhoto && !isVideo) {
+      throw new BadRequestException(
+        'Unsupported media type. Use a photo (PNG/JPEG/GIF/WebP/HEIC/AVIF) or a short video (MP4/WebM/MOV).',
+      );
+    }
+    const cap = isPhoto ? MAX_PHOTO_BYTES : MAX_VIDEO_BYTES;
+    if (file.buffer.length > cap) {
+      throw new BadRequestException(
+        isPhoto
+          ? 'Photo too large (max 8 MB).'
+          : 'Video too large (max 50 MB).',
+      );
+    }
+
+    const { url } = await this.media.uploadBuffer({
+      keyPrefix: `gifts/${req.user.userId}`,
+      originalName:
+        file.originalname || (isPhoto ? 'gift-photo' : 'gift-video'),
+      contentType: file.mimetype,
+      body: file.buffer,
+    });
+
+    if (url.length > 1024) {
+      // Mirrors the avatar-side guard — Gift.mediaUrl is a String
+      // column without a hard cap on the schema, but downstream
+      // consumers (notifications, share sheets) all assume reasonable
+      // URL lengths. Refuse anything pathological at the API edge.
+      throw new BadRequestException(
+        'Public URL exceeds 1024 chars; check R2_PUBLIC_BASE_URL.',
+      );
+    }
+
+    return { url, mediaType: isPhoto ? 'image' : 'video' };
   }
 }
