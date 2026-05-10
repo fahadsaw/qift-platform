@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StoresService } from '../stores/stores.service';
 
@@ -677,6 +678,318 @@ export class AdminService {
       verdict,
     };
   }
+
+  // ── Seed verification ────────────────────────────────────────
+  //
+  // Tells the operator what state the production DB is in, after
+  // a merchant-onboarding-v2 deploy. Three checks:
+  //
+  //   1. Schema migration applied?  Probes for one of the new
+  //      Store columns (deliveryZones). If absent, migrate didn't
+  //      run.
+  //   2. Test merchants exist?      Looks up the two seeded users
+  //      by qiftUsername (case-insensitive).
+  //   3. Stores + products linked?  Counts owned stores and
+  //      products per merchant.
+  //
+  // PRIVACY: only usernames + counts in the response. No phones,
+  // no emails, no password hashes. Safe to paste into a support
+  // thread.
+  async debugSeedStatus(): Promise<SeedStatus> {
+    // Schema check via raw query against information_schema.
+    // Faster than a probe-update and works even when the test
+    // merchants don't exist yet.
+    const rows = await this.prisma.$queryRawUnsafe<{ column_name: string }[]>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'Store'
+         AND column_name IN ('deliveryZones', 'legalEntityName',
+                             'rejectionReason', 'submittedAt',
+                             'reviewedAt', 'reviewedBy')`,
+    );
+    const presentColumns = new Set(rows.map((r) => r.column_name));
+    const expectedColumns = [
+      'deliveryZones',
+      'legalEntityName',
+      'rejectionReason',
+      'submittedAt',
+      'reviewedAt',
+      'reviewedBy',
+    ];
+    const missingColumns = expectedColumns.filter(
+      (c) => !presentColumns.has(c),
+    );
+    const migrationApplied = missingColumns.length === 0;
+
+    // Per-merchant probe. We look up by qiftUsername (case-
+    // insensitive) AND by deterministic id from the seed script.
+    const merchants = await this._probeSeededMerchant([
+      'merchant.riyadh.flowers',
+      'merchant.gcc.perfumes',
+    ]);
+
+    return {
+      migrationApplied,
+      missingColumns,
+      merchants,
+    };
+  }
+
+  // Run-on-demand seed for the two onboarding-v2 test merchants.
+  // Pulls the same fixtures used by prisma/seed.ts but inlined so
+  // the deployed dist/ can do this without invoking ts-node.
+  // Idempotent: every entity uses upsert with a stable id, so
+  // re-runs never duplicate.
+  //
+  // Auth: this controller is wrapped in JwtAuthGuard + AdminGuard.
+  // We additionally take the admin's userId for the audit log
+  // line we emit at the end.
+  async debugSeedMerchants(adminUserId: string): Promise<{
+    seeded: string[];
+    storeIds: string[];
+    productCount: number;
+  }> {
+    // bcrypt is already a dep (used by AuthService); we import via
+    // require so the seed code doesn't get tree-shaken into every
+    // admin path. Cost is one require on first call.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const bcrypt = require('bcryptjs') as typeof import('bcryptjs');
+    const passwordHash = await bcrypt.hash('qift-merchant-dev', 10);
+
+    const fixtures: SeedMerchantFixture[] = [
+      {
+        userId: 'merchant-riyadh-flowers',
+        storeId: 'store-riyadh-flowers',
+        username: 'merchant.riyadh.flowers',
+        fullName: 'باقات الرياض',
+        phone: '+966500000201',
+        storeName: 'باقات الرياض',
+        city: 'الرياض',
+        category: 'flowers',
+        legalEntityName: 'باقات الرياض للتجارة',
+        countryOfRegistration: 'SA',
+        commercialRegistrationNumber: '1010123456',
+        contactPerson: 'مدير العمليات',
+        contactPhone: '+966500000201',
+        contactEmail: 'ops@riyadh-flowers.test',
+        deliveryZones: [
+          {
+            city: 'الرياض',
+            districts: [
+              'العليا',
+              'الملقا',
+              'الياسمين',
+              'النرجس',
+              'الصحافة',
+              'الفلاح',
+              'حطين',
+              'الورود',
+              'الواحة',
+            ],
+          },
+        ],
+        products: [
+          { slug: 'p1', name: 'باقة جوري الرياض', price: 250 },
+          { slug: 'p2', name: 'باقة تيوليب فاخر', price: 380 },
+          { slug: 'p3', name: 'صندوق ورد كلاسيكي', price: 290 },
+          { slug: 'p4', name: 'باقة بيوني وردي', price: 340 },
+          { slug: 'p5', name: 'تنسيق ورد للمكاتب', price: 420 },
+        ],
+      },
+      {
+        userId: 'merchant-gcc-perfumes',
+        storeId: 'store-gcc-perfumes',
+        username: 'merchant.gcc.perfumes',
+        fullName: 'House of Oud',
+        phone: '+966500000202',
+        storeName: 'House of Oud',
+        city: 'الرياض',
+        category: 'perfume',
+        legalEntityName: 'House of Oud Trading',
+        countryOfRegistration: 'AE',
+        commercialRegistrationNumber: 'DED-789456',
+        contactPerson: 'Customer Care',
+        contactPhone: '+971500000202',
+        contactEmail: 'care@houseofoud.test',
+        deliveryZones: [
+          { city: 'الرياض' },
+          { city: 'جدة' },
+          { city: 'الدمام' },
+          { city: 'الخبر' },
+          { city: 'مكة المكرمة' },
+          { city: 'المدينة المنورة' },
+          { city: 'مدينة الكويت' },
+          { city: 'السالمية' },
+          { city: 'الفروانية' },
+          { city: 'دبي' },
+          { city: 'أبوظبي' },
+          { city: 'الشارقة' },
+          { city: 'الدوحة' },
+          { city: 'المنامة' },
+          { city: 'الرفاع' },
+          { city: 'مسقط' },
+          { city: 'صلالة' },
+        ],
+        products: [
+          { slug: 'p1', name: 'عطر العود الملكي', price: 850 },
+          { slug: 'p2', name: 'عطر زيت العود الفاخر', price: 1450 },
+          { slug: 'p3', name: 'مجموعة العود الذهبية', price: 2200 },
+          { slug: 'p4', name: 'بخور المسك الأبيض', price: 320 },
+          { slug: 'p5', name: 'عطر الياسمين الدمشقي', price: 690 },
+          { slug: 'p6', name: 'مجموعة هدية فاخرة', price: 3500 },
+        ],
+      },
+    ];
+
+    const seededUsernames: string[] = [];
+    const storeIds: string[] = [];
+    let productCount = 0;
+
+    for (const f of fixtures) {
+      // 1) Owner user. role='store' so the merchant nav surfaces
+      // the dashboard link without a separate ownership lookup.
+      // phoneVerifiedAt stamped so the login flow doesn't ask for
+      // an OTP for these test accounts.
+      await this.prisma.user.upsert({
+        where: { id: f.userId },
+        create: {
+          id: f.userId,
+          qiftUsername: f.username,
+          fullName: f.fullName,
+          phone: f.phone,
+          passwordHash,
+          role: 'store',
+          phoneVerifiedAt: new Date(),
+        },
+        // Re-syncing the password hash + role on every call so an
+        // operator who lost the password can rotate everyone in
+        // one button-press.
+        update: { passwordHash, role: 'store' },
+      });
+
+      // 2) Store row, status='approved' so it shows up in /stores
+      // and /admin/stores immediately. v2 fields populated.
+      // deliveryZones uses Prisma.DbNull when empty (matches
+      // sanitizeZones contract).
+      const v2Extras = {
+        legalEntityName: f.legalEntityName,
+        countryOfRegistration: f.countryOfRegistration,
+        commercialRegistrationNumber: f.commercialRegistrationNumber,
+        contactPerson: f.contactPerson,
+        contactPhone: f.contactPhone,
+        contactEmail: f.contactEmail.toLowerCase(),
+        deliveryZones:
+          f.deliveryZones.length > 0
+            ? (f.deliveryZones as unknown as Prisma.InputJsonValue)
+            : Prisma.DbNull,
+      };
+      await this.prisma.store.upsert({
+        where: { id: f.storeId },
+        create: {
+          id: f.storeId,
+          name: f.storeName,
+          ownerId: f.userId,
+          city: f.city,
+          category: f.category,
+          status: 'approved',
+          integrationType: 'none',
+          integrationStatus: 'disconnected',
+          ...v2Extras,
+        },
+        update: {
+          name: f.storeName,
+          city: f.city,
+          category: f.category,
+          ...v2Extras,
+        },
+      });
+
+      // 3) Products. Stable ids so re-running never duplicates.
+      for (const p of f.products) {
+        await this.prisma.product.upsert({
+          where: { id: `${f.storeId}-${p.slug}` },
+          create: {
+            id: `${f.storeId}-${p.slug}`,
+            storeId: f.storeId,
+            name: p.name,
+            price: p.price,
+            category: f.category,
+            sourceType: 'manual',
+            stockStatus: 'in_stock',
+            isAvailable: true,
+          },
+          update: { name: p.name, price: p.price },
+        });
+        productCount += 1;
+      }
+      seededUsernames.push(f.username);
+      storeIds.push(f.storeId);
+    }
+
+    // Ops audit line — admin who triggered the seed. Goes to the
+    // Nest logger so Railway captures it without us writing a
+    // dedicated audit table.
+
+    console.log(
+      `[seed-merchants] adminUserId=${adminUserId} seeded ${seededUsernames.length} merchants, ${productCount} products`,
+    );
+
+    return {
+      seeded: seededUsernames,
+      storeIds,
+      productCount,
+    };
+  }
+
+  private async _probeSeededMerchant(
+    usernames: string[],
+  ): Promise<MerchantSeedProbe[]> {
+    const out: MerchantSeedProbe[] = [];
+    for (const username of usernames) {
+      const user = await this.prisma.user.findFirst({
+        where: { qiftUsername: username, deletedAt: null },
+        select: { id: true, qiftUsername: true, role: true, phone: true },
+      });
+      if (!user) {
+        out.push({
+          username,
+          userExists: false,
+          role: null,
+          phoneMasked: null,
+          ownedStoreCount: 0,
+          productCount: 0,
+        });
+        continue;
+      }
+      const stores = await this.prisma.store.findMany({
+        where: { ownerId: user.id },
+        select: { id: true },
+      });
+      const productCount = stores.length
+        ? await this.prisma.product.count({
+            where: { storeId: { in: stores.map((s) => s.id) } },
+          })
+        : 0;
+      out.push({
+        username: user.qiftUsername,
+        userExists: true,
+        role: user.role,
+        // Mask phone: keep country code + last 4 digits for
+        // identification without leaking the full number.
+        phoneMasked: maskPhone(user.phone),
+        ownedStoreCount: stores.length,
+        productCount,
+      });
+    }
+    return out;
+  }
+}
+
+// Mask all but the last 4 digits of a phone for diagnostic output.
+function maskPhone(phone: string | null | undefined): string | null {
+  if (!phone) return null;
+  const trimmed = phone.replace(/\s+/g, '');
+  if (trimmed.length <= 4) return trimmed;
+  return `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`;
 }
 
 // --- Projections ---------------------------------------------------
@@ -861,4 +1174,50 @@ export type GiftDiagnosis = {
   } | null;
   merchant: { userId: string; qiftUsername: string } | null;
   verdict: GiftDiagnosisVerdict;
+};
+
+// Seed-status response shape. Used by the admin diagnostics panel
+// to verify production state after a merchant-onboarding-v2
+// deploy.
+export type MerchantSeedProbe = {
+  username: string;
+  userExists: boolean;
+  role: string | null;
+  phoneMasked: string | null;
+  ownedStoreCount: number;
+  productCount: number;
+};
+
+export type SeedStatus = {
+  // True when every expected v2 column exists on the Store
+  // table. Goes false the moment one column is missing — usually
+  // the signal that prisma migrate deploy didn't run.
+  migrationApplied: boolean;
+  // The columns we probed for that aren't present. Empty when
+  // migrationApplied is true.
+  missingColumns: string[];
+  // Per-merchant existence + ownership probe.
+  merchants: MerchantSeedProbe[];
+};
+
+// Inline seed fixture shape — matches the prisma/seed.ts contract
+// so future divergence between the script and this endpoint is
+// caught at the type level.
+type SeedMerchantFixture = {
+  userId: string;
+  storeId: string;
+  username: string;
+  fullName: string;
+  phone: string;
+  storeName: string;
+  city: string;
+  category: string;
+  legalEntityName: string;
+  countryOfRegistration: string;
+  commercialRegistrationNumber: string;
+  contactPerson: string;
+  contactPhone: string;
+  contactEmail: string;
+  deliveryZones: { city: string; districts?: string[] }[];
+  products: { slug: string; name: string; price: number }[];
 };

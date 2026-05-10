@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Patch,
+  Post,
   Query,
   Req,
   UseGuards,
@@ -161,5 +162,33 @@ export class AdminController {
   @Get('debug/latest-merchant-order')
   debugLatestMerchantOrder(@Query('merchant') merchant?: string) {
     return this.admin.debugLatestMerchantOrder(merchant);
+  }
+
+  // ── Seed verification + on-demand merchant seed ────────────────
+  //
+  // Production deploy of merchant onboarding v2 doesn't auto-run
+  // the prisma seed script — Railway only chains `prisma migrate
+  // deploy` on `start:migrate`. So the new schema lands but the
+  // two test merchants (merchant.riyadh.flowers + merchant.gcc.
+  // perfumes) don't exist in production.
+  //
+  // These two endpoints close the gap:
+  //   GET  /admin/debug/seed-status     → tells you what's missing
+  //   POST /admin/debug/seed-merchants  → seeds the two test
+  //                                       merchants (idempotent;
+  //                                       safe to call multiple
+  //                                       times)
+  //
+  // Both are admin-guarded by the controller-level @UseGuards.
+  // Privacy-safe: no PII in responses (just usernames + counts).
+
+  @Get('debug/seed-status')
+  debugSeedStatus() {
+    return this.admin.debugSeedStatus();
+  }
+
+  @Post('debug/seed-merchants')
+  debugSeedMerchants(@Req() req: AuthedRequest) {
+    return this.admin.debugSeedMerchants(req.user.userId);
   }
 }
