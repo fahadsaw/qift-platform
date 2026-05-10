@@ -957,12 +957,13 @@ export class AdminService {
           phoneMasked: null,
           ownedStoreCount: 0,
           productCount: 0,
+          stores: [],
         });
         continue;
       }
       const stores = await this.prisma.store.findMany({
         where: { ownerId: user.id },
-        select: { id: true },
+        select: { id: true, name: true, status: true },
       });
       const productCount = stores.length
         ? await this.prisma.product.count({
@@ -978,6 +979,11 @@ export class AdminService {
         phoneMasked: maskPhone(user.phone),
         ownedStoreCount: stores.length,
         productCount,
+        stores: stores.map((s) => ({
+          id: s.id,
+          name: s.name,
+          status: s.status ?? null,
+        })),
       });
     }
     return out;
@@ -1186,6 +1192,11 @@ export type MerchantSeedProbe = {
   phoneMasked: string | null;
   ownedStoreCount: number;
   productCount: number;
+  // Per-store detail so the admin diagnostics panel can render a
+  // clickable storefront URL and visible status. `status` is null
+  // for legacy rows that pre-date onboarding-v2 (the column was
+  // backfilled to 'approved' but tolerate missing values).
+  stores: { id: string; name: string; status: string | null }[];
 };
 
 export type SeedStatus = {
