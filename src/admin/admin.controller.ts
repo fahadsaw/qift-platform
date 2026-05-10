@@ -101,4 +101,29 @@ export class AdminController {
   diagnoseGift(@Param('id') id: string) {
     return this.admin.diagnoseGift(id);
   }
+
+  // ── Browser-friendly debug endpoint ────────────────────────────
+  //
+  // Single-URL diagnostic for "merchant doesn't see this order"
+  // reports. Returns:
+  //   - the latest Order (full lineage)
+  //   - the latest Gift (full lineage)
+  //   - whether they're the same operational unit (i.e. the
+  //     order's giftId points to the gift)
+  //   - a verdict on whether the latest gift would appear on
+  //     the merchant dashboard
+  //   - optional ?merchant=<qiftUsername> ownership check
+  //
+  // Use:
+  //   GET /admin/debug/latest-merchant-order
+  //   GET /admin/debug/latest-merchant-order?merchant=<username>
+  //
+  // PRIVACY: identifiers + status fields only. NO recipient
+  // address, NO message text, NO media, NO secrets. Safe to
+  // paste into a support thread.
+
+  @Get('debug/latest-merchant-order')
+  debugLatestMerchantOrder(@Query('merchant') merchant?: string) {
+    return this.admin.debugLatestMerchantOrder(merchant);
+  }
 }

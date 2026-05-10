@@ -314,6 +314,121 @@ export class AdminService {
     return this.diagnoseGift(latest.id);
   }
 
+  // Browser-friendly merchant-order debug. Returns the latest Order
+  // alongside the latest Gift's full lineage so the operator can
+  // see both at once without two requests. Optional ?merchant
+  // username adds an explicit ownership check.
+  //
+  // The verdict block is the same as diagnoseGift, with a single
+  // additional code (`merchant_does_not_own_store`) when the
+  // ?merchant flag is present and the user doesn't own the store
+  // the gift links to.
+  //
+  // NEVER includes: messageText, mediaUrl, mediaType, address
+  // fields, sender PII beyond username. Safe to paste in a public
+  // support thread.
+  async debugLatestMerchantOrder(merchantUsername?: string): Promise<{
+    latestOrder: AdminLatestOrderRow | null;
+    latestGift: GiftDiagnosis | null;
+    merchantCheck: AdminMerchantCheck | null;
+  }> {
+    const latestOrder = await this.prisma.order.findFirst({
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        userId: true,
+        productId: true,
+        storeId: true,
+        productName: true,
+        storeName: true,
+        status: true,
+        currency: true,
+        totalAmount: true,
+        paymentProvider: true,
+        giftId: true,
+        createdAt: true,
+      },
+    });
+
+    const latestGiftRow = await this.prisma.gift.findFirst({
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    const latestGift = latestGiftRow
+      ? await this.diagnoseGift(latestGiftRow.id)
+      : null;
+
+    let merchantCheck: AdminMerchantCheck | null = null;
+    const username = merchantUsername?.trim().toLowerCase() ?? '';
+    if (username.length > 0) {
+      const merchant = await this.prisma.user.findFirst({
+        where: { qiftUsername: username, deletedAt: null },
+        select: { id: true, qiftUsername: true, role: true },
+      });
+      if (!merchant) {
+        merchantCheck = {
+          username,
+          found: false,
+          role: null,
+          hasStoreRole: false,
+          ownedStoreCount: 0,
+          ownsLatestGiftStore: false,
+          // Even if the user doesn't exist, telling the operator
+          // "no such user" is a useful diagnostic — wrong-username
+          // typo is a common false-positive in support reports.
+          note: 'no user with this qiftUsername (case-insensitive)',
+        };
+      } else {
+        const owned = await this.prisma.store.findMany({
+          where: { ownerId: merchant.id },
+          select: { id: true, name: true, status: true },
+        });
+        const ownsLatestGiftStore = latestGift?.gift.storeId
+          ? owned.some((s) => s.id === latestGift.gift.storeId)
+          : false;
+        // Surface the exact reason the merchant might be locked
+        // out of /store/orders so the operator doesn't have to
+        // check three places. Three failure modes covered:
+        //   - user.role !== 'store' (StoreGuard rejects with 403
+        //     unless STORE_USER_IDS env override is set)
+        //   - owns no stores at all (StoreGuard rejects)
+        //   - owns stores but not THIS gift's store
+        let note: string;
+        if (merchant.role !== 'store' && merchant.role !== 'admin') {
+          note = `user.role="${merchant.role}" — StoreGuard will reject /store/orders unless STORE_USER_IDS env override includes this id.`;
+        } else if (owned.length === 0) {
+          note = `user has no Store rows — StoreGuard will reject /store/orders.`;
+        } else if (!ownsLatestGiftStore && latestGift?.gift.storeId) {
+          note = `user owns ${owned.length} store(s) but NONE of them match the latest gift's storeId. Wrong account logged in?`;
+        } else if (!latestGift?.gift.storeId) {
+          note = `latest gift has storeId=null — owning the right store does not help; the gift itself isn't linked to any merchant.`;
+        } else {
+          note = `user owns the store this gift is linked to. /store/orders SHOULD return it.`;
+        }
+        merchantCheck = {
+          username: merchant.qiftUsername,
+          found: true,
+          role: merchant.role,
+          hasStoreRole: merchant.role === 'store' || merchant.role === 'admin',
+          ownedStoreCount: owned.length,
+          ownsLatestGiftStore,
+          ownedStores: owned.map((s) => ({
+            id: s.id,
+            name: s.name,
+            status: s.status,
+          })),
+          note,
+        };
+      }
+    }
+
+    return {
+      latestOrder,
+      latestGift,
+      merchantCheck,
+    };
+  }
+
   async diagnoseGift(giftId: string): Promise<GiftDiagnosis> {
     const gift = await this.prisma.gift.findUnique({
       where: { id: giftId },
@@ -615,6 +730,32 @@ export type GiftDiagnosisVerdict = {
     | 'gift_store_not_found'
     | 'status_excluded';
   explain: string;
+};
+
+export type AdminLatestOrderRow = {
+  id: string;
+  userId: string;
+  productId: string | null;
+  storeId: string | null;
+  productName: string;
+  storeName: string;
+  status: string;
+  currency: string;
+  totalAmount: number;
+  paymentProvider: string;
+  giftId: string | null;
+  createdAt: Date;
+};
+
+export type AdminMerchantCheck = {
+  username: string;
+  found: boolean;
+  role: string | null;
+  hasStoreRole: boolean;
+  ownedStoreCount: number;
+  ownsLatestGiftStore: boolean;
+  ownedStores?: { id: string; name: string; status: string }[];
+  note: string;
 };
 
 export type GiftDiagnosis = {
