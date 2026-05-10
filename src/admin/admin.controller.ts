@@ -51,6 +51,42 @@ export class AdminController {
     return this.admin.setStoreStatus(id, body?.status ?? '');
   }
 
+  // Onboarding-v2 review action with operator note. Distinct from the
+  // raw status PATCH above — this one validates the action set
+  // (approve / reject / request_changes), enforces a non-empty
+  // reason for the two negative branches, and records reviewedAt /
+  // reviewedBy for the audit trail.
+  @Patch('stores/:id/review')
+  reviewStore(
+    @Param('id') id: string,
+    @Body() body: { action?: string; reason?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.admin.reviewStore(
+      req.user.userId,
+      id,
+      (body?.action as 'approve' | 'reject' | 'request_changes') ?? '',
+      body?.reason ?? null,
+    );
+  }
+
+  // Owner-or-admin detail. Returns the rich projection (with
+  // rejectionReason, zones, contact info, etc.) for the review
+  // modal so the admin can render every onboarding field.
+  @Get('stores/:id/detail')
+  storeDetail(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.admin.storeDetail(req.user.userId, id);
+  }
+
+  // Documents uploaded with the merchant application. Listed for
+  // the admin review modal. The response carries fileUrl pointers
+  // to R2 — the admin browser fetches them on click. No payloads
+  // ride this list response itself.
+  @Get('stores/:id/documents')
+  storeDocuments(@Param('id') id: string) {
+    return this.admin.listStoreDocuments(id);
+  }
+
   // ── Gifts ────────────────────────────────────────────────────────
 
   @Get('gifts')

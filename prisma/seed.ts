@@ -20,7 +20,7 @@
 // for the credentials and the full sender → recipient → merchant
 // walkthrough.
 
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
@@ -58,6 +58,10 @@ const WISHES: ReadonlyArray<{ title: string; store: string | null }> = [
 // matches the frontend's STORES[i].id so the demo /stores grid maps
 // cleanly to the seeded backend rows. Phones live in the +966500000xxx
 // reserved-test block to avoid colliding with real registrations.
+//
+// Onboarding-v2 fixtures additionally carry deliveryZones so the
+// recipient-side coverage check can be tested end-to-end against
+// addresses inside vs. outside the merchant's service area.
 type MerchantFixture = {
   slug: string;
   storeName: string;
@@ -67,6 +71,14 @@ type MerchantFixture = {
   city: string;
   category: string;
   products: Array<{ slug: string; name: string; price: number }>;
+  // Optional — only the v2 fixtures carry these.
+  legalEntityName?: string;
+  countryOfRegistration?: string;
+  commercialRegistrationNumber?: string;
+  contactPerson?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  deliveryZones?: Array<{ city: string; districts?: string[] }>;
 };
 
 const MERCHANTS: ReadonlyArray<MerchantFixture> = [
@@ -149,6 +161,119 @@ const MERCHANTS: ReadonlyArray<MerchantFixture> = [
       { slug: 'p2', name: 'صندوق توليب', price: 320 },
     ],
   },
+  // ── Onboarding-v2 verification fixtures ─────────────────────
+  // Two merchants that exercise the new business onboarding path:
+  // one narrow-coverage Saudi merchant (Riyadh districts only) and
+  // one GCC-wide perfume merchant. Both have a fully-populated
+  // application + delivery zones so the recipient-side coverage
+  // check has a real workload to test against.
+  //
+  // CREDENTIALS for testing:
+  //   Riyadh-only merchant
+  //     phone:    +966500000201
+  //     username: merchant.riyadh.flowers
+  //     password: qift-merchant-dev   (shared, see top of file)
+  //
+  //   GCC-wide perfume merchant
+  //     phone:    +966500000202
+  //     username: merchant.gcc.perfumes
+  //     password: qift-merchant-dev
+  {
+    slug: 'riyadh-flowers',
+    storeName: 'باقات الرياض',
+    ownerUsername: 'merchant.riyadh.flowers',
+    ownerFullName: 'باقات الرياض',
+    ownerPhone: '+966500000201',
+    city: 'الرياض',
+    category: 'flowers',
+    legalEntityName: 'باقات الرياض للتجارة',
+    countryOfRegistration: 'SA',
+    commercialRegistrationNumber: '1010123456',
+    contactPerson: 'مدير العمليات',
+    contactPhone: '+966500000201',
+    contactEmail: 'ops@riyadh-flowers.test',
+    // Narrow Riyadh-only coverage with district whitelist. A
+    // recipient with a Wadi Al-Dawasir address (also in منطقة
+    // الرياض administratively but ~600km away) is correctly
+    // blocked. Inside Riyadh, only these northern + central
+    // districts are covered for same-day flowers.
+    deliveryZones: [
+      {
+        city: 'الرياض',
+        districts: [
+          'العليا',
+          'الملقا',
+          'الياسمين',
+          'النرجس',
+          'الصحافة',
+          'الفلاح',
+          'حطين',
+          'الورود',
+          'الواحة',
+        ],
+      },
+    ],
+    products: [
+      { slug: 'p1', name: 'باقة جوري الرياض', price: 250 },
+      { slug: 'p2', name: 'باقة تيوليب فاخر', price: 380 },
+      { slug: 'p3', name: 'صندوق ورد كلاسيكي', price: 290 },
+      { slug: 'p4', name: 'باقة بيوني وردي', price: 340 },
+      { slug: 'p5', name: 'تنسيق ورد للمكاتب', price: 420 },
+    ],
+  },
+  {
+    slug: 'gcc-perfumes',
+    storeName: 'House of Oud',
+    ownerUsername: 'merchant.gcc.perfumes',
+    ownerFullName: 'House of Oud',
+    ownerPhone: '+966500000202',
+    city: 'الرياض',
+    category: 'perfume',
+    legalEntityName: 'House of Oud Trading',
+    countryOfRegistration: 'AE',
+    commercialRegistrationNumber: 'DED-789456',
+    contactPerson: 'Customer Care',
+    contactPhone: '+971500000202',
+    contactEmail: 'care@houseofoud.test',
+    // GCC-wide coverage. Lists the major capital + secondary
+    // commercial cities across all six countries. No district
+    // whitelist — perfume isn't time-sensitive so coverage is
+    // city-level. Lets the eligibility check pass for a
+    // recipient address in any of these cities.
+    deliveryZones: [
+      // Saudi Arabia
+      { city: 'الرياض' },
+      { city: 'جدة' },
+      { city: 'الدمام' },
+      { city: 'الخبر' },
+      { city: 'مكة المكرمة' },
+      { city: 'المدينة المنورة' },
+      // Kuwait
+      { city: 'مدينة الكويت' },
+      { city: 'السالمية' },
+      { city: 'الفروانية' },
+      // UAE
+      { city: 'دبي' },
+      { city: 'أبوظبي' },
+      { city: 'الشارقة' },
+      // Qatar
+      { city: 'الدوحة' },
+      // Bahrain
+      { city: 'المنامة' },
+      { city: 'الرفاع' },
+      // Oman
+      { city: 'مسقط' },
+      { city: 'صلالة' },
+    ],
+    products: [
+      { slug: 'p1', name: 'عطر العود الملكي', price: 850 },
+      { slug: 'p2', name: 'عطر زيت العود الفاخر', price: 1450 },
+      { slug: 'p3', name: 'مجموعة العود الذهبية', price: 2200 },
+      { slug: 'p4', name: 'بخور المسك الأبيض', price: 320 },
+      { slug: 'p5', name: 'عطر الياسمين الدمشقي', price: 690 },
+      { slug: 'p6', name: 'مجموعة هدية فاخرة', price: 3500 },
+    ],
+  },
 ];
 
 // Idempotent merchant seeder. Creates User (role='store') + Store
@@ -193,6 +318,26 @@ async function seedMerchants(): Promise<Map<string, string>> {
     // these stores show up in /admin/stores AND in the merchant
     // fulfilment queue immediately — no admin click required for
     // the private-testing flow to work.
+    //
+    // Onboarding-v2 fixtures additionally write the business /
+    // legal / coverage fields. The non-v2 fixtures (rosary, cocoa,
+    // etc.) leave these null; the schema default keeps them off.
+    const v2Extras = {
+      legalEntityName: m.legalEntityName ?? null,
+      countryOfRegistration: m.countryOfRegistration ?? null,
+      commercialRegistrationNumber: m.commercialRegistrationNumber ?? null,
+      contactPerson: m.contactPerson ?? null,
+      contactPhone: m.contactPhone ?? null,
+      contactEmail: m.contactEmail?.toLowerCase() ?? null,
+      // JSONB column. Prisma needs Prisma.DbNull (not raw JS null)
+      // to write SQL NULL on a nullable JSON column. Empty /
+      // undefined → DbNull, matching the matchAddressToZones
+      // contract documented in lib/deliveryZones.ts.
+      deliveryZones:
+        m.deliveryZones && m.deliveryZones.length > 0
+          ? (m.deliveryZones as unknown as Prisma.InputJsonValue)
+          : Prisma.DbNull,
+    };
     await prisma.store.upsert({
       where: { id: storeId },
       create: {
@@ -204,6 +349,7 @@ async function seedMerchants(): Promise<Map<string, string>> {
         status: 'approved',
         integrationType: 'none',
         integrationStatus: 'disconnected',
+        ...v2Extras,
       },
       update: {
         // Existing seeded stores inherit any operator-driven status
@@ -213,6 +359,12 @@ async function seedMerchants(): Promise<Map<string, string>> {
         name: m.storeName,
         city: m.city,
         category: m.category,
+        // Re-syncing v2 fields on every seed lets us tweak coverage
+        // zones in this file and have them land without a manual
+        // PATCH. Existing fields not present on the fixture row
+        // don't get clobbered (they stay at whatever the operator
+        // edited).
+        ...v2Extras,
       },
     });
     slugToStoreId.set(m.slug, storeId);

@@ -1,6 +1,12 @@
 import {
   BadRequestException,
+  Body,
   Controller,
+  Delete,
+  ForbiddenException,
+  Get,
+  NotFoundException,
+  Param,
   Post,
   Req,
   UploadedFile,
@@ -175,4 +181,203 @@ export class MediaController {
 
     return { url, mediaType: isPhoto ? 'image' : 'video' };
   }
+
+  // POST /media/store-document — multipart/form-data with `file` +
+  // `storeId` + `type` form fields.
+  //
+  // Used by the merchant onboarding form to upload verification
+  // docs (CR scan, VAT cert, license, owner ID, etc.). Each upload:
+  //   1. Multer parses the multipart payload up to the document
+  //      ceiling (15 MB — bigger than photos because legal PDFs
+  //      are routinely 5–10 MB scans, smaller than videos because
+  //      we never expect motion in a doc).
+  //   2. Re-validate mime against the doc allow-list (PDF + the
+  //      same image set we accept on avatars).
+  //   3. Verify the caller owns the target Store (or is in the
+  //      STORE_USER_IDS env override list).
+  //   4. Upload to R2 under `store-docs/<storeId>/...` so an
+  //      account-deletion sweep can wildcard-purge a store's
+  //      documents.
+  //   5. Persist a StoreDocument row pointing at the public URL
+  //      so the admin review modal can list every doc for the
+  //      store at once.
+  //
+  // Privacy: the R2 key uses an unguessable timestamp+random
+  // suffix (same convention as gift media), but documents
+  // CONTAIN sensitive business data (CR numbers, IDs). The list
+  // endpoint is gated to admins + the owner; the public storefront
+  // never references these URLs.
+  @Post('store-document')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+    }),
+  )
+  async uploadStoreDocument(
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() body: { storeId?: string; type?: string; fileName?: string },
+    @Req() req: AuthedRequest,
+  ): Promise<{
+    id: string;
+    type: string;
+    fileUrl: string;
+    fileName: string | null;
+    contentType: string | null;
+    uploadedAt: Date;
+  }> {
+    if (!file) throw new BadRequestException('Missing file field "file".');
+    if (!body?.storeId)
+      throw new BadRequestException('Missing storeId in form data.');
+    if (!body?.type)
+      throw new BadRequestException('Missing type in form data.');
+    if (!ALLOWED_DOCUMENT_MIME.test(file.mimetype || '')) {
+      throw new BadRequestException(
+        'Unsupported document type. Use PDF or an image (PNG/JPEG/WebP/HEIC).',
+      );
+    }
+    if (!file.buffer || file.buffer.length === 0) {
+      throw new BadRequestException('Empty file.');
+    }
+
+    // Ownership / admin check. Mirrors the storeOwner gate used by
+    // /stores/:id/owner. STORE_USER_IDS env override passes
+    // through (legacy staging admin escape hatch).
+    const storeId = body.storeId.trim();
+    const allowList = (process.env.STORE_USER_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!allowList.includes(req.user.userId)) {
+      const owns = await this.prisma.store.findFirst({
+        where: { id: storeId, ownerId: req.user.userId },
+        select: { id: true },
+      });
+      if (!owns) throw new ForbiddenException('Not the store owner.');
+    }
+
+    const allowedTypes = new Set([
+      'commercial_registration',
+      'vat_certificate',
+      'business_license',
+      'owner_id',
+      'other',
+    ]);
+    const docType = body.type.trim();
+    if (!allowedTypes.has(docType)) {
+      throw new BadRequestException(`Invalid document type "${docType}".`);
+    }
+
+    const { url } = await this.media.uploadBuffer({
+      keyPrefix: `store-docs/${storeId}`,
+      originalName: file.originalname || `${docType}-doc`,
+      contentType: file.mimetype,
+      body: file.buffer,
+    });
+
+    const created = await this.prisma.storeDocument.create({
+      data: {
+        storeId,
+        type: docType,
+        fileUrl: url,
+        fileName: body.fileName?.trim() || file.originalname || null,
+        contentType: file.mimetype || null,
+      },
+      select: {
+        id: true,
+        type: true,
+        fileUrl: true,
+        fileName: true,
+        contentType: true,
+        uploadedAt: true,
+      },
+    });
+    return created;
+  }
+
+  // GET /media/store-document?storeId= — list every document
+  // attached to a store. Same ownership gate as the upload path.
+  // Used by the merchant onboarding form (review step) and by the
+  // admin review modal (which calls /admin/stores/:id/documents
+  // — a thin alias that goes through the same query).
+  @Get('store-document')
+  async listStoreDocuments(@Req() req: AuthedRequest): Promise<
+    Array<{
+      id: string;
+      type: string;
+      fileUrl: string;
+      fileName: string | null;
+      contentType: string | null;
+      uploadedAt: Date;
+    }>
+  > {
+    // Read storeId from query string. We use Express's req.query
+    // directly because Nest's @Query decorator wasn't imported in
+    // this file historically; importing it triggers a wider
+    // refactor we don't need here. Single-param read is safe.
+    const reqWithQuery = req as unknown as { query?: { storeId?: string } };
+    const storeId = (reqWithQuery.query?.storeId ?? '').trim();
+    if (!storeId) throw new BadRequestException('Missing storeId.');
+
+    const allowList = (process.env.STORE_USER_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!allowList.includes(req.user.userId)) {
+      const owns = await this.prisma.store.findFirst({
+        where: { id: storeId, ownerId: req.user.userId },
+        select: { id: true },
+      });
+      if (!owns) throw new ForbiddenException('Not the store owner.');
+    }
+
+    return this.prisma.storeDocument.findMany({
+      where: { storeId },
+      orderBy: { uploadedAt: 'desc' },
+      select: {
+        id: true,
+        type: true,
+        fileUrl: true,
+        fileName: true,
+        contentType: true,
+        uploadedAt: true,
+      },
+    });
+  }
+
+  // DELETE /media/store-document/:id — remove a document. We do NOT
+  // delete the underlying R2 object here — keeping the asset means
+  // a paranoid admin can still pull the file via the audit logs
+  // even after a merchant tried to scrub it. R2 garbage collection
+  // is a separate ops sweep keyed on Store.deletedAt + age.
+  @Delete('store-document/:id')
+  async deleteStoreDocument(
+    @Param('id') id: string,
+    @Req() req: AuthedRequest,
+  ): Promise<{ ok: true }> {
+    const doc = await this.prisma.storeDocument.findUnique({
+      where: { id },
+      select: { id: true, storeId: true },
+    });
+    if (!doc) throw new NotFoundException('Document not found.');
+
+    const allowList = (process.env.STORE_USER_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!allowList.includes(req.user.userId)) {
+      const owns = await this.prisma.store.findFirst({
+        where: { id: doc.storeId, ownerId: req.user.userId },
+        select: { id: true },
+      });
+      if (!owns) throw new ForbiddenException('Not the store owner.');
+    }
+
+    await this.prisma.storeDocument.delete({ where: { id } });
+    return { ok: true };
+  }
 }
+
+// Documents accept PDFs in addition to the standard image set —
+// most legal scans are PDF.
+const ALLOWED_DOCUMENT_MIME =
+  /^(application\/pdf|image\/(png|jpe?g|webp|heic|heif|avif))$/i;

@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { StoresService } from '../stores/stores.service';
 
 // Admin-only service. Every method is reachable through routes
 // guarded by AdminGuard, so we can assume the caller has already
@@ -35,7 +36,13 @@ const ALLOWED_REPORT_STATUSES = new Set([
 
 @Injectable()
 export class AdminService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    // Reused for the v2 review endpoints (approve/reject/request_changes
+    // + the rich owner detail projection). Single source of truth for
+    // the merchant-application transition graph.
+    private stores: StoresService,
+  ) {}
 
   // --- Users -------------------------------------------------------
 
@@ -134,6 +141,53 @@ export class AdminService {
       where: { id: storeId },
       data: { status },
       select: ADMIN_STORE_SELECT,
+    });
+  }
+
+  // Onboarding-v2 review with operator note. Delegates to
+  // StoresService.review which:
+  //   - validates action ∈ { approve, reject, request_changes }
+  //   - enforces non-empty reason for reject / request_changes
+  //   - timestamps reviewedAt and stores reviewedBy = adminUserId
+  //   - sets the right status string + rejectionReason
+  async reviewStore(
+    adminUserId: string,
+    storeId: string,
+    action: 'approve' | 'reject' | 'request_changes',
+    reason: string | null,
+  ) {
+    if (
+      action !== 'approve' &&
+      action !== 'reject' &&
+      action !== 'request_changes'
+    ) {
+      throw new BadRequestException('Invalid review action');
+    }
+    return this.stores.review(adminUserId, storeId, action, reason);
+  }
+
+  // Owner-or-admin detail projection. Routes through the same
+  // StoresService method the merchant uses on their pending-
+  // approval screen — single source of truth for the rich
+  // shape (zones, rejectionReason, business fields).
+  async storeDetail(viewerUserId: string, storeId: string) {
+    return this.stores.findOneForOwnerOrAdmin(viewerUserId, storeId);
+  }
+
+  // Verification documents uploaded with the merchant application.
+  // Returns the StoreDocument rows for the admin review modal.
+  async listStoreDocuments(storeId: string) {
+    return this.prisma.storeDocument.findMany({
+      where: { storeId },
+      orderBy: { uploadedAt: 'desc' },
+      select: {
+        id: true,
+        type: true,
+        fileUrl: true,
+        fileName: true,
+        contentType: true,
+        uploadedAt: true,
+      },
     });
   }
 

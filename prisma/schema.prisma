@@ -316,37 +316,140 @@ model GiftAttempt {
 // who registered it). Integration metadata lives here too so we can
 // migrate stores between manual / API / Shopify / etc. without touching
 // product rows.
+//
+// MERCHANT ONBOARDING v2
+// What started as a thin (name, city, category) row grew into a full
+// merchant-application record. The new fields below capture the
+// information real businesses provide during onboarding: legal entity
+// + tax IDs, contact PoC, branding, social presence, and structured
+// delivery coverage. All new columns are NULLABLE so legacy stores
+// (pre-onboarding-v2) continue to work without migration data backfill.
 model Store {
   id                String   @id @default(cuid())
   name              String
   ownerId           String
   city              String
   category          String
+
+  // ── Business / legal identity ─────────────────────────────────
+  // All optional — pre-v2 stores have these as null and the admin
+  // dashboard renders "—" in their place.
+  legalEntityName              String?
+  // ISO-3166 alpha-2 country code (SA / KW / AE / QA / BH / OM /
+  // OTHER). Drives the per-country business-document expectations
+  // (CR for Saudi, MOCI license for Kuwait, etc.) on the frontend.
+  countryOfRegistration        String?
+  // Country-specific business identifier. Saudi: 10-digit CR. Kuwait:
+  // MOCI license. UAE: trade license. Bahrain: CR. Qatar: CR. Oman:
+  // CR. Free-text on the wire — frontend validates against the
+  // active country's expected format.
+  commercialRegistrationNumber String?
+  vatNumber                    String?
+
+  // ── Contact PoC ───────────────────────────────────────────────
+  contactPerson                String?
+  contactPhone                 String?
+  contactEmail                 String?
+
+  // ── Branding & social ─────────────────────────────────────────
+  logoUrl                      String?
+  coverImageUrl                String?
+  websiteUrl                   String?
+  instagramHandle              String?
+  tiktokHandle                 String?
+  snapchatHandle               String?
+
+  // ── Delivery coverage ─────────────────────────────────────────
+  // Authoritative coverage definition. JSON array of
+  //   { city: string; districts?: string[]; note?: string }
+  // entries (mirrors lib/deliveryZones.ts on the frontend). Null /
+  // empty array → fall back to the legacy single-`city` field above
+  // (the existing canDeliverTo matcher already does this). Snapshot
+  // is forwarded to Order.deliveryZones at create time so a mid-
+  // flight zone change can't invalidate pending gifts.
+  deliveryZones                Json?
+
   // "none" | "api" | "shopify" | "woocommerce" | "custom"
   integrationType   String   @default("none")
   // "disconnected" | "connected" | "error"
   integrationStatus String   @default("disconnected")
-  // Approval lifecycle — drives the merchant fulfilment dashboard
-  // visibility and admin actions.
-  //   pending   — newly created, awaiting admin review.
-  //   approved  — live; appears in the merchant fulfilment queue and
-  //               on the public /stores listing.
-  //   rejected  — admin denied the listing; stays in DB for audit.
-  //   suspended — was approved but later disabled by admin.
-  // Existing rows are backfilled to "approved" so the migration is
-  // non-destructive (every store created before this column existed
-  // was implicitly live).
+
+  // ── Approval lifecycle ────────────────────────────────────────
+  // Onboarding-v2 expanded states (string union, additive — every
+  // pre-v2 row stays valid):
+  //   draft              — merchant started the form but hasn't submitted.
+  //   submitted          — application submitted; awaiting admin pickup.
+  //   pending_review     — admin is actively reviewing.
+  //   changes_requested  — admin sent back for fixes; rejectionReason
+  //                        carries the operator's note.
+  //   approved           — live; appears in /stores and merchant
+  //                        fulfilment queue.
+  //   rejected           — admin denied; rejectionReason carries why.
+  //   suspended          — was approved, later disabled by admin.
+  //   pending            — legacy alias for "submitted" (pre-v2 rows).
+  // Existing rows backfilled to "approved" so the migration is non-
+  // destructive (every store created before this column existed was
+  // implicitly live).
   status            String   @default("pending")
+
+  // Operator-supplied note when the admin rejects or requests
+  // changes. Surfaced on the merchant's pending-approval screen so
+  // they know what to fix. Cleared when a fresh submission moves
+  // back to `submitted`/`pending_review`.
+  rejectionReason   String?
+  submittedAt       DateTime?
+  reviewedAt        DateTime?
+  // FK to User.id of the admin who reviewed. Audit trail; not used
+  // for auth (the admin guard runs against the JWT viewer at
+  // request time).
+  reviewedBy        String?
+
   // Used to verify webhook signatures from the upstream platform. Null
   // for manual stores; generated when an integration is connected.
   webhookSecret     String?
   createdAt         DateTime @default(now())
 
-  owner    User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  products Product[]
-  gifts    Gift[]
+  owner     User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  products  Product[]
+  gifts     Gift[]
+  documents StoreDocument[]
 
   @@index([ownerId])
+}
+
+// Per-store onboarding documents (CR scan, VAT certificate,
+// authorized-signatory ID, etc.). Files are uploaded to R2 via the
+// existing media pipeline; this table stores the pointer + the
+// document type so the admin review screen can render a structured
+// list. The actual file content lives in R2 and is served through
+// the same authenticated path the rest of the app uses.
+//
+// PRIVACY: documents are never returned on the public /stores
+// listing. Read access is gated to the store owner + admins; the
+// admin review endpoint is the canonical surface.
+model StoreDocument {
+  id          String   @id @default(cuid())
+  storeId     String
+  // Stable type identifier. Frontend maps it to a localised label
+  // depending on the store's countryOfRegistration:
+  //   commercial_registration  — CR scan
+  //   vat_certificate          — VAT/tax registration cert
+  //   business_license         — country-specific license (MOCI in
+  //                              KW, DED in AE, etc.)
+  //   owner_id                 — authorized signatory ID
+  //   other                    — free-form supporting document
+  type        String
+  fileUrl     String
+  fileName    String?
+  // Optional MIME so the admin UI can pick the right preview
+  // (image vs PDF). Set when the upload pipeline knows it; null
+  // for legacy / external uploads.
+  contentType String?
+  uploadedAt  DateTime @default(now())
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
 }
 
 // Catalog row. `sourceType` discriminates manually-created products from

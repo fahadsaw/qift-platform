@@ -57,6 +57,32 @@ export class StoresController {
     @Body() body: UpdateStoreInput,
     @Req() req: AuthedRequest,
   ) {
-    return this.service.update(req.user!.userId, id, body);
+    // Onboarding-v2: route owner-side updates through `patch` which
+    // accepts every business field + zones. The legacy `update`
+    // method (name/city/category only) stays for backwards compat
+    // with any caller that hasn't migrated to the wider input
+    // shape — callers that send the new fields use the same body
+    // and the service narrows internally.
+    return this.service.patch(req.user!.userId, id, body);
+  }
+
+  // Owner-side detail with the richer projection (status,
+  // rejectionReason, zones, etc.). Used by the merchant pending-
+  // approval screen + the multi-step onboarding form's resume
+  // mode. Controller-level guard is just JWT; ownership / admin
+  // is enforced inside the service via STORE_USER_IDS or owner
+  // match.
+  @Get(':id/owner')
+  @UseGuards(JwtAuthGuard)
+  findOneForOwner(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.service.findOneForOwnerOrAdmin(req.user!.userId, id);
+  }
+
+  // Submit a draft / changes-requested merchant application for
+  // admin review. Service enforces the allowed source statuses.
+  @Post(':id/submit')
+  @UseGuards(JwtAuthGuard)
+  submit(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.service.submit(req.user!.userId, id);
   }
 }
