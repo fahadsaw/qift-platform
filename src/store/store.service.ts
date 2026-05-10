@@ -83,9 +83,26 @@ function toSafeStoreMutationResult(g: {
   };
 }
 
-// Statuses the dashboard surfaces. Anything not in this set is hidden:
-// pending_address (waiting on receiver) and delivered (terminal).
+// Statuses the dashboard surfaces.
+//
+// `pending_address` is included intentionally: a paid gift sits in
+// this state until the receiver picks an address (or the 24h auto-
+// default fires). The merchant has been paid for the order and is
+// owed visibility — they can see the row exists, plan capacity, and
+// know "an order is on its way to me", even though they can't act
+// on it (the address row is null pre-confirmation, so the
+// formatAddress() call returns "—" and deliveryPhone is null). The
+// merchant action endpoints reject any prepare/ship/deliver attempt
+// against pending_address rows because the gift-status transition
+// graph forbids it; the row stays visible-but-inert until the
+// recipient resolves the address.
+//
+// `delivered` is excluded because it's the terminal happy state —
+// the merchant's work is done, and keeping the row in the live feed
+// would just clutter the queue. Historical view of delivered gifts
+// is a separate (future) endpoint.
 const DASHBOARD_STATUSES: GiftStatus[] = [
+  'pending_address',
   'address_confirmed',
   'default_address_used',
   'preparing',
@@ -113,10 +130,22 @@ export class StoreService {
     return this.stores.ownedStoreIds(viewerUserId);
   }
 
-  // Latest-first feed of every gift the store still has work to do on.
-  // Delivered orders fall out automatically; pending_address orders never
-  // appear because the store has no business with them until the
-  // receiver (or the 24h auto-default) picks an address.
+  // Latest-first feed of every gift the store has either an open
+  // workload on (address_confirmed → shipped) or visibility-only
+  // interest in (pending_address — paid, awaiting recipient).
+  // Delivered orders fall out automatically (terminal happy state).
+  //
+  // Privacy on pending_address rows:
+  //   - The Gift hasn't picked an address yet, so `gift.address` is
+  //     null. The mapping below already null-coalesces every address
+  //     field to '—' / null, so a pending row carries NO recipient
+  //     location data. The receiver's name + phone are exposed only
+  //     as far as the existing post-confirmation rows already do —
+  //     for pending rows phone stays null because the address row
+  //     is the source of truth and it doesn't exist yet.
+  //   - The store sees product name + timestamp + receiver name. No
+  //     address, no phone, no message, no media. This matches the
+  //     spec: "Awaiting recipient address" view.
   //
   // Scoping rule:
   //   - admin override (STORE_USER_IDS env) → see ALL in-flight orders

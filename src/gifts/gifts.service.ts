@@ -250,10 +250,24 @@ export class GiftsService {
     // (no ProductsService injection) to avoid a module-import cycle:
     // GiftsModule already imports NotificationsModule, and Products
     // depends on Stores, so adding it here would create a fragile graph.
+    //
+    // Also returns the product's owning storeId — used as a server-
+    // side fallback when the caller's `storeId` is missing. Mirrors
+    // the same fix applied to OrdersService so a direct POST /gifts
+    // (admin tooling, integration tests) also gets correct merchant
+    // linkage. Without this fallback, gifts created via the sender-
+    // facing GiftsController.create() route (no payment flow) would
+    // be permanently invisible on /store/orders.
+    let productInfoStoreId: string | null = null;
     if (body.productId) {
       const product = await this.prisma.product.findUnique({
         where: { id: body.productId },
-        select: { id: true, isAvailable: true, stockStatus: true },
+        select: {
+          id: true,
+          storeId: true,
+          isAvailable: true,
+          stockStatus: true,
+        },
       });
       if (!product) {
         throw new BadRequestException('المنتج غير موجود');
@@ -261,7 +275,17 @@ export class GiftsService {
       if (!product.isAvailable || product.stockStatus !== 'in_stock') {
         throw new BadRequestException('المنتج غير متوفر حاليًا');
       }
+      productInfoStoreId = product.storeId;
     }
+
+    // Resolve storeId. Preference order matches OrdersService:
+    //   1. body.storeId — caller-supplied (forwarded from Order at
+    //      payment-confirm, or supplied directly by an admin path).
+    //   2. product.storeId — server-side derivation from the catalog.
+    //   3. null — legacy / sample-product path; the gift stays
+    //      unlinked from any merchant.
+    const storeIdFromBody = body.storeId?.trim() || null;
+    const resolvedStoreId = storeIdFromBody ?? productInfoStoreId;
 
     const created = await this.prisma.gift.create({
       data: {
@@ -272,7 +296,7 @@ export class GiftsService {
         // Persist catalog identifiers when available so the per-store
         // dashboard can filter on storeId. Legacy / sample-product flows
         // pass nothing and these stay null.
-        storeId: body.storeId?.trim() || null,
+        storeId: resolvedStoreId,
         productId: body.productId?.trim() || null,
         messageText,
         mediaUrl,

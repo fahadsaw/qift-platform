@@ -208,7 +208,30 @@ export class OrdersService {
     // supplied — sample-product flows pass nothing and skip the check.
     // Throws BadRequestException('المنتج غير متوفر حاليًا') if the product
     // is unavailable or out of stock.
-    await this.products.checkAvailability(body.productId);
+    //
+    // We capture the return value because checkAvailability also exposes
+    // the product's owning storeId — used as an authoritative server-
+    // side fallback below when the buyer's checkout payload didn't
+    // include storeId. This is the fix for the "merchant doesn't see
+    // the order" bug: a tampered or stale frontend that drops
+    // storeIdRef from the URL no longer creates an unlinked order, as
+    // long as productId resolves to a real catalog row.
+    const productInfo = await this.products.checkAvailability(body.productId);
+
+    // Resolve storeId. Preference order:
+    //   1. body.storeId — what the frontend sent (storeIdRef).
+    //   2. product.storeId — derived from the catalog row when (1) is
+    //      missing. The product owns a storeId by schema (NOT NULL on
+    //      Product.storeId), so this is the authoritative answer for
+    //      any real catalog purchase.
+    //   3. null — the legacy / sample-product path. Order is created
+    //      unlinked and won't appear in any merchant dashboard. That's
+    //      intentional for the demo catalog (no merchant owns sample
+    //      products) but a console.warn-equivalent metric would help
+    //      flag accidental drops in production.
+    const storeIdFromBody = body.storeId?.trim() || null;
+    const storeIdFromProduct = productInfo?.storeId ?? null;
+    const resolvedStoreId = storeIdFromBody ?? storeIdFromProduct;
 
     return this.prisma.order.create({
       data: {
@@ -219,7 +242,7 @@ export class OrdersService {
         // Persist catalog identifiers so PaymentsService can pass them
         // through to GiftsService.create when the payment confirms.
         productId: body.productId?.trim() || null,
-        storeId: body.storeId?.trim() || null,
+        storeId: resolvedStoreId,
         productPrice,
         serviceFee,
         deliveryFee,
