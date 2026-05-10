@@ -287,6 +287,22 @@ export class GiftsService {
     const storeIdFromBody = body.storeId?.trim() || null;
     const resolvedStoreId = storeIdFromBody ?? productInfoStoreId;
 
+    // Order-flow debug logging. Toggled by ORDER_FLOW_DEBUG=1 on
+    // the API process. Mirrors the OrdersService log so the
+    // operator can read both halves of "who set storeId where"
+    // when chasing a missing-merchant-order report. Privacy-safe:
+    // ids + flags only.
+    if (process.env.ORDER_FLOW_DEBUG === '1') {
+      this.logger.log(
+        `[order-flow] gifts.create senderId=${senderId} ` +
+          `bodyProductId=${body.productId ?? 'null'} ` +
+          `bodyStoreId=${storeIdFromBody ?? 'null'} ` +
+          `productStoreId=${productInfoStoreId ?? 'null'} ` +
+          `resolvedStoreId=${resolvedStoreId ?? 'null'} ` +
+          `linked=${resolvedStoreId ? 'YES' : 'NO'}`,
+      );
+    }
+
     const created = await this.prisma.gift.create({
       data: {
         senderId,
@@ -308,6 +324,15 @@ export class GiftsService {
       },
       include: GIFT_INCLUDE,
     });
+
+    if (process.env.ORDER_FLOW_DEBUG === '1') {
+      this.logger.log(
+        `[order-flow] gifts.create persisted giftId=${created.id} ` +
+          `productId=${created.productId ?? 'null'} ` +
+          `storeId=${created.storeId ?? 'null'} ` +
+          `status=${created.status}`,
+      );
+    }
 
     // Two notifications fire as soon as a gift is created:
     //   1. "you have a new gift" — celebratory (or mystery, when surprise)

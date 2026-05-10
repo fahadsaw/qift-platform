@@ -283,6 +283,231 @@ export class AdminService {
       },
     };
   }
+
+  // --- Diagnostics -------------------------------------------------
+  //
+  // Lineage inspector for the "merchant doesn't see this order"
+  // class of bugs. Surfaces every link in the chain so the operator
+  // can read off exactly where it broke without writing SQL:
+  //
+  //   Order → Gift → Product → Store → owner
+  //
+  // The verdict block at the end runs the same WHERE clause that
+  // /store/orders uses and answers "would the merchant see this?"
+  // with a structured reason code so the next "I can't see it"
+  // report is a one-call diagnosis.
+  //
+  // Privacy: identifiers + status fields only. NO recipient
+  // address, NO message text, NO media. The route is admin-gated
+  // but the response shape is conservative anyway — a leaked
+  // diagnostic should not contain content the receiver hasn't
+  // seen yet.
+
+  async diagnoseLatestGift(): Promise<GiftDiagnosis> {
+    const latest = await this.prisma.gift.findFirst({
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    if (!latest) {
+      throw new NotFoundException('No gifts exist yet');
+    }
+    return this.diagnoseGift(latest.id);
+  }
+
+  async diagnoseGift(giftId: string): Promise<GiftDiagnosis> {
+    const gift = await this.prisma.gift.findUnique({
+      where: { id: giftId },
+      select: {
+        id: true,
+        senderId: true,
+        receiverId: true,
+        productName: true,
+        storeName: true,
+        storeId: true,
+        productId: true,
+        addressId: true,
+        status: true,
+        isAnonymous: true,
+        isSurprise: true,
+        createdAt: true,
+        confirmedAt: true,
+        shippedAt: true,
+        deliveredAt: true,
+      },
+    });
+    if (!gift) throw new NotFoundException('Gift not found');
+
+    // Look up the matching Order (1:1 via Order.giftId). When the
+    // gift was created via the payment flow there's always one;
+    // direct POST /gifts paths (admin tooling) leave it null.
+    const order = await this.prisma.order.findFirst({
+      where: { giftId: gift.id },
+      select: {
+        id: true,
+        userId: true,
+        productId: true,
+        storeId: true,
+        productName: true,
+        storeName: true,
+        status: true,
+        createdAt: true,
+      },
+    });
+
+    // Resolve the catalog product (if any). Authoritative source
+    // for "what storeId SHOULD this be linked to?".
+    const product = gift.productId
+      ? await this.prisma.product.findUnique({
+          where: { id: gift.productId },
+          select: {
+            id: true,
+            storeId: true,
+            name: true,
+            isAvailable: true,
+            stockStatus: true,
+          },
+        })
+      : null;
+
+    // Resolve the store via the gift's stored storeId (preferred)
+    // OR via the product (fallback) — both because the bug class
+    // is "gift.storeId got dropped, but product knows the right
+    // store". Surfacing both lets the operator spot the drift.
+    const giftStore = gift.storeId
+      ? await this.prisma.store.findUnique({
+          where: { id: gift.storeId },
+          select: {
+            id: true,
+            name: true,
+            ownerId: true,
+            status: true,
+            owner: { select: { id: true, qiftUsername: true } },
+          },
+        })
+      : null;
+    const productStore =
+      product?.storeId && product.storeId !== gift.storeId
+        ? await this.prisma.store.findUnique({
+            where: { id: product.storeId },
+            select: {
+              id: true,
+              name: true,
+              ownerId: true,
+              status: true,
+              owner: { select: { id: true, qiftUsername: true } },
+            },
+          })
+        : null;
+
+    // Compute the /store/orders verdict. Mirrors
+    // StoreService.listOrders WHERE clause exactly so the
+    // diagnostic answer matches what the merchant will see at
+    // request time.
+    const DASHBOARD_STATUSES = [
+      'pending_address',
+      'address_confirmed',
+      'default_address_used',
+      'preparing',
+      'shipped',
+    ];
+    const merchant = giftStore?.owner ?? productStore?.owner ?? null;
+    let verdict: GiftDiagnosisVerdict;
+    if (!gift.storeId) {
+      verdict = {
+        wouldShowOnMerchantDashboard: false,
+        reason: 'gift_storeId_null',
+        explain:
+          'Gift.storeId is null. /store/orders filters by storeId IN (mystoreids); the row will never appear. Run scripts/backfill-gift-storeid.ts (with --apply) if Product.storeId is known.',
+      };
+    } else if (!giftStore) {
+      verdict = {
+        wouldShowOnMerchantDashboard: false,
+        reason: 'gift_store_not_found',
+        explain:
+          'Gift.storeId is set but no Store row exists for it. Likely a hard-deleted store (onDelete: SetNull missed) or a typo from a tampered payload.',
+      };
+    } else if (!DASHBOARD_STATUSES.includes(gift.status)) {
+      verdict = {
+        wouldShowOnMerchantDashboard: false,
+        reason: 'status_excluded',
+        explain: `Gift.status="${gift.status}" is not in DASHBOARD_STATUSES (${DASHBOARD_STATUSES.join(', ')}). Either delivered (terminal) or cancelled.`,
+      };
+    } else {
+      verdict = {
+        wouldShowOnMerchantDashboard: true,
+        reason: 'ok',
+        explain: `Owner ${giftStore.owner?.qiftUsername ?? giftStore.ownerId} sees this row when logged in. Status=${gift.status}, store=${giftStore.name}.`,
+      };
+    }
+
+    return {
+      gift: {
+        id: gift.id,
+        productId: gift.productId,
+        storeId: gift.storeId,
+        productName: gift.productName,
+        storeName: gift.storeName,
+        status: gift.status,
+        isAnonymous: gift.isAnonymous,
+        isSurprise: gift.isSurprise,
+        addressId: gift.addressId,
+        createdAt: gift.createdAt,
+        confirmedAt: gift.confirmedAt,
+        shippedAt: gift.shippedAt,
+        deliveredAt: gift.deliveredAt,
+      },
+      order: order
+        ? {
+            id: order.id,
+            buyerId: order.userId,
+            productId: order.productId,
+            storeId: order.storeId,
+            status: order.status,
+            createdAt: order.createdAt,
+            // Drift = "buyer's checkout payload sent X but the
+            // gift ended up with Y". Common when an old client
+            // hits a new server, or vice versa.
+            storeIdMatchesGift: order.storeId === gift.storeId,
+            productIdMatchesGift: order.productId === gift.productId,
+          }
+        : null,
+      product: product
+        ? {
+            id: product.id,
+            storeId: product.storeId,
+            name: product.name,
+            isAvailable: product.isAvailable,
+            stockStatus: product.stockStatus,
+          }
+        : null,
+      giftStore: giftStore
+        ? {
+            id: giftStore.id,
+            name: giftStore.name,
+            ownerId: giftStore.ownerId,
+            ownerUsername: giftStore.owner?.qiftUsername ?? null,
+            status: giftStore.status,
+          }
+        : null,
+      // Renders only when productStore differs from giftStore —
+      // i.e. someone moved the product between stores OR the
+      // gift's storeId was drifted away from the product's
+      // canonical owner. Either way the operator sees both.
+      productStore: productStore
+        ? {
+            id: productStore.id,
+            name: productStore.name,
+            ownerId: productStore.ownerId,
+            ownerUsername: productStore.owner?.qiftUsername ?? null,
+            status: productStore.status,
+          }
+        : null,
+      merchant: merchant
+        ? { userId: merchant.id, qiftUsername: merchant.qiftUsername }
+        : null,
+      verdict,
+    };
+  }
 }
 
 // --- Projections ---------------------------------------------------
@@ -374,4 +599,71 @@ export type AdminSystemStatus = {
     sms: boolean;
     merchantApi: boolean;
   };
+};
+
+// Gift lineage diagnostic. Surfaces every link in the chain that
+// determines whether a merchant sees an order on /store/orders,
+// plus a structured verdict so the operator gets a one-call answer
+// to "why doesn't merchant X see this gift?".
+export type GiftDiagnosisVerdict = {
+  wouldShowOnMerchantDashboard: boolean;
+  // Stable code so the frontend / ops scripts can branch without
+  // string-matching the explain text.
+  reason:
+    | 'ok'
+    | 'gift_storeId_null'
+    | 'gift_store_not_found'
+    | 'status_excluded';
+  explain: string;
+};
+
+export type GiftDiagnosis = {
+  gift: {
+    id: string;
+    productId: string | null;
+    storeId: string | null;
+    productName: string;
+    storeName: string;
+    status: string;
+    isAnonymous: boolean;
+    isSurprise: boolean;
+    addressId: string | null;
+    createdAt: Date;
+    confirmedAt: Date | null;
+    shippedAt: Date | null;
+    deliveredAt: Date | null;
+  };
+  order: {
+    id: string;
+    buyerId: string;
+    productId: string | null;
+    storeId: string | null;
+    status: string;
+    createdAt: Date;
+    storeIdMatchesGift: boolean;
+    productIdMatchesGift: boolean;
+  } | null;
+  product: {
+    id: string;
+    storeId: string;
+    name: string;
+    isAvailable: boolean;
+    stockStatus: string;
+  } | null;
+  giftStore: {
+    id: string;
+    name: string;
+    ownerId: string;
+    ownerUsername: string | null;
+    status: string;
+  } | null;
+  productStore: {
+    id: string;
+    name: string;
+    ownerId: string;
+    ownerUsername: string | null;
+    status: string;
+  } | null;
+  merchant: { userId: string; qiftUsername: string } | null;
+  verdict: GiftDiagnosisVerdict;
 };

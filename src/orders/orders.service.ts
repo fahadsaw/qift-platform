@@ -233,7 +233,26 @@ export class OrdersService {
     const storeIdFromProduct = productInfo?.storeId ?? null;
     const resolvedStoreId = storeIdFromBody ?? storeIdFromProduct;
 
-    return this.prisma.order.create({
+    // Order-flow debug logging. Off by default (production) and
+    // turned on by ORDER_FLOW_DEBUG=1 on the API process. Logs
+    // exactly the linkage decisions that determine whether the
+    // merchant will see this order:
+    //   - what the buyer's payload sent
+    //   - what the catalog says the product's store is
+    //   - which one we picked
+    // Privacy-safe: only ids + flags, no PII / message / address.
+    if (process.env.ORDER_FLOW_DEBUG === '1') {
+      this.logger.log(
+        `[order-flow] orders.create viewerUserId=${viewerUserId} ` +
+          `bodyProductId=${body.productId ?? 'null'} ` +
+          `bodyStoreId=${storeIdFromBody ?? 'null'} ` +
+          `productStoreId=${storeIdFromProduct ?? 'null'} ` +
+          `resolvedStoreId=${resolvedStoreId ?? 'null'} ` +
+          `linked=${resolvedStoreId ? 'YES' : 'NO'}`,
+      );
+    }
+
+    const created = await this.prisma.order.create({
       data: {
         userId: viewerUserId,
         receiverUsername,
@@ -259,6 +278,16 @@ export class OrdersService {
       },
       include: ORDER_INCLUDE,
     });
+
+    if (process.env.ORDER_FLOW_DEBUG === '1') {
+      this.logger.log(
+        `[order-flow] orders.create persisted orderId=${created.id} ` +
+          `productId=${created.productId ?? 'null'} ` +
+          `storeId=${created.storeId ?? 'null'}`,
+      );
+    }
+
+    return created;
   }
 
   async findOne(id: string, viewerUserId: string) {

@@ -76,4 +76,29 @@ export class AdminController {
   systemStatus() {
     return this.admin.getSystemStatus();
   }
+
+  // ── Diagnostics ─────────────────────────────────────────────────
+  //
+  // Production-grade lineage inspector. Used to debug "merchant
+  // doesn't see this order" reports. Returns the full chain
+  // Order → Gift → Product → Store → owner — alongside an
+  // explicit "would /store/orders return this for the owner?"
+  // verdict with a reason string.
+  //
+  // Privacy: no recipient address, no message text, no media.
+  // Identifiers + status fields only. Admin-only by guard above.
+  //
+  // Use:
+  //   GET /admin/diagnose/gift/latest          (most recent gift)
+  //   GET /admin/diagnose/gift/<giftId>        (specific gift)
+
+  @Get('diagnose/gift/latest')
+  diagnoseLatestGift() {
+    return this.admin.diagnoseLatestGift();
+  }
+
+  @Get('diagnose/gift/:id')
+  diagnoseGift(@Param('id') id: string) {
+    return this.admin.diagnoseGift(id);
+  }
 }
