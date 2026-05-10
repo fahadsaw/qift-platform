@@ -9,6 +9,7 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
 import { userHasDefaultAddress } from '../addresses/default-address.helper';
+import { matchAddressToStoreZones } from '../stores/delivery-zones';
 
 // Whitelist of fields that are safe to ship over the wire. `passwordHash`
 // is never included so it cannot leak through any user endpoint.
@@ -631,13 +632,17 @@ export class UsersService {
     }));
   }
 
-  async checkByUsername(qiftUsername: string, fastCity?: string) {
+  async checkByUsername(
+    qiftUsername: string,
+    fastCity?: string,
+    storeId?: string,
+  ) {
     const username = this.normalizeUsername(qiftUsername);
     if (!username) {
       return {
         exists: false as const,
         hasDefaultAddress: false,
-        canDeliverFast: fastCity ? false : null,
+        canDeliverFast: fastCity || storeId ? false : null,
       };
     }
     // Soft-deleted accounts shouldn't show up to senders — they can't
@@ -667,16 +672,25 @@ export class UsersService {
       return {
         exists: false as const,
         hasDefaultAddress: false,
-        canDeliverFast: fastCity ? false : null,
+        canDeliverFast: fastCity || storeId ? false : null,
       };
     }
     // Canonical default-address resolver. Every other gift-flow caller
     // routes through the same helper so a future rule change (e.g.
     // soft-deleted addresses, regional gating) lands in one place.
     const hasDefaultAddress = await userHasDefaultAddress(this.prisma, user.id);
-    const canDeliverFast = fastCity
-      ? await this.canDeliverFast(user.id, fastCity)
-      : null;
+    // Coverage probe. When storeId is supplied we run the same
+    // matcher GiftsService.confirmAddress uses (full
+    // deliveryZones — including district whitelists). Otherwise
+    // fall back to the legacy city-level check so older callers
+    // keep working. Both paths return the same yes/no boolean —
+    // no address detail leaks to the sender.
+    let canDeliverFast: boolean | null = null;
+    if (storeId) {
+      canDeliverFast = await this.canStoreDeliverToReceiver(user.id, storeId);
+    } else if (fastCity) {
+      canDeliverFast = await this.canDeliverFast(user.id, fastCity);
+    }
     if (process.env.GIFT_FLOW_DEBUG === '1') {
       this.logger.log(
         `[gift-flow] checkByUsername username="${username}" userId=${user.id} hasDefaultAddress=${hasDefaultAddress} fastCity=${fastCity ?? '-'} canDeliverFast=${canDeliverFast}`,
@@ -1052,7 +1066,56 @@ export class UsersService {
     const target = normaliseCity(city);
     return rows.some((row) => normaliseCity(row.city) === target);
   }
+
+  // Stricter pre-payment coverage probe. Returns true iff the
+  // receiver has at least ONE saved address that falls inside the
+  // store's configured delivery zones, using the same matcher
+  // GiftsService.confirmAddress applies. Fast-delivery flag is
+  // derived from the store's category — non-fast products bypass
+  // coverage matching entirely (return true if any address exists
+  // at all, since couriered shipping isn't zone-gated yet). The
+  // privacy contract is the same as canDeliverFast: only a
+  // boolean leaves the function.
+  async canStoreDeliverToReceiver(
+    receiverId: string,
+    storeId: string,
+  ): Promise<boolean> {
+    if (!storeId) return false;
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { city: true, deliveryZones: true, category: true },
+    });
+    if (!store) return false;
+    const isFastDelivery = FAST_DELIVERY_CATEGORIES.has(
+      store.category.toLowerCase(),
+    );
+    const addresses = await this.prisma.address.findMany({
+      where: { userId: receiverId },
+      select: { city: true, district: true },
+    });
+    if (addresses.length === 0) return false;
+    if (!isFastDelivery) return true;
+    return addresses.some((a) => {
+      const match = matchAddressToStoreZones(
+        { city: a.city, district: a.district },
+        { city: store.city, deliveryZones: store.deliveryZones },
+        true,
+      );
+      return match.ok;
+    });
+  }
 }
+
+// Mirrors the same set used by GiftsService.confirmAddress and
+// GiftsAutoDefaultService — fast-delivery products are coverage-
+// gated; everything else ships via standard courier and isn't
+// zone-restricted yet.
+const FAST_DELIVERY_CATEGORIES: ReadonlySet<string> = new Set([
+  'flowers',
+  'chocolate',
+  'cake',
+  'perishable',
+]);
 
 // Lower-case, collapse whitespace, strip Arabic diacritics so that
 // "الرياض  " matches "الرياض" matches "ٱلرياض". Same algorithm has to be

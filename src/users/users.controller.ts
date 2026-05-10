@@ -133,14 +133,25 @@ export class UsersController {
   // never echo the city back, so a sender can't enumerate whether multiple
   // candidate cities matched — they only learn yes/no for the city THEY
   // already know about (the store's city).
+  //
+  // Optional `storeId` upgrades the probe to full coverage matching:
+  // we look up the store's `deliveryZones` and check every receiver
+  // address against the same matcher GiftsService.confirmAddress
+  // uses. This catches the district-restricted case (Riyadh-flowers
+  // merchant covering only 9 northern districts) — a city-only check
+  // would say "yes Riyadh works" and let the buyer pay, then the
+  // confirm-address step would reject. Privacy unchanged: the
+  // response is still just the boolean, never the address detail.
   @Get('check')
   check(
     @Query('username') username: string,
     @Query('fastCity') fastCity?: string,
+    @Query('storeId') storeId?: string,
   ) {
     return this.usersService.checkByUsername(
       username ?? '',
       fastCity?.trim() || undefined,
+      storeId?.trim() || undefined,
     );
   }
 

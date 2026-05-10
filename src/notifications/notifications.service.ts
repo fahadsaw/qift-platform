@@ -30,6 +30,11 @@ export const NotificationType = {
   // receiver finally set a default address. Fires once per attempt
   // (notifiedAt is stamped to dedupe).
   GiftAddressReadyForRetry: 'gift.address_ready_for_retry',
+  // Receiver: 24h elapsed and Qift tried to auto-confirm against
+  // your default — but none of your saved addresses fall inside
+  // the merchant's delivery zones. Add or pick a covered address,
+  // or the gift will stay blocked.
+  GiftAutoFallbackBlocked: 'gift.auto_fallback_blocked',
 } as const;
 export type NotificationType =
   (typeof NotificationType)[keyof typeof NotificationType];

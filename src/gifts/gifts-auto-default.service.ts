@@ -10,7 +10,18 @@ import {
   NotificationType,
 } from '../notifications/notifications.service';
 import type { GiftStatus } from './gift-status';
-import { getDefaultAddressForUser } from '../addresses/default-address.helper';
+import { matchAddressToStoreZones } from '../stores/delivery-zones';
+
+// Categories whose products spoil or are time-sensitive, and
+// therefore must match the store's configured delivery zones.
+// Mirrors the same set used by GiftsService.confirmAddress and
+// the frontend's lib/sampleData.FAST_DELIVERY_CATEGORIES.
+const FAST_DELIVERY_CATEGORIES: ReadonlySet<string> = new Set([
+  'flowers',
+  'chocolate',
+  'cake',
+  'perishable',
+]);
 
 // How long a gift is allowed to sit in `pending_address` before we auto-
 // flip it onto the receiver's default address.
@@ -65,7 +76,11 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
   }
 
   // Public so it can be triggered from a script or test.
-  async runOnce(): Promise<{ promoted: number; skipped: number }> {
+  async runOnce(): Promise<{
+    promoted: number;
+    skipped: number;
+    blocked: number;
+  }> {
     const cutoff = new Date(Date.now() - AUTO_DEFAULT_TTL_MS);
     const overdue = await this.prisma.gift.findMany({
       where: {
@@ -77,27 +92,124 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
         senderId: true,
         receiverId: true,
         productName: true,
+        storeId: true,
+        productId: true,
       },
     });
 
     let promoted = 0;
     let skipped = 0;
+    // Coverage-blocked: receiver has saved addresses but none fall
+    // inside the merchant's zones. Counted separately so ops can
+    // tell "no address configured" apart from "address exists but
+    // out of coverage" in the logs.
+    let blocked = 0;
 
     for (const gift of overdue) {
       try {
-        // Look up the receiver's default address now (not at gift create
-        // time) so we honour any address changes they made in the
-        // meantime. Routes through the canonical helper — same gate
-        // every other gift-flow caller uses.
-        const def = await getDefaultAddressForUser(
-          this.prisma,
-          gift.receiverId,
-        );
-        if (!def) {
-          // Receiver still has no default address — nothing we can do
-          // without their input, so leave it pending. The /profile
-          // suspension banner already nags them.
+        // Resolve the merchant store + product context. We need
+        // both to decide whether coverage matters — non-fast-
+        // delivery products skip the matcher entirely.
+        const store = gift.storeId
+          ? await this.prisma.store.findUnique({
+              where: { id: gift.storeId },
+              select: { city: true, deliveryZones: true },
+            })
+          : null;
+        let isFastDelivery = false;
+        if (gift.productId) {
+          const product = await this.prisma.product.findUnique({
+            where: { id: gift.productId },
+            select: { category: true, isFastDelivery: true },
+          });
+          if (product) {
+            isFastDelivery =
+              product.isFastDelivery === true ||
+              FAST_DELIVERY_CATEGORIES.has(product.category.toLowerCase());
+          }
+        }
+
+        // Pull every saved address — default first, then the rest.
+        // Privacy: these are the receiver's own rows; we only use
+        // them inside this server-side sweep. The sender never
+        // sees them; the only side-effect on success is writing
+        // the chosen `addressId` onto the Gift, which the merchant
+        // dashboard reads.
+        const candidates = await this.prisma.address.findMany({
+          where: { userId: gift.receiverId },
+          select: {
+            id: true,
+            city: true,
+            district: true,
+            isDefault: true,
+          },
+          // Address has no createdAt, but cuid IDs are chronologically
+          // ordered prefix-wise — sorting by id approximates "oldest
+          // saved first" as a stable tiebreaker after default.
+          orderBy: [{ isDefault: 'desc' }, { id: 'asc' }],
+        });
+        if (candidates.length === 0) {
+          // Receiver still has no addresses at all — nothing we
+          // can do without their input. /profile already nags them
+          // via the suspension banner.
           skipped += 1;
+          continue;
+        }
+
+        // For non-fast-delivery products, fall back to the legacy
+        // "use the default" behaviour — coverage doesn't apply,
+        // and we keep the existing UX. For fast-delivery, walk the
+        // candidates and pick the first that matches merchant
+        // coverage. If the gift has no linked store (legacy /
+        // sample) we also fall back to the default.
+        let chosenId: string | null = null;
+        if (!isFastDelivery || !store) {
+          chosenId = candidates[0].id;
+        } else {
+          for (const a of candidates) {
+            const match = matchAddressToStoreZones(
+              { city: a.city, district: a.district },
+              { city: store.city, deliveryZones: store.deliveryZones },
+              true,
+            );
+            if (match.ok) {
+              chosenId = a.id;
+              break;
+            }
+          }
+        }
+
+        if (!chosenId) {
+          // Receiver has saved addresses, but none of them fall
+          // inside the merchant's delivery zones. Per the
+          // architecture rule, do NOT auto-confirm an unsupported
+          // address. Leave the gift pending and ping both sides so
+          // someone can act:
+          //   - Receiver gets a "your saved addresses don't cover
+          //     this merchant — add or pick a different one" nudge
+          //     so they know the gift is parked on them.
+          //   - Sender gets a heads-up that auto-confirm fell
+          //     through, no action needed but they shouldn't be
+          //     surprised when the gift sits longer.
+          // Privacy: neither notification mentions WHICH address
+          // failed or any city/district — body is just productName.
+          // Sender's message stays addressless by design.
+          blocked += 1;
+          const giftLink = `/gifts/${gift.id}`;
+          void this.notifications.trigger({
+            userId: gift.receiverId,
+            type: NotificationType.GiftAutoFallbackBlocked,
+            title: 'لم نتمكن من تأكيد العنوان تلقائياً',
+            body: gift.productName,
+            link: giftLink,
+          });
+          void this.notifications.trigger({
+            userId: gift.senderId,
+            type: NotificationType.GiftAutoFallbackBlocked,
+            title: 'هديتك بانتظار اختيار عنوان مدعوم من المتجر',
+            body: gift.productName,
+            link: giftLink,
+          });
           continue;
         }
 
@@ -107,7 +219,7 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
           where: { id: gift.id, status: 'pending_address' },
           data: {
             status: 'default_address_used' satisfies GiftStatus,
-            addressId: def.id,
+            addressId: chosenId,
             confirmedAt: new Date(),
           },
         });
@@ -118,16 +230,13 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
         promoted += 1;
 
         // Notify both sides. The receiver's message is more apologetic
-        // ("we used your default") because they're the one who could have
-        // confirmed; the sender's is informational.
-        // Deep-link both notifications to the specific gift so the
-        // recipient lands on the timeline (already-confirmed state)
-        // and the sender lands on the same row from their inbox.
+        // ("we used a saved address") because they're the one who
+        // could have confirmed; the sender's is informational.
         const giftLink = `/gifts/${gift.id}`;
         void this.notifications.trigger({
           userId: gift.receiverId,
           type: NotificationType.GiftDefaultAddressUsed,
-          title: 'تم استخدام العنوان الافتراضي لإرسال الهدية',
+          title: 'تم استخدام عنوانك المحفوظ لإرسال الهدية',
           body: gift.productName,
           link: giftLink,
         });
@@ -147,11 +256,11 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    if (promoted > 0) {
+    if (promoted > 0 || blocked > 0) {
       this.logger.log(
-        `Auto-default sweep: promoted ${promoted}, skipped ${skipped}`,
+        `Auto-default sweep: promoted ${promoted}, blocked ${blocked}, skipped ${skipped}`,
       );
     }
-    return { promoted, skipped };
+    return { promoted, skipped, blocked };
   }
 }
