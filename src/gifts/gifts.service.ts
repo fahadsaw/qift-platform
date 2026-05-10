@@ -19,7 +19,18 @@ import {
   type GiftLike,
 } from './gift-visibility';
 import { getDefaultAddressForUser } from '../addresses/default-address.helper';
+import { matchAddressToStoreZones } from '../stores/delivery-zones';
 export type { GiftStatus } from './gift-status';
+
+// Categories whose products spoil or are time-sensitive, and
+// therefore must match the store's configured delivery zones.
+// Mirrors the frontend's lib/sampleData.FAST_DELIVERY_CATEGORIES.
+const FAST_DELIVERY_CATEGORIES: ReadonlySet<string> = new Set([
+  'flowers',
+  'chocolate',
+  'cake',
+  'perishable',
+]);
 
 // `senderId` is intentionally omitted — we always use the JWT viewer as the
 // sender, so a client-supplied senderId would be ignored anyway.
@@ -416,21 +427,84 @@ export class GiftsService {
     assertTransition(gift.status, 'address_confirmed');
 
     let chosenAddressId: string | null = null;
+    let chosenAddressCity: string | null = null;
+    let chosenAddressDistrict: string | null = null;
     if (addressId) {
       const owned = await this.prisma.address.findFirst({
         where: { id: addressId, userId: viewerUserId },
-        select: { id: true },
+        select: { id: true, city: true, district: true },
       });
       if (!owned) {
         throw new BadRequestException('العنوان غير موجود أو لا يخصك');
       }
       chosenAddressId = owned.id;
+      chosenAddressCity = owned.city;
+      chosenAddressDistrict = owned.district;
     } else {
       const def = await getDefaultAddressForUser(this.prisma, viewerUserId);
       if (!def) {
         throw new BadRequestException('لا يوجد عنوان افتراضي لتأكيده');
       }
       chosenAddressId = def.id;
+      // Re-query for the city/district fields needed by the
+      // coverage matcher. The shared helper only returns `id` so
+      // we don't widen its contract for callers that don't need
+      // the address details.
+      const defFull = await this.prisma.address.findUnique({
+        where: { id: def.id },
+        select: { city: true, district: true },
+      });
+      chosenAddressCity = defFull?.city ?? null;
+      chosenAddressDistrict = defFull?.district ?? null;
+    }
+
+    // Coverage gate. For fast-delivery products (flowers, chocolate,
+    // cake, perishables) the address must fall inside one of the
+    // store's configured delivery zones. Same source-of-truth shape
+    // the merchant editor at /store-dashboard/coverage writes; we
+    // tolerate the legacy single-`city` fallback when no zones are
+    // saved. Anything outside the configured coverage is rejected
+    // here — the merchant has been telling us which areas they
+    // can't reach, and we're now respecting that.
+    if (gift.storeId) {
+      const store = await this.prisma.store.findUnique({
+        where: { id: gift.storeId },
+        select: { city: true, deliveryZones: true },
+      });
+      // Resolve fast-delivery from the linked product, falling back
+      // to false when product context is missing (legacy/sample
+      // gifts whose Product row was never linked). We don't infer
+      // it from `productName` — the category is the authoritative
+      // source.
+      let isFastDelivery = false;
+      if (gift.productId) {
+        const product = await this.prisma.product.findUnique({
+          where: { id: gift.productId },
+          select: { category: true, isFastDelivery: true },
+        });
+        if (product) {
+          isFastDelivery =
+            product.isFastDelivery === true ||
+            FAST_DELIVERY_CATEGORIES.has(product.category.toLowerCase());
+        }
+      }
+      if (store && isFastDelivery) {
+        const match = matchAddressToStoreZones(
+          { city: chosenAddressCity, district: chosenAddressDistrict },
+          { city: store.city, deliveryZones: store.deliveryZones },
+          true,
+        );
+        if (!match.ok) {
+          // Single localized message regardless of city vs district
+          // mismatch — the buyer/receiver doesn't need to know the
+          // internal granularity. The merchant's configured zones
+          // are private operational data; the receiver just sees
+          // "this store doesn't deliver here".
+          throw new BadRequestException(
+            'هذا المتجر لا يوصل إلى هذه المنطقة. الرجاء اختيار عنوان داخل نطاق التوصيل المعتمد لدى المتجر.',
+          );
+        }
+      }
     }
 
     const updated = await this.prisma.gift.update({

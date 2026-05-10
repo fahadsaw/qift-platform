@@ -265,6 +265,7 @@ model Gift {
   store    Store?   @relation(fields: [storeId], references: [id], onDelete: SetNull)
   product  Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
   order    Order?
+  shipment Shipment?
 
   @@index([senderId])
   @@index([receiverId])
@@ -525,6 +526,69 @@ model Order {
   payment Payment?
 
   @@index([userId])
+}
+
+// Shipment record. Created by the merchant when they hand the
+// package off to a courier. One per Gift; the giftId FK is unique
+// so re-shipping (e.g. failed delivery, second attempt) updates
+// the same row instead of creating duplicates. Status mirrors a
+// generic courier lifecycle so we don't need a custom enum per
+// provider.
+//
+// `provider` is a stable string code (smsa, aramex, dhl, spl,
+// manual, other). The frontend resolves it into a display name
+// + tracking-URL template — keeping that mapping out of the DB
+// lets us add couriers without a migration. `trackingUrl` is the
+// finished URL we surface to senders/recipients (provider URL
+// template + tracking number); we persist it so partial-row
+// rebuilds don't break the deep-link.
+//
+// PRIVACY: shipment data flows to the buyer + receiver + merchant.
+// Tracking events do NOT include any address detail beyond what
+// the merchant entered — never the receiver's full address.
+model Shipment {
+  id             String   @id @default(cuid())
+  giftId         String   @unique
+  // Stable provider code. Resolves to a display name + tracking
+  // URL template on the frontend.
+  provider       String
+  trackingNumber String?
+  trackingUrl    String?
+  // "registered" | "in_transit" | "out_for_delivery" |
+  // "delivered" | "exception" | "cancelled"
+  // Authoritative shipment status. Independent from Gift.status —
+  // the Gift status remains the user-facing flow ("preparing /
+  // shipped / delivered") while Shipment.status carries finer
+  // courier-side state.
+  status         String   @default("registered")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  gift   Gift             @relation(fields: [giftId], references: [id], onDelete: Cascade)
+  events ShipmentEvent[]
+}
+
+// Tracking timeline event. Append-only — the merchant adds rows
+// as the package moves; future API integrations will pipe
+// provider webhooks into the same table. Each event carries the
+// status it represents (so we can rebuild the timeline without
+// joining back to Shipment) plus an operator note.
+model ShipmentEvent {
+  id         String   @id @default(cuid())
+  shipmentId String
+  status     String
+  note       String?
+  // When the event happened in the real world. Distinct from
+  // `createdAt` (when we recorded it) so a courier delay between
+  // the event and us learning about it doesn't distort the
+  // timeline.
+  occurredAt DateTime
+  createdAt  DateTime @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  // Timeline render = events for one shipment in occurredAt order.
+  @@index([shipmentId, occurredAt])
 }
 
 model Otp {
