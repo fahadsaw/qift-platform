@@ -6,6 +6,11 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  isMerchantPlan,
+  planHas,
+  type MerchantCapability,
+} from './merchant-plans';
 
 const FORBIDDEN_MSG = 'غير مصرح لك';
 
@@ -27,6 +32,7 @@ const PUBLIC_STORE_SELECT = {
   ownerId: true,
   createdAt: true,
   status: true,
+  plan: true,
   logoUrl: true,
   coverImageUrl: true,
   websiteUrl: true,
@@ -328,6 +334,46 @@ export class StoresService {
       },
       select: OWNER_STORE_SELECT,
     });
+  }
+
+  // Admin-only plan assignment. Self-serve upgrades + subscription
+  // billing are deliberately out of scope today; admins move
+  // merchants between tiers manually. Side-effects of downgrades
+  // (e.g. what happens to a Pro store's API integrations when
+  // they're dropped to Starter) are intentionally not modeled
+  // here — that's a future decision once a real downgrade is
+  // requested.
+  async setPlan(storeId: string, plan: string) {
+    if (!isMerchantPlan(plan)) {
+      throw new BadRequestException('plan must be starter | pro | enterprise');
+    }
+    const existing = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Store not found');
+    return this.prisma.store.update({
+      where: { id: storeId },
+      data: { plan },
+      select: OWNER_STORE_SELECT,
+    });
+  }
+
+  // Server-side capability gate. Throw ForbiddenException when a
+  // store's plan doesn't include the requested capability —
+  // protects feature endpoints from being called from the
+  // dashboard of an under-tier merchant. Hot paths should still
+  // prefer reading the plan once and consulting capabilitiesFor()
+  // directly; this helper is for one-shot checks.
+  async assertCapability(storeId: string, capability: MerchantCapability) {
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { plan: true },
+    });
+    if (!store) throw new NotFoundException('Store not found');
+    if (!planHas(store.plan, capability)) {
+      throw new ForbiddenException('هذه الميزة تتطلب ترقية باقة المتجر');
+    }
   }
 
   // Public listing — anyone (even unauthenticated UI) can browse stores.

@@ -175,6 +175,13 @@ export class AdminService {
     return this.stores.findOneForOwnerOrAdmin(viewerUserId, storeId);
   }
 
+  // Admin-only plan assignment. Wraps StoresService.setPlan so the
+  // admin module owns the route surface; the underlying validation
+  // (plan in the allowed set, store exists) lives in StoresService.
+  async setStorePlan(storeId: string, plan: string) {
+    return this.stores.setPlan(storeId, plan);
+  }
+
   // Verification documents uploaded with the merchant application.
   // Returns the StoreDocument rows for the admin review modal.
   async listStoreDocuments(storeId: string) {

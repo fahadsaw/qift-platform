@@ -76,6 +76,11 @@ export class StoreIntegrationsService {
       };
     }
     await this.stores.assertOwner(viewerUserId, storeId);
+    // Plan gate: external catalog integrations are a Pro+
+    // capability. Starter merchants get a clean 403 with a
+    // localized message so the merchant UI can render the
+    // "Available on Pro" hint instead of a generic error.
+    await this.stores.assertCapability(storeId, 'api_integrations');
     const secret = randomBytes(32).toString('hex');
     const updated = await this.prisma.store.update({
       where: { id: storeId },

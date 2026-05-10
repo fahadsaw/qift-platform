@@ -375,6 +375,26 @@ model Store {
   // "disconnected" | "connected" | "error"
   integrationStatus String   @default("disconnected")
 
+  // ── Merchant plan ─────────────────────────────────────────────
+  // Tiered feature gating. Stable string union so adding tiers
+  // doesn't need a Prisma enum migration:
+  //   starter     — default for new merchants. In-Qift storefront,
+  //                 products, gifting, basic analytics, coverage,
+  //                 order management.
+  //   pro         — adds API/Shopify/Woo integrations, advanced
+  //                 analytics, campaigns/promotions, better
+  //                 placement, automation.
+  //   enterprise  — custom integrations, SLA, advanced APIs,
+  //                 branded gifting, advanced reporting, future
+  //                 split-payment capabilities.
+  // Plan changes are admin-assigned today (PATCH /admin/stores/:id/plan).
+  // Self-serve upgrades + subscription billing are intentionally
+  // out of scope — see project_merchant_platform_direction memory.
+  // The capability map (apps/api/src/stores/merchant-plans.ts)
+  // is the only thing that should consume this field; never
+  // hardcode a plan check inline.
+  plan              String   @default("starter")
+
   // ── Approval lifecycle ────────────────────────────────────────
   // Onboarding-v2 expanded states (string union, additive — every
   // pre-v2 row stays valid):

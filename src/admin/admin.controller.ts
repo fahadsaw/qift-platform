@@ -79,6 +79,15 @@ export class AdminController {
     return this.admin.storeDetail(req.user.userId, id);
   }
 
+  // Admin-only plan assignment. Merchants don't self-upgrade; the
+  // admin moves them between starter / pro / enterprise manually.
+  // Body: { plan: 'starter' | 'pro' | 'enterprise' }. See
+  // apps/api/src/stores/merchant-plans.ts for the capability map.
+  @Patch('stores/:id/plan')
+  setStorePlan(@Param('id') id: string, @Body() body: { plan?: string }) {
+    return this.admin.setStorePlan(id, body?.plan ?? '');
+  }
+
   // Documents uploaded with the merchant application. Listed for
   // the admin review modal. The response carries fileUrl pointers
   // to R2 — the admin browser fetches them on click. No payloads
