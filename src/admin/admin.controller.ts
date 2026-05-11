@@ -12,17 +12,29 @@ import {
 import { AdminService } from './admin.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { AdminGuard } from './admin.guard';
+import { OpsRolesService } from '../ops-roles/ops-roles.service';
+import {
+  OpsRoleGuard,
+  RequireOpsPermission,
+} from '../ops-roles/ops-role.guard';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
-// Every /admin/* route is double-guarded: JwtAuthGuard populates
-// req.user, then AdminGuard re-loads the role from the DB and
-// rejects any non-admin. Service methods take the viewer's userId so
-// future audit logging can attribute mutations.
+// Every /admin/* route is triple-guarded: JwtAuthGuard populates
+// req.user, AdminGuard re-loads the role from the DB and rejects
+// any non-admin, then OpsRoleGuard reads route-level
+// @RequireOpsPermission(...) metadata (when present) and rejects
+// admins whose ops-role assignments don't cover the requested
+// permission. Routes WITHOUT the decorator behave exactly as
+// before (admin-only); new gated routes opt in to the granular
+// layer one decorator at a time.
 @Controller('admin')
-@UseGuards(JwtAuthGuard, AdminGuard)
+@UseGuards(JwtAuthGuard, AdminGuard, OpsRoleGuard)
 export class AdminController {
-  constructor(private readonly admin: AdminService) {}
+  constructor(
+    private readonly admin: AdminService,
+    private readonly opsRoles: OpsRolesService,
+  ) {}
 
   // ── Users ────────────────────────────────────────────────────────
 
@@ -84,8 +96,50 @@ export class AdminController {
   // Body: { plan: 'starter' | 'pro' | 'enterprise' }. See
   // apps/api/src/stores/merchant-plans.ts for the capability map.
   @Patch('stores/:id/plan')
+  @RequireOpsPermission('store.set_plan')
   setStorePlan(@Param('id') id: string, @Body() body: { plan?: string }) {
     return this.admin.setStorePlan(id, body?.plan ?? '');
+  }
+
+  // Marketplace featured toggle. Drives the /stores "Featured"
+  // rail. Idempotent — re-applying the same value no-ops.
+  @Patch('stores/:id/featured')
+  @RequireOpsPermission('store.set_featured')
+  setStoreFeatured(
+    @Param('id') id: string,
+    @Body() body: { featured?: boolean },
+  ) {
+    return this.admin.setStoreFeatured(id, body?.featured === true);
+  }
+
+  // ── Ops roles (RBAC) ──────────────────────────────────────
+  //
+  // Granular permission layer on top of User.role = 'admin'.
+  // Only admins can hold ops roles; promoting a non-admin user
+  // is rejected by OpsRolesService.grant. Capability map lives
+  // in apps/api/src/ops-roles/ops-roles.ts — never hardcode role
+  // checks at call sites.
+
+  @Get('users/:id/ops-roles')
+  @RequireOpsPermission('user.read')
+  listUserOpsRoles(@Param('id') id: string) {
+    return this.opsRoles.listAssignments(id);
+  }
+
+  @Post('users/:id/ops-roles')
+  @RequireOpsPermission('user.assign_ops_role')
+  grantOpsRole(
+    @Param('id') id: string,
+    @Body() body: { role?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.opsRoles.grant(req.user.userId, id, body?.role ?? '');
+  }
+
+  @Patch('users/:id/ops-roles/revoke')
+  @RequireOpsPermission('user.assign_ops_role')
+  revokeOpsRole(@Param('id') id: string, @Body() body: { role?: string }) {
+    return this.opsRoles.revoke(id, body?.role ?? '');
   }
 
   // Documents uploaded with the merchant application. Listed for

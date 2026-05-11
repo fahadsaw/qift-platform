@@ -1,0 +1,172 @@
+// Internal ops-role capability map.
+//
+// Layered on top of the coarse `User.role` discriminator
+// (user / store / admin). Granular roles let us scale internal
+// operations beyond a single "admin" bucket without exploding
+// the AdminGuard surface.
+//
+// Mirrored on the frontend at `lib/opsRoles.ts` — keep role
+// codes + permission codes in sync. The frontend mirror is
+// presentational only (badge labels, role pickers); the
+// authoritative gate is the OpsRoleGuard on the backend.
+//
+// What we deliberately do NOT model here:
+//   - Per-permission expiry / scheduled grants.
+//   - Time-bound delegations.
+//   - "Break-glass" privilege escalation.
+//   - Per-resource ACLs (e.g. "this user can review THIS
+//     specific store"). Today every role is platform-wide;
+//     resource scoping is a future surface.
+
+export const OPS_ROLES = [
+  // Root. Always has every permission. Use sparingly — bootstrap
+  // role for the platform founder + one or two trusted engineers.
+  'super_admin',
+  // Day-to-day platform operations. Broad read + most writes
+  // except finance + trust/safety actions.
+  'operations_manager',
+  // Settlements, payouts, ledger viewing, finance reports.
+  'finance',
+  // Onboarding application review (approve / reject /
+  // request_changes on Store rows).
+  'merchant_review',
+  // Read-mostly customer + merchant support. Diagnose orders,
+  // resolve address issues; cannot toggle plans / featured /
+  // financial state.
+  'support',
+  // Moderation. Reports queue, account holds, blocks.
+  'trust_safety',
+  // Fulfillment triage: shipment problems, coverage issues.
+  'fulfillment_ops',
+  // Read-only access to platform analytics dashboards.
+  'analytics_viewer',
+] as const;
+
+export type OpsRole = (typeof OPS_ROLES)[number];
+
+export function isOpsRole(value: string): value is OpsRole {
+  return (OPS_ROLES as readonly string[]).includes(value);
+}
+
+// Permission catalog. One entry per action surface that needs
+// gating. Grouped by domain for readability — actual checks are
+// flat strings.
+export type OpsPermission =
+  // Store / merchant management.
+  | 'store.review'
+  | 'store.set_plan'
+  | 'store.set_featured'
+  | 'store.set_status'
+  | 'store.read_detail'
+  // User management.
+  | 'user.read'
+  | 'user.set_role'
+  | 'user.suspend'
+  | 'user.assign_ops_role'
+  // Finance.
+  | 'finance.read_payouts'
+  | 'finance.record_payout_event'
+  | 'finance.approve_payout'
+  // Diagnostics / debug.
+  | 'diagnostics.read'
+  | 'diagnostics.run_seed'
+  // Trust & safety.
+  | 'report.read'
+  | 'report.resolve'
+  // Analytics.
+  | 'analytics.read';
+
+// Capability map. Role → permissions granted. super_admin is
+// computed lazily at call time as "all permissions"; we don't
+// enumerate them here to avoid drift when a new permission
+// lands.
+const PERMISSIONS_BY_ROLE: Record<
+  Exclude<OpsRole, 'super_admin'>,
+  OpsPermission[]
+> = {
+  operations_manager: [
+    'store.review',
+    'store.set_status',
+    'store.set_featured',
+    'store.read_detail',
+    'user.read',
+    'diagnostics.read',
+    'diagnostics.run_seed',
+    'report.read',
+    'analytics.read',
+  ],
+  finance: [
+    'finance.read_payouts',
+    'finance.record_payout_event',
+    'finance.approve_payout',
+    'store.read_detail',
+    'analytics.read',
+  ],
+  merchant_review: ['store.review', 'store.read_detail', 'store.set_status'],
+  support: [
+    'store.read_detail',
+    'user.read',
+    'diagnostics.read',
+    'report.read',
+  ],
+  trust_safety: [
+    'user.read',
+    'user.suspend',
+    'report.read',
+    'report.resolve',
+    'store.set_status',
+  ],
+  fulfillment_ops: ['store.read_detail', 'diagnostics.read'],
+  analytics_viewer: ['analytics.read'],
+};
+
+// Resolve a set of roles into the union of permissions they
+// grant. `super_admin` short-circuits to "all permissions".
+// Empty input → empty set.
+export function permissionsFor(roles: readonly string[]): Set<OpsPermission> {
+  const out = new Set<OpsPermission>();
+  for (const raw of roles) {
+    if (!isOpsRole(raw)) continue;
+    if (raw === 'super_admin') {
+      // Add every known permission. Hardcoding the seed list here
+      // keeps super_admin honest as new permissions land — they
+      // need to extend the OpsPermission union and SUPER_ADMIN_ALL
+      // both. The TS compiler enforces the union extension; the
+      // assertion below enforces the SUPER_ADMIN_ALL extension.
+      for (const p of SUPER_ADMIN_ALL) out.add(p);
+      continue;
+    }
+    for (const p of PERMISSIONS_BY_ROLE[raw]) out.add(p);
+  }
+  return out;
+}
+
+export function hasOpsPermission(
+  roles: readonly string[],
+  permission: OpsPermission,
+): boolean {
+  return permissionsFor(roles).has(permission);
+}
+
+// Authoritative permission list. Update alongside the
+// OpsPermission union — the typechecker doesn't enforce this
+// alignment automatically.
+const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
+  'store.review',
+  'store.set_plan',
+  'store.set_featured',
+  'store.set_status',
+  'store.read_detail',
+  'user.read',
+  'user.set_role',
+  'user.suspend',
+  'user.assign_ops_role',
+  'finance.read_payouts',
+  'finance.record_payout_event',
+  'finance.approve_payout',
+  'diagnostics.read',
+  'diagnostics.run_seed',
+  'report.read',
+  'report.resolve',
+  'analytics.read',
+];

@@ -33,6 +33,7 @@ const PUBLIC_STORE_SELECT = {
   createdAt: true,
   status: true,
   plan: true,
+  featured: true,
   logoUrl: true,
   coverImageUrl: true,
   websiteUrl: true,
@@ -355,6 +356,22 @@ export class StoresService {
     return this.prisma.store.update({
       where: { id: storeId },
       data: { plan },
+      select: OWNER_STORE_SELECT,
+    });
+  }
+
+  // Marketplace featured toggle. Admin-only — the editorial /
+  // earned-placement variants ride on top of the same column
+  // and can layer additional rules without a schema change.
+  async setFeatured(storeId: string, featured: boolean) {
+    const existing = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Store not found');
+    return this.prisma.store.update({
+      where: { id: storeId },
+      data: { featured },
       select: OWNER_STORE_SELECT,
     });
   }

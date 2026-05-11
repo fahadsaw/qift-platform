@@ -182,6 +182,13 @@ export class AdminService {
     return this.stores.setPlan(storeId, plan);
   }
 
+  // Marketplace featured toggle. Idempotent — re-applying the
+  // same value is a no-op write at the DB level (Prisma update
+  // is safe on equal data).
+  async setStoreFeatured(storeId: string, featured: boolean) {
+    return this.stores.setFeatured(storeId, featured);
+  }
+
   // Verification documents uploaded with the merchant application.
   // Returns the StoreDocument rows for the admin review modal.
   async listStoreDocuments(storeId: string) {

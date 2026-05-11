@@ -139,6 +139,9 @@ model User {
   // default address. See model GiftAttempt below.
   attemptedGifts    GiftAttempt[] @relation("SenderAttempts")
   pendingAttempts   GiftAttempt[] @relation("ReceiverAttempts")
+  // Granular ops-role assignments (layered on top of the coarse
+  // `role` field for admin users). See model OpsRoleAssignment.
+  opsRoles          OpsRoleAssignment[]
   // Block relations. `outgoingBlocks` = rows where this user IS the
   // blocker; `incomingBlocks` = rows where this user IS being blocked.
   // Search + public-profile + send-gift surfaces filter both directions
@@ -395,6 +398,13 @@ model Store {
   // hardcode a plan check inline.
   plan              String   @default("starter")
 
+  // Marketplace surfacing. When true, the store appears in the
+  // "Featured" rail on /stores and gets boosted placement. Admin-
+  // toggled today (PATCH /admin/stores/:id/featured); future
+  // editorial / earned-placement rules can layer on top without
+  // a schema change.
+  featured          Boolean  @default(false)
+
   // ── Approval lifecycle ────────────────────────────────────────
   // Onboarding-v2 expanded states (string union, additive — every
   // pre-v2 row stays valid):
@@ -609,6 +619,102 @@ model ShipmentEvent {
 
   // Timeline render = events for one shipment in occurredAt order.
   @@index([shipmentId, occurredAt])
+}
+
+// ── RBAC foundation ──────────────────────────────────────────
+//
+// Internal operations role-based access control. The legacy
+// User.role is the coarse three-state discriminator that drives
+// home routing + dashboard visibility (user / store / admin).
+// This table layers granular ops roles on top, ONLY for users
+// who also have `role = 'admin'`.
+//
+// Stable string union for the role code so adding a new role
+// doesn't need a Prisma enum migration:
+//   super_admin       — root; all permissions.
+//   operations_manager — day-to-day platform operations.
+//   finance           — payouts, settlements, ledger viewing.
+//   merchant_review   — onboarding application review.
+//   support           — read-mostly customer / merchant support.
+//   trust_safety      — moderation, reports, account holds.
+//   fulfillment_ops   — shipment / coverage triage.
+//   analytics_viewer  — read-only access to platform analytics.
+//
+// (userId, role) is unique — one assignment per role per user;
+// granting twice updates the existing row's grantedBy / grantedAt
+// via upsert. No "expires_at" today — revocation is explicit.
+//
+// The capability map (apps/api/src/ops-roles/ops-roles.ts) is
+// the only thing that should consume this table; never hardcode
+// role-name checks at call sites.
+model OpsRoleAssignment {
+  id        String   @id @default(cuid())
+  userId    String
+  role      String
+  grantedAt DateTime @default(now())
+  // User.id of the admin who granted the role. Audit trail; not
+  // used for auth.
+  grantedBy String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+  @@index([role])
+}
+
+// ── Finance operations foundation ────────────────────────────
+//
+// Append-only ledger of payout-relevant events per Store. NOT a
+// general accounting GL — this is the operational settlement
+// substrate that future payout flows will write to. Today the
+// /store/payouts endpoint derives totals from Order rows;
+// once real settlement lands, the totals will be summed from
+// this table instead and Order becomes the immutable source.
+//
+// Event types (stable strings — no Prisma enum migration):
+//   accrued    — order delivered; the merchant earned the
+//                payable amount. (Counts toward `pending`.)
+//   held       — operations placed funds on hold pending
+//                investigation. (Subtracts from `pending`.)
+//   released   — hold lifted; funds returned to `pending`.
+//   paid       — settlement gateway transferred funds out.
+//                (Subtracts from `pending`, adds to `paid`.)
+//   reversed   — refund / chargeback. (Subtracts from
+//                `accrued` retroactively.)
+//   adjustment — operator correction with a reason note.
+//
+// Amounts are signed in the local currency. Audit columns
+// recordedBy (User.id of the operator) and reason carry the
+// explainability future audits will need.
+//
+// Today: no endpoints write to this table. The schema lands so
+// future ops + accounting features have a stable home; the
+// /store/payouts mock keeps deriving from Order.
+model PayoutEvent {
+  id          String   @id @default(cuid())
+  storeId     String
+  // Optional FK to a specific gift/order this event is tied to.
+  // Null for store-level adjustments (e.g. credit, fee waiver).
+  giftId      String?
+  // accrued | held | released | paid | reversed | adjustment
+  type        String
+  // Signed amount in `currency` units (e.g. SAR). Positive for
+  // funds owed to merchant; negative for deductions.
+  amount      Float
+  currency    String
+  // Operator note — required for `adjustment` events, optional
+  // for the rest.
+  reason      String?
+  // User.id of the operator who recorded the event. Required so
+  // every row has an audit trail.
+  recordedBy  String
+  occurredAt  DateTime
+  createdAt   DateTime @default(now())
+
+  // Per-store ledger reads: filter by storeId, order by
+  // occurredAt. Per-gift drilldown uses (giftId).
+  @@index([storeId, occurredAt])
+  @@index([giftId])
 }
 
 model Otp {
