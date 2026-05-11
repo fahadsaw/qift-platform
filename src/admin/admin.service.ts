@@ -308,6 +308,258 @@ export class AdminService {
 
   // --- System ------------------------------------------------------
 
+  // --- Global ops search --------------------------------------------
+  // Internal operational search across the entities admins
+  // routinely investigate: users, stores, gifts (productName).
+  // Each category is independently capped + projected to its
+  // admin-safe shape — never returns a Gift's messageText or any
+  // recipient address. Empty query returns empty results across
+  // the board (we don't enumerate the DB).
+  //
+  // PRIVACY: this is admin-only via the controller guard chain.
+  // Results carry public-safe identifiers only — same projection
+  // every other admin endpoint already uses.
+  async opsSearch(q: string): Promise<{
+    users: AdminUserRow[];
+    stores: AdminStoreRow[];
+    gifts: {
+      id: string;
+      productName: string;
+      storeName: string;
+      status: string;
+    }[];
+  }> {
+    const term = q.trim();
+    if (term.length < 2) {
+      return { users: [], stores: [], gifts: [] };
+    }
+    const [users, stores, gifts] = await Promise.all([
+      this.prisma.user.findMany({
+        where: {
+          deletedAt: null,
+          OR: [
+            { qiftUsername: { contains: term, mode: 'insensitive' } },
+            { fullName: { contains: term, mode: 'insensitive' } },
+            { phone: { contains: term } },
+            { email: { contains: term, mode: 'insensitive' } },
+          ],
+        },
+        select: ADMIN_USER_SELECT,
+        take: 10,
+      }),
+      this.prisma.store.findMany({
+        where: {
+          OR: [
+            { id: term },
+            { name: { contains: term, mode: 'insensitive' } },
+            { city: { contains: term, mode: 'insensitive' } },
+          ],
+        },
+        select: ADMIN_STORE_SELECT,
+        take: 10,
+      }),
+      this.prisma.gift.findMany({
+        where: {
+          OR: [
+            { id: term },
+            { productName: { contains: term, mode: 'insensitive' } },
+            { storeName: { contains: term, mode: 'insensitive' } },
+          ],
+        },
+        select: {
+          id: true,
+          productName: true,
+          storeName: true,
+          status: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
+    ]);
+    return { users, stores, gifts };
+  }
+
+  // --- Finance operations -------------------------------------------
+  //
+  // Per-store balance summary derived from PayoutEvent rows. Today
+  // the table is empty (no endpoints write to it yet); this method
+  // exists so the admin finance console renders zeros across the
+  // board until the first real event is recorded. Future
+  // settlement work writes accrued / paid events and these
+  // aggregates update without UI changes.
+  //
+  // Aggregation rules (mirror the architecture-rule memory):
+  //   pending  = sum(accrued) − sum(held) + sum(released)
+  //              − sum(paid) − sum(reversed) + sum(adjustment-positive)
+  //   held     = sum(held) − sum(released)
+  //   paid     = sum(paid)
+  // Sign convention: `amount` is signed in the row; `adjustment`
+  // events can be either direction. Everything else is positive at
+  // record time.
+  async financeStoreBalances(): Promise<
+    {
+      storeId: string;
+      storeName: string;
+      ownerUsername: string | null;
+      currency: string;
+      accrued: number;
+      held: number;
+      released: number;
+      paid: number;
+      reversed: number;
+      adjustment: number;
+      pending: number;
+      lastEventAt: Date | null;
+    }[]
+  > {
+    const stores = await this.prisma.store.findMany({
+      select: {
+        id: true,
+        name: true,
+        owner: { select: { qiftUsername: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    if (stores.length === 0) return [];
+
+    const events = await this.prisma.payoutEvent.findMany({
+      where: { storeId: { in: stores.map((s) => s.id) } },
+      orderBy: { occurredAt: 'desc' },
+    });
+
+    type Bucket = {
+      currency: string;
+      accrued: number;
+      held: number;
+      released: number;
+      paid: number;
+      reversed: number;
+      adjustment: number;
+      lastEventAt: Date | null;
+    };
+    const byStore = new Map<string, Bucket>();
+    for (const e of events) {
+      const b = byStore.get(e.storeId) ?? {
+        currency: e.currency,
+        accrued: 0,
+        held: 0,
+        released: 0,
+        paid: 0,
+        reversed: 0,
+        adjustment: 0,
+        lastEventAt: null,
+      };
+      const amt = e.amount;
+      if (e.type === 'accrued') b.accrued += amt;
+      else if (e.type === 'held') b.held += amt;
+      else if (e.type === 'released') b.released += amt;
+      else if (e.type === 'paid') b.paid += amt;
+      else if (e.type === 'reversed') b.reversed += amt;
+      else if (e.type === 'adjustment') b.adjustment += amt;
+      if (!b.lastEventAt || e.occurredAt > b.lastEventAt) {
+        b.lastEventAt = e.occurredAt;
+      }
+      byStore.set(e.storeId, b);
+    }
+
+    return stores.map((s) => {
+      const b = byStore.get(s.id) ?? {
+        currency: 'SAR',
+        accrued: 0,
+        held: 0,
+        released: 0,
+        paid: 0,
+        reversed: 0,
+        adjustment: 0,
+        lastEventAt: null,
+      };
+      const pending = round2(
+        b.accrued - b.held + b.released - b.paid - b.reversed + b.adjustment,
+      );
+      return {
+        storeId: s.id,
+        storeName: s.name,
+        ownerUsername: s.owner?.qiftUsername ?? null,
+        currency: b.currency,
+        accrued: round2(b.accrued),
+        held: round2(b.held - b.released),
+        released: round2(b.released),
+        paid: round2(b.paid),
+        reversed: round2(b.reversed),
+        adjustment: round2(b.adjustment),
+        pending,
+        lastEventAt: b.lastEventAt,
+      };
+    });
+  }
+
+  // Per-store payout event log. The admin finance console drills
+  // into this for line-item visibility. Sorted newest first.
+  async financeStoreEvents(storeId: string) {
+    if (!storeId) return [];
+    return this.prisma.payoutEvent.findMany({
+      where: { storeId },
+      orderBy: { occurredAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  // Record a finance event. Admin-only with the
+  // `finance.record_payout_event` permission. Validates the type
+  // against the known vocabulary and stamps `recordedBy` so every
+  // row has an audit trail.
+  async recordPayoutEvent(
+    adminUserId: string,
+    storeId: string,
+    body: {
+      type?: string;
+      amount?: number;
+      currency?: string;
+      reason?: string;
+      giftId?: string;
+      occurredAt?: string;
+    },
+  ) {
+    const allowedTypes = new Set([
+      'accrued',
+      'held',
+      'released',
+      'paid',
+      'reversed',
+      'adjustment',
+    ]);
+    const type = (body.type ?? '').trim();
+    if (!allowedTypes.has(type)) {
+      throw new BadRequestException('Invalid event type');
+    }
+    const amount = typeof body.amount === 'number' ? body.amount : NaN;
+    if (!Number.isFinite(amount)) {
+      throw new BadRequestException('amount must be a number');
+    }
+    const currency = (body.currency ?? 'SAR').trim() || 'SAR';
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { id: true },
+    });
+    if (!store) throw new NotFoundException('Store not found');
+    if (type === 'adjustment' && !body.reason?.trim()) {
+      throw new BadRequestException('Reason is required for adjustment events');
+    }
+    return this.prisma.payoutEvent.create({
+      data: {
+        storeId,
+        giftId: body.giftId?.trim() || null,
+        type,
+        amount,
+        currency,
+        reason: body.reason?.trim() || null,
+        recordedBy: adminUserId,
+        occurredAt: body.occurredAt ? new Date(body.occurredAt) : new Date(),
+      },
+    });
+  }
+
   // Lightweight ops dashboard: totals + which optional integrations
   // are configured. No secrets are echoed back — only positive flags
   // saying "this env is wired" so operators can spot a misconfigured
@@ -1012,6 +1264,12 @@ function maskPhone(phone: string | null | undefined): string | null {
   return `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`;
 }
 
+// Round to 2 decimal places without floating-point noise. Used
+// in the finance aggregations so currency totals render cleanly.
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 // --- Projections ---------------------------------------------------
 
 const ADMIN_USER_SELECT = {
@@ -1032,6 +1290,11 @@ const ADMIN_STORE_SELECT = {
   city: true,
   category: true,
   status: true,
+  // Marketplace + plan signals — surfaced inline on the admin
+  // store row so operators can see at a glance which stores are
+  // featured / on which tier without opening the detail modal.
+  featured: true,
+  plan: true,
   integrationStatus: true,
   integrationType: true,
   createdAt: true,
@@ -1059,6 +1322,8 @@ export type AdminStoreRow = {
   city: string;
   category: string;
   status: string;
+  featured: boolean;
+  plan: string;
   integrationStatus: string;
   integrationType: string;
   createdAt: Date;

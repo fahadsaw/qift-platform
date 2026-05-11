@@ -177,6 +177,55 @@ export class AdminController {
     return this.admin.getSystemStatus();
   }
 
+  // ── Global ops search ──────────────────────────────────────────
+  //
+  // Quick-jump search across users / stores / gifts. Gated behind
+  // `diagnostics.read` so support + ops roles get access without
+  // a separate per-resource permission.
+  @Get('search')
+  @RequireOpsPermission('diagnostics.read')
+  search(@Query('q') q?: string) {
+    return this.admin.opsSearch(q ?? '');
+  }
+
+  // ── Finance operations ─────────────────────────────────────────
+  //
+  // Per-store payout balances + event log. All gated behind
+  // `finance.read_payouts` (read) / `finance.record_payout_event`
+  // (write). Operators without these permissions can't reach
+  // any of the finance surfaces — the frontend hides the tab
+  // entirely, but the server-side gate is authoritative.
+
+  @Get('finance/stores')
+  @RequireOpsPermission('finance.read_payouts')
+  financeStoreBalances() {
+    return this.admin.financeStoreBalances();
+  }
+
+  @Get('finance/stores/:id/events')
+  @RequireOpsPermission('finance.read_payouts')
+  financeStoreEvents(@Param('id') id: string) {
+    return this.admin.financeStoreEvents(id);
+  }
+
+  @Post('finance/stores/:id/events')
+  @RequireOpsPermission('finance.record_payout_event')
+  recordFinanceEvent(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      type?: string;
+      amount?: number;
+      currency?: string;
+      reason?: string;
+      giftId?: string;
+      occurredAt?: string;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.admin.recordPayoutEvent(req.user.userId, id, body);
+  }
+
   // ── Diagnostics ─────────────────────────────────────────────────
   //
   // Production-grade lineage inspector. Used to debug "merchant
