@@ -397,11 +397,11 @@ export class GiftsService {
     // gate fires on the actual submit with a generic toast. The
     // sender doesn't normally see this surface, but we include
     // them in both viewer paths for consistency.
-    const snapshot = await this.loadCoverageSnapshot(
-      gift.storeId,
-      gift.productId,
-    );
-    return { ...visible, ...snapshot };
+    const [snapshot, shipmentInfo] = await Promise.all([
+      this.loadCoverageSnapshot(gift.storeId, gift.productId),
+      this.loadShipmentSnapshot(gift.id),
+    ]);
+    return { ...visible, ...snapshot, ...shipmentInfo };
   }
 
   // Resolve the (store.city, store.deliveryZones, product.category,
@@ -444,6 +444,43 @@ export class GiftsService {
       category: product?.category ?? null,
       isFastDelivery,
     };
+  }
+
+  // Read-only shipment timeline for the gift detail page. The
+  // merchant owns the write side via /store/orders/:id/shipment*;
+  // sender + receiver only need to see what's already there.
+  //
+  // PRIVACY: returns provider + trackingNumber + trackingUrl +
+  // status + events (status + note + occurredAt only). No
+  // recipient address detail; the merchant's free-text note is
+  // already visible to them on creation, so surfacing it to the
+  // sender/receiver is by design — operational transparency, not
+  // leaked PII. If we ever start using the note field for
+  // internal-only annotations the merchant UI gets a "private
+  // note" toggle and this projection filters those out.
+  private async loadShipmentSnapshot(giftId: string): Promise<{
+    shipment: {
+      provider: string;
+      trackingNumber: string | null;
+      trackingUrl: string | null;
+      status: string;
+      events: { status: string; note: string | null; occurredAt: Date }[];
+    } | null;
+  }> {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { giftId },
+      select: {
+        provider: true,
+        trackingNumber: true,
+        trackingUrl: true,
+        status: true,
+        events: {
+          orderBy: { occurredAt: 'asc' },
+          select: { status: true, note: true, occurredAt: true },
+        },
+      },
+    });
+    return { shipment };
   }
 
   // Receiver locks in the delivery address. If they pass an addressId we
