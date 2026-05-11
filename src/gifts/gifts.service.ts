@@ -388,7 +388,62 @@ export class GiftsService {
     if (viewerUserId !== gift.senderId && viewerUserId !== gift.receiverId) {
       throw new ForbiddenException(FORBIDDEN_MSG);
     }
-    return applyGiftVisibility(gift as GiftWithParties, viewerUserId);
+    const visible = applyGiftVisibility(gift as GiftWithParties, viewerUserId);
+    // Hydrate the coverage-snapshot fields the gift-detail picker
+    // uses for per-address eligibility preview. These are
+    // operationally needed: without them the receiver's frontend
+    // canDeliverTo() falls through to "unknown coverage" mode,
+    // doesn't warn before confirm, and the backend's coverage
+    // gate fires on the actual submit with a generic toast. The
+    // sender doesn't normally see this surface, but we include
+    // them in both viewer paths for consistency.
+    const snapshot = await this.loadCoverageSnapshot(
+      gift.storeId,
+      gift.productId,
+    );
+    return { ...visible, ...snapshot };
+  }
+
+  // Resolve the (store.city, store.deliveryZones, product.category,
+  // product.isFastDelivery) snapshot for a gift's coverage check.
+  // Each component is independent: a gift with a deleted product
+  // still gets store fields, and vice versa. Returns nulls when
+  // both FKs are missing (sample / pre-v2 gifts).
+  private async loadCoverageSnapshot(
+    storeId: string | null,
+    productId: string | null,
+  ): Promise<{
+    storeCity: string | null;
+    deliveryZones: unknown;
+    category: string | null;
+    isFastDelivery: boolean | null;
+  }> {
+    const [store, product] = await Promise.all([
+      storeId
+        ? this.prisma.store.findUnique({
+            where: { id: storeId },
+            select: { city: true, deliveryZones: true },
+          })
+        : null,
+      productId
+        ? this.prisma.product.findUnique({
+            where: { id: productId },
+            select: { category: true, isFastDelivery: true },
+          })
+        : null,
+    ]);
+    let isFastDelivery: boolean | null = null;
+    if (product) {
+      isFastDelivery =
+        product.isFastDelivery === true ||
+        FAST_DELIVERY_CATEGORIES.has(product.category.toLowerCase());
+    }
+    return {
+      storeCity: store?.city ?? null,
+      deliveryZones: store?.deliveryZones ?? null,
+      category: product?.category ?? null,
+      isFastDelivery,
+    };
   }
 
   // Receiver locks in the delivery address. If they pass an addressId we
@@ -422,7 +477,15 @@ export class GiftsService {
         include: GIFT_INCLUDE,
       });
       if (!fresh) throw new NotFoundException('Gift not found');
-      return applyGiftVisibility(fresh as GiftWithParties, viewerUserId);
+      const visible = applyGiftVisibility(
+        fresh as GiftWithParties,
+        viewerUserId,
+      );
+      const snapshot = await this.loadCoverageSnapshot(
+        fresh.storeId,
+        fresh.productId,
+      );
+      return { ...visible, ...snapshot };
     }
     assertTransition(gift.status, 'address_confirmed');
 
@@ -495,14 +558,22 @@ export class GiftsService {
           true,
         );
         if (!match.ok) {
-          // Single localized message regardless of city vs district
-          // mismatch — the buyer/receiver doesn't need to know the
-          // internal granularity. The merchant's configured zones
-          // are private operational data; the receiver just sees
-          // "this store doesn't deliver here".
-          throw new BadRequestException(
-            'هذا المتجر لا يوصل إلى هذه المنطقة. الرجاء اختيار عنوان داخل نطاق التوصيل المعتمد لدى المتجر.',
-          );
+          // Structured error: the frontend's gift-detail picker maps
+          // `code: 'address_unsupported_for_store'` to a specific
+          // toast that includes the store's covered cities. Without
+          // the code the picker falls back to a generic "confirm
+          // failed" toast and the receiver has no signal about why.
+          // Single message regardless of city vs district mismatch —
+          // the receiver doesn't need to know the internal
+          // granularity. storeCity is included so the toast can
+          // render the merchant's primary city as a hint when the
+          // detailed deliveryZones aren't available client-side.
+          throw new BadRequestException({
+            code: 'address_unsupported_for_store',
+            storeCity: store.city,
+            message:
+              'هذا المتجر لا يوصل إلى هذه المنطقة. الرجاء اختيار عنوان داخل نطاق التوصيل المعتمد لدى المتجر.',
+          });
         }
       }
     }
@@ -534,7 +605,18 @@ export class GiftsService {
     // identity, on anonymous gifts) in the response, even though the
     // gift hasn't been delivered yet. The fix is to route every gift
     // return through the same helper as findOne / findSent / findReceived.
-    return applyGiftVisibility(updated as GiftWithParties, viewerUserId);
+    const visible = applyGiftVisibility(
+      updated as GiftWithParties,
+      viewerUserId,
+    );
+    // Carry the coverage snapshot fields on the post-confirm
+    // response too so the gift-detail page can render the
+    // delivered-to-this-zone summary without an extra round-trip.
+    const snapshot = await this.loadCoverageSnapshot(
+      updated.storeId,
+      updated.productId,
+    );
+    return { ...visible, ...snapshot };
   }
 
   // Sender cancels a gift before the store has accepted it. Allowed
