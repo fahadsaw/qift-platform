@@ -269,6 +269,7 @@ model Gift {
   product  Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
   order    Order?
   shipment Shipment?
+  post     GiftPost?
 
   @@index([senderId])
   @@index([receiverId])
@@ -619,6 +620,87 @@ model ShipmentEvent {
 
   // Timeline render = events for one shipment in occurredAt order.
   @@index([shipmentId, occurredAt])
+}
+
+// ── Gift-centric social posts (foundation only) ───────────────
+//
+// Qift's social layer is gift-centric and privacy-first by
+// design. A GiftPost is the optional, opt-in publication of a
+// Gift to the platform's social surfaces (explore feed, public
+// profile gift wall, marketplace social proof). The Gift always
+// exists when it happens; the GiftPost only exists when the
+// sender / receiver chose to share it. Counters for `giftsSent`
+// + `giftsReceived` are derived from Gift rows directly — they
+// do NOT depend on the existence of a GiftPost row.
+//
+// PHILOSOPHY (do not violate when extending this schema — see
+// the memory entries `project_gift_centric_social.md`,
+// `project_privacy_first_posts.md`,
+// `project_self_purchase_separation.md`,
+// `feedback_no_generic_social.md`):
+//   1. POSTS ARE GIFT-ANCHORED. There is no path to create a
+//      GiftPost without a backing Gift row. Generic
+//      "upload to feed" surfaces are out of scope.
+//   2. IDENTITY MASKED BY DEFAULT. `revealSender` and
+//      `revealRecipient` both default to false. Even on
+//      `visibility = 'public'` posts the sender + receiver are
+//      anonymized unless they explicitly opt in. The post is
+//      about the product + the gifting moment, not the
+//      relationship.
+//   3. PRODUCT-LINKED. The viewer-facing payload should pull
+//      productName / storeName / images via the Gift's
+//      product + store joins. When the linked Product or
+//      Store is deleted, we set `deactivatedAt` on the post
+//      (cascade behavior on Gift.storeId / productId is
+//      SetNull today, which leaves the post orphaned — the
+//      app layer detects this and treats the post as
+//      deactivated). Future: a Prisma middleware / database
+//      trigger sets deactivatedAt in the same transaction.
+//   4. VISIBILITY AND IDENTITY DISCLOSURE ARE ORTHOGONAL.
+//      A `private` post stays private regardless of reveal
+//      flags. A `public` post can still be identity-masked.
+//      The two settings combine in the visibility helper.
+//
+// SELF-PURCHASE (future):
+//   When self-purchase ships as a first-class feature, a
+//   separate `SelfPurchase` model (or `Gift.kind` discriminator)
+//   gets its own `SelfPurchasePost` analogue. Do NOT loosen the
+//   existing self-send guards on Gift to fold self-purchase
+//   here.
+model GiftPost {
+  id            String   @id @default(cuid())
+  giftId        String   @unique
+  // Null when the GiftPost row exists but has not been published
+  // (e.g. the sender saved a draft post before deciding).
+  // Indexed (visibility, publishedAt DESC) so the feed query
+  // can paginate efficiently when this surface ships.
+  publishedAt   DateTime?
+  // 'private' | 'followers' | 'public'. Defaults to 'private' so
+  // an accidental post-row creation never leaks to the feed.
+  visibility    String   @default("private")
+  // Opt-in identity reveal. Both default to false — the post is
+  // about the product + moment, not the relationship. A user
+  // who explicitly wants to brag flips these on per-post.
+  revealSender    Boolean @default(false)
+  revealRecipient Boolean @default(false)
+  // Set when the linked Product or Store is deleted / unpublished.
+  // The feed query filters on `deactivatedAt IS NULL`; the post
+  // detail UI renders a "no longer available" placeholder when
+  // someone deep-links into a deactivated post.
+  deactivatedAt DateTime?
+  // Operator-supplied reason for deactivation (e.g.
+  // "merchant_deleted_product", "moderation_takedown"). Free
+  // text; not surfaced to end users.
+  deactivatedReason String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  gift Gift @relation(fields: [giftId], references: [id], onDelete: Cascade)
+
+  // Future feed query: published, public, not deactivated, newest
+  // first. Composite covers the common path.
+  @@index([visibility, publishedAt])
+  @@index([deactivatedAt])
 }
 
 // ── RBAC foundation ──────────────────────────────────────────
