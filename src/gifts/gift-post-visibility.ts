@@ -61,6 +61,15 @@ export type GiftPostView = {
   // the `productId === null` projection). See
   // `project_product_media_single_source.md`.
   productImageUrl: string | null;
+  // Full ordered product gallery — the GiftPost viewer's
+  // horizontal swipe consumes this. Always derived from the
+  // service-side `deriveGallery()` helper:
+  //   - explicit ProductImage rows when present
+  //   - falls back to [productImageUrl] when none exist
+  //   - empty array when the product is deleted/deactivated
+  // Frontend can treat `productImages` as the authoritative
+  // source and ignore `productImageUrl` when length > 0.
+  productImages: string[];
   // Stable URL the post links into. Empty when the post is
   // deactivated. When productId is present, the link deep-links
   // to the specific product on the store page so the viewer
@@ -100,6 +109,9 @@ export type GiftPostInputs = {
     // linked (legacy / sample gifts) or when the Product was
     // deleted. The service layer does the join.
     productImageUrl: string | null;
+    // Full ordered product gallery — single-source-of-truth URL
+    // pointers, derived by deriveGallery() on the service side.
+    productImages: string[];
     sender: { qiftUsername: string; fullName: string | null } | null;
     receiver: { qiftUsername: string; fullName: string | null } | null;
   };
@@ -142,6 +154,7 @@ export function buildGiftPostView(input: GiftPostInputs): GiftPostView {
     productId: deactivated ? null : gift.productId,
     storeId: deactivated ? null : gift.storeId,
     productImageUrl: deactivated ? null : gift.productImageUrl,
+    productImages: deactivated ? [] : gift.productImages,
     // Deep-link to the product when we have one (`?product=<id>` is
     // the storefront's product-modal convention; see
     // /stores/[id]/page.tsx). Falls back to the storefront index

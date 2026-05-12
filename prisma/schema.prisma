@@ -287,7 +287,12 @@ model Gift {
   product  Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
   order    Order?
   shipment Shipment?
-  post     GiftPost?
+  // One GiftPost per (gift, owner) — both sender and receiver can
+  // independently publish their own perspective on the same Gift.
+  // The relation is therefore one-to-many on this side; the
+  // composite uniqueness on GiftPost(giftId, ownerUserId) still
+  // caps the total at TWO posts per gift.
+  posts    GiftPost[]
 
   @@index([senderId])
   @@index([receiverId])
@@ -538,15 +543,50 @@ model Product {
   // count itself never exposes WHO wishlisted.
   wishlistedByCount Int @default(0)
 
-  store  Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  store  Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
   gifts  Gift[]
   wishes Wish[]
+  // Product media gallery (added in Phase 4 — GiftPost completion).
+  // `Product.imageUrl` stays as the cached "primary image" snapshot
+  // for fast wishlist/storefront reads; `images` is the authoritative
+  // ordered gallery source consumed by the GiftPost viewer and the
+  // future storefront product modal. No binary copy anywhere — URL
+  // pointers only, per `project_product_media_single_source`.
+  images ProductImage[]
 
   // Upstream platforms use their own ids; pinning uniqueness per-store
   // means the same Shopify product id can exist across two stores
   // without colliding.
   @@unique([storeId, externalProductId])
   @@index([storeId])
+}
+
+// Ordered product media gallery. One row per image; `displayOrder`
+// drives presentation. The composite unique on (productId,
+// displayOrder) prevents two rows claiming the same slot; the
+// service-side writer keeps consecutive ordering (0, 1, 2, ...).
+//
+// Storage: URL pointers only — never binary copies. Same R2/CDN
+// public domain as the legacy `Product.imageUrl`. The first row
+// (displayOrder = 0) MUST stay in sync with `Product.imageUrl` so
+// existing wishlist / storefront / GiftPost-tile surfaces (which
+// read the cached snapshot) keep rendering correctly.
+//
+// Backfill: the 20260517 migration seeds one row per Product with
+// a non-null imageUrl. Older Products without an imageUrl simply
+// have an empty gallery.
+model ProductImage {
+  id           String   @id @default(cuid())
+  productId    String
+  url          String
+  // 0-based ordinal. The first image is the primary.
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, displayOrder])
+  @@index([productId])
 }
 
 model Order {
@@ -702,7 +742,11 @@ model ShipmentEvent {
 //   here.
 model GiftPost {
   id                String    @id @default(cuid())
-  giftId            String    @unique
+  // No `@unique` on giftId anymore — see the composite uniqueness
+  // below. Both the sender AND the receiver can each independently
+  // publish their own GiftPost on the same Gift; ownerUserId
+  // discriminates between them.
+  giftId            String
   // Owner of the post — for V1 always equals Gift.senderId OR
   // Gift.receiverId, depending on which side opted to publish.
   // Stored explicitly (rather than re-derived from Gift each
@@ -748,6 +792,12 @@ model GiftPost {
   owner         User                   @relation("OwnedGiftPosts", fields: [ownerUserId], references: [id], onDelete: Cascade)
   appreciations GiftPostAppreciation[]
 
+  // One GiftPost per (gift, owner). Sender + receiver can each
+  // independently publish their own perspective on the same Gift —
+  // identity stays masked via buildGiftPostView either way. The
+  // older single-column unique on giftId was retired in the
+  // 20260517 migration.
+  @@unique([giftId, ownerUserId])
   // Profile Gift Wall query: `WHERE ownerUserId = :userId
   // AND publishedAt IS NOT NULL AND deactivatedAt IS NULL`,
   // ordered by publishedAt DESC.

@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -12,6 +11,10 @@ import {
   buildGiftPostView,
   type GiftPostView,
 } from '../gifts/gift-post-visibility';
+import {
+  NotificationsService,
+  NotificationType,
+} from '../notifications/notifications.service';
 
 // Re-export so consumers can import the view type from this service
 // without reaching into gifts/ directly.
@@ -77,11 +80,21 @@ export type AppreciationToggleResult = {
 
 const FORBIDDEN_MSG = 'غير مصرح لك';
 
+// Throttle window for appreciation notifications — at most one push
+// per (post, owner) per this many ms. 24h chosen so a slow trickle
+// of appreciations over a day still pings once, but a burst doesn't
+// generate a burst of notifications. Aligns with the
+// `project_notification_channels_policy` "calm by default" rule.
+const APPRECIATION_NOTIFY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 @Injectable()
 export class GiftPostsService {
   private readonly logger = new Logger(GiftPostsService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private notifications: NotificationsService,
+  ) {}
 
   // Opt-in publish. V1 publishes from the sender side — the gift-detail
   // page's "Share this gift" CTA only renders for the sender today.
@@ -131,19 +144,19 @@ export class GiftPostsService {
       throw new BadRequestException('لا يمكن مشاركة هدية ملغاة');
     }
 
-    // GiftPost is keyed on giftId @unique — one post per gift.
-    // Each side (sender / receiver) gets their own row only when we
-    // ship receiver-side publishing; for now the row is the producer
-    // side. We surface a friendly 409 if the OTHER side already
-    // published this gift — the V1 UI doesn't yet show "the other
-    // party already shared this", but we don't want to silently
-    // overwrite their visibility setting either.
+    // GiftPost is keyed on (giftId, ownerUserId) — one post per
+    // (gift, owner). Both sender and receiver can independently
+    // publish their own perspective on the same Gift; the
+    // server-side identity-masking helper (buildGiftPostView)
+    // keeps the public payload privacy-safe regardless of which
+    // side opted to share. The previous 409 ConflictException for
+    // "the other side already published" was retired in Phase 4 —
+    // both sides are now first-class.
     const existing = await this.prisma.giftPost.findUnique({
-      where: { giftId },
+      where: {
+        giftId_ownerUserId: { giftId, ownerUserId: viewerUserId },
+      },
     });
-    if (existing && existing.ownerUserId !== viewerUserId) {
-      throw new ConflictException('الطرف الآخر شارك هذه الهدية بالفعل');
-    }
 
     // Idempotent re-publish: the same owner clicks Publish again
     // (network blip, optimistic-UI retry). Return the existing row
@@ -227,8 +240,14 @@ export class GiftPostsService {
       orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
       include: this.giftInclude(),
     });
-    return rows.map((row) =>
-      this.toView(row, viewerUserId, /* forceVisible */ true),
+    // Dedup by (ownerUserId, direction, productId). Repeat gifts of
+    // the same product to the same owner collapse into ONE entry
+    // with a denormalized `eventCount`. The "representative" post
+    // is the most recent (rows are pre-sorted DESC). See sub-task 3
+    // of Phase 4 and `project_gift_post_dedup.md`.
+    const grouped = collapseGiftPostGroups(rows);
+    return grouped.map(({ row, eventCount }) =>
+      this.toView(row, viewerUserId, /* forceVisible */ true, eventCount),
     );
   }
 
@@ -261,7 +280,14 @@ export class GiftPostsService {
       orderBy: { publishedAt: 'desc' },
       include: this.giftInclude(),
     });
-    return rows.map((row) => this.toView(row, viewerUserId));
+    // Same dedup as listMine — collapse repeats by
+    // (ownerUserId, direction, productId), keep the most recent
+    // representative, surface `eventCount` as a ×N badge on the
+    // grid tile.
+    const grouped = collapseGiftPostGroups(rows);
+    return grouped.map(({ row, eventCount }) =>
+      this.toView(row, viewerUserId, /* forceVisible */ false, eventCount),
+    );
   }
 
   // /p/<slug> public route. Returns the privacy-masked view; throws
@@ -322,6 +348,71 @@ export class GiftPostsService {
     return row !== null;
   }
 
+  // Fire an aggregate, identity-masked appreciation notification to
+  // the post owner — but only when we haven't already notified them
+  // in the current throttle window. Calm-by-default behavior per
+  // `project_notification_channels_policy`: a burst of 👍s within
+  // 24h generates ONE ping, not N.
+  //
+  // Privacy: notification body NEVER names the appreciator. The
+  // post owner sees aggregate signal only. The link deep-links to
+  // the post on the owner's profile so they can investigate at
+  // their own pace; the appreciators list is never surfaced.
+  //
+  // Best-effort: a failure here never affects the appreciate
+  // mutation. We log + swallow. The throttle check itself is a
+  // single indexed row read on the Notification table — see the
+  // composite (userId, type, createdAt) cardinality index notes
+  // in `Notification` model.
+  private async notifyAppreciationThrottled(
+    ownerUserId: string,
+    postId: string,
+  ): Promise<void> {
+    try {
+      // Throttle probe — most recent notification of this type for
+      // this post owner. We embed the postId in the `link` so the
+      // probe can match without a join. Window is fixed
+      // APPRECIATION_NOTIFY_WINDOW_MS; if the last ping is older
+      // than that, we fire a fresh one.
+      const linkMarker = this.appreciationNotificationLink(postId);
+      const cutoff = new Date(Date.now() - APPRECIATION_NOTIFY_WINDOW_MS);
+      const recent = await this.prisma.notification.findFirst({
+        where: {
+          userId: ownerUserId,
+          type: NotificationType.GiftPostAppreciated,
+          link: linkMarker,
+          createdAt: { gte: cutoff },
+        },
+        select: { id: true },
+      });
+      if (recent) return; // already pinged in-window; stay silent
+      void this.notifications.trigger({
+        userId: ownerUserId,
+        type: NotificationType.GiftPostAppreciated,
+        // Aggregate, identity-masked copy. No appreciator name.
+        // No count — the throttle means we'd often undercount, and
+        // a vanity number is the engagement-farming pattern we're
+        // explicitly avoiding.
+        title: 'تم تقدير لحظة إهدائك 👍',
+        body: null,
+        link: linkMarker,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[gift-posts] appreciation notification failed for postId=${postId} ownerUserId=${ownerUserId}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // Build the deep-link for an appreciation notification. Routes
+  // to the post detail surface on the owner's own profile — they
+  // can review there at their own pace. We embed `?post=<id>` so
+  // the throttle probe can match on this exact value without a
+  // separate "postId" column on Notification.
+  private appreciationNotificationLink(postId: string): string {
+    return `/profile?post=${encodeURIComponent(postId)}`;
+  }
+
   // 👍 toggle. Returns the post-toggle state so the frontend can
   // optimistically flip the button without a second round-trip.
   // Uses a single transaction so the counter and the row stay in
@@ -379,6 +470,11 @@ export class GiftPostsService {
           select: { appreciationCount: true },
         });
       });
+      // Fire a notification to the post owner — calm + identity-
+      // masked + throttled. Never blocks the appreciate result;
+      // we don't await the call. Failure is logged inside the
+      // helper and never surfaces to the user.
+      void this.notifyAppreciationThrottled(post.ownerUserId, postId);
       return {
         appreciated: true,
         appreciationCount: updated.appreciationCount,
@@ -422,17 +518,17 @@ export class GiftPostsService {
   // Look up the post for a specific gift, owned by the viewer. Used
   // by the gift-detail "Share this gift" CTA to pre-populate its
   // published/unpublished state without scanning the whole wall.
-  // Returns null when there's no post yet (V1 first-time publish).
+  // Returns null when there's no post yet (first-time publish).
+  //
+  // Composite-key lookup: each Gift can have UP TO TWO posts
+  // (sender's + receiver's). We want only the viewer's own.
   async getMineByGift(viewerUserId: string, giftId: string) {
     const post = await this.prisma.giftPost.findUnique({
-      where: { giftId },
+      where: {
+        giftId_ownerUserId: { giftId, ownerUserId: viewerUserId },
+      },
     });
-    if (!post) return null;
-    // Privacy: only the owner can probe their own post. We do NOT
-    // surface the existence of another user's post here — same
-    // 404-as-collapsed-state pattern as getBySlug for non-owners.
-    if (post.ownerUserId !== viewerUserId) return null;
-    return post;
+    return post ?? null;
   }
 
   // Membership probe — drives the filled-vs-outline state of the 👍
@@ -460,15 +556,25 @@ export class GiftPostsService {
           storeId: true,
           productName: true,
           storeName: true,
-          // Pull the product image at view time (single-source-of-
-          // truth rule from `project_product_media_single_source.md`).
-          // Joining here avoids an N+1 when listMine / listByUser
-          // render walls with many rows. product may be null when
-          // the Product was deleted (FK is ON DELETE SET NULL); we
-          // null-coalesce in toView. The relation name `product` is
-          // the Gift model's own (Wish uses `linkedProduct` only
-          // because of a legacy scalar-name collision).
-          product: { select: { imageUrl: true } },
+          // Pull the product image + media gallery at view time.
+          // Single-source-of-truth rule
+          // (`project_product_media_single_source.md`): we read URL
+          // pointers, never copy binaries. The `imageUrl` field is
+          // the cached primary; the `images` relation is the
+          // ordered gallery (added in Phase 4). For products
+          // without explicit gallery rows, the projection falls
+          // back to `[imageUrl]` in toView so the viewer's
+          // horizontal-swipe behavior degrades to a single-image
+          // slide cleanly.
+          product: {
+            select: {
+              imageUrl: true,
+              images: {
+                select: { url: true, displayOrder: true },
+                orderBy: { displayOrder: 'asc' },
+              },
+            },
+          },
           sender: {
             select: { qiftUsername: true, fullName: true },
           },
@@ -488,12 +594,19 @@ export class GiftPostsService {
     row: Awaited<ReturnType<typeof this.fetchOne>>,
     viewerUserId: string | null,
     forceVisible = false,
+    // Dedup-aware: when the row is a representative of a group of N
+    // repeat gifts of the same product, `eventCount` is N. Default 1
+    // (singleton — no dedup applied). The frontend grid renders a
+    // ×N badge only when eventCount > 1; the viewer treats the row
+    // as a normal individual post regardless.
+    eventCount = 1,
   ): GiftPostView & {
     postId: string;
     ownerUserId: string;
     direction: string;
     appreciationCount: number;
     publicSlug: string | null;
+    eventCount: number;
   } {
     if (!row) {
       throw new NotFoundException('Post not found');
@@ -513,6 +626,16 @@ export class GiftPostsService {
         productId: row.gift.productId ?? null,
         storeId: row.gift.storeId ?? null,
         productImageUrl: row.gift.product?.imageUrl ?? null,
+        // Full ordered gallery for the viewer's horizontal swipe.
+        // Falls back to the cached primary `imageUrl` when no
+        // explicit ProductImage rows exist (legacy / freshly-
+        // ingested products). Empty array when neither source
+        // has a URL — the viewer renders the gradient fallback
+        // tile in that case.
+        productImages: deriveGallery(
+          row.gift.product?.images,
+          row.gift.product?.imageUrl,
+        ),
         sender: row.gift.sender,
         receiver: row.gift.receiver,
       },
@@ -527,6 +650,7 @@ export class GiftPostsService {
       direction: row.direction,
       appreciationCount: row.appreciationCount,
       publicSlug: row.publicSlug,
+      eventCount,
     };
   }
 
@@ -587,4 +711,71 @@ function isUniqueConstraintError(err: unknown): boolean {
   if (typeof err !== 'object' || err === null) return false;
   const code = (err as { code?: unknown }).code;
   return code === 'P2002';
+}
+
+// Collapse rows that are repeat gifts of the same product by the
+// same owner in the same direction into a single representative.
+// V1 dedup is a query-layer concern (see `project_gift_post_dedup.md`
+// + the 20260517 migration comment): each GiftPost row stays
+// per-gift, but the wall surface presents at most ONE entry per
+// (ownerUserId, direction, productId) bucket, with `eventCount`
+// surfacing the bucket size for the ×N grid badge.
+//
+// Sort assumption: `rows` is pre-sorted with the most-recent
+// post FIRST. The first row encountered per bucket becomes the
+// representative; subsequent rows in the same bucket increment
+// the count.
+//
+// Posts without a productId (legacy / sample-product gifts) are
+// keyed by their post id so they NEVER collapse with anything —
+// each free-text gift stands on its own.
+function collapseGiftPostGroups<
+  R extends {
+    id: string;
+    ownerUserId: string;
+    direction: string;
+    gift: { productId: string | null };
+  },
+>(rows: R[]): Array<{ row: R; eventCount: number }> {
+  const groups = new Map<string, { row: R; eventCount: number }>();
+  for (const r of rows) {
+    const key = r.gift.productId
+      ? `p|${r.ownerUserId}|${r.direction}|${r.gift.productId}`
+      : `s|${r.id}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.eventCount += 1;
+    } else {
+      groups.set(key, { row: r, eventCount: 1 });
+    }
+  }
+  // Preserve the input order (Map iteration order is insertion
+  // order in modern JS). Since the input is already sorted by
+  // publishedAt DESC, the output is also DESC.
+  return Array.from(groups.values());
+}
+
+// Resolve the ordered gallery for a gift's product. Prefers the
+// explicit `ProductImage` rows (the gallery added in Phase 4);
+// falls back to the cached `Product.imageUrl` snapshot when no
+// gallery rows exist (legacy products, or products that haven't
+// uploaded multiple images yet). Returns an empty array when
+// neither source has a URL.
+//
+// Dedup-aware: the cached `imageUrl` is intentionally NOT
+// re-appended if it already appears as a gallery row — store-side
+// writers are expected to keep `Product.imageUrl` in sync with the
+// first ProductImage row (displayOrder = 0).
+function deriveGallery(
+  images: Array<{ url: string; displayOrder: number }> | null | undefined,
+  cachedPrimary: string | null | undefined,
+): string[] {
+  const ordered = (images ?? [])
+    .slice()
+    .sort((a, b) => a.displayOrder - b.displayOrder)
+    .map((i) => i.url)
+    .filter((u): u is string => typeof u === 'string' && u.length > 0);
+  if (ordered.length > 0) return ordered;
+  if (cachedPrimary && cachedPrimary.length > 0) return [cachedPrimary];
+  return [];
 }

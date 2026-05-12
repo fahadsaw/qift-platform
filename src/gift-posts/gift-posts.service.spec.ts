@@ -15,12 +15,12 @@
 import { Test, type TestingModule } from '@nestjs/testing';
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { GiftPostsService } from './gift-posts.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 type MockPrisma = {
   gift: { findUnique: jest.Mock };
@@ -36,6 +36,8 @@ type MockPrisma = {
     delete: jest.Mock;
   };
   block: { findFirst: jest.Mock };
+  // Throttle probe for the appreciation-notification path.
+  notification: { findFirst: jest.Mock };
   $transaction: jest.Mock;
 };
 
@@ -67,20 +69,34 @@ function createPrismaMock(): MockPrisma {
     // tests don't need to set it explicitly. Block-aware tests
     // override per-test.
     block: { findFirst: jest.fn().mockResolvedValue(null) },
+    // Appreciation-notification throttle probe — defaults to "no
+    // recent ping" so the notify path fires by default. Throttle-
+    // aware tests override.
+    notification: { findFirst: jest.fn().mockResolvedValue(null) },
     $transaction,
   };
+}
+
+// NotificationsService mock — captures trigger() calls so the
+// appreciation tests can assert on the title / link / type.
+type MockNotifications = { trigger: jest.Mock };
+function createNotificationsMock(): MockNotifications {
+  return { trigger: jest.fn().mockResolvedValue(undefined) };
 }
 
 describe('GiftPostsService', () => {
   let service: GiftPostsService;
   let prisma: MockPrisma;
+  let notifications: MockNotifications;
 
   beforeEach(async () => {
     prisma = createPrismaMock();
+    notifications = createNotificationsMock();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         GiftPostsService,
         { provide: PrismaService, useValue: prisma },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
     service = module.get<GiftPostsService>(GiftPostsService);
@@ -166,25 +182,37 @@ describe('GiftPostsService', () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('throws 409 when the other gift party already published', async () => {
+    it('allows both sender and receiver to independently publish their own post', async () => {
+      // The composite (giftId, ownerUserId) lookup returns null when
+      // the OTHER side has published but the viewer hasn't — so the
+      // viewer's publish path proceeds as a fresh first-time publish.
+      // Both sides end up with their own GiftPost row keyed on
+      // (giftId, ownerUserId). Phase 4 retired the 409 ConflictException.
       prisma.gift.findUnique.mockResolvedValue(baseGift);
-      // Existing post is owned by the receiver — sender tries to
-      // publish; we surface a conflict instead of silently
-      // overwriting their visibility.
-      prisma.giftPost.findUnique.mockResolvedValue({
-        id: 'post_existing',
+      // First call: composite lookup for this viewer's existing post → null
+      // Second call: slug uniqueness probe → null (no collision)
+      prisma.giftPost.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null);
+      prisma.giftPost.create.mockResolvedValue({
+        id: 'post_received',
         giftId,
         ownerUserId: receiverId,
         direction: 'received',
         publishedAt: new Date(),
-        publicSlug: 'xyz789',
         visibility: 'public',
+        publicSlug: 'rcv1',
+        revealSender: false,
+        revealRecipient: false,
         appreciationCount: 0,
         deactivatedAt: null,
       });
-      await expect(
-        service.publish(senderId, { giftId }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      await service.publish(receiverId, { giftId });
+      expect(prisma.giftPost.create).toHaveBeenCalledTimes(1);
+      const payload = prisma.giftPost.create.mock.calls[0][0].data;
+      // Direction comes from which side is publishing — receiver here.
+      expect(payload.direction).toBe('received');
+      expect(payload.ownerUserId).toBe(receiverId);
     });
 
     it('is idempotent — returns existing row on re-publish by same owner', async () => {
@@ -417,6 +445,84 @@ describe('GiftPostsService', () => {
       expect(prisma.block.findFirst).not.toHaveBeenCalled();
       expect(prisma.giftPost.findMany).toHaveBeenCalledTimes(1);
     });
+
+    it('collapses repeat gifts of the same product into ONE entry with eventCount = N', async () => {
+      // Three rows, same owner + direction + productId — they should
+      // collapse into one representative with eventCount=3. The
+      // most-recent row (rows are pre-sorted DESC) is the rep.
+      const baseGift = {
+        id: 'g_x',
+        senderId: 'sender_a',
+        receiverId: 'owner_x',
+        productId: 'prod_flowers',
+        storeId: 'store_x',
+        productName: 'باقة',
+        storeName: 'متجر',
+        product: { imageUrl: 'https://r2/p.jpg', images: [] },
+        sender: { qiftUsername: 'sender', fullName: null },
+        receiver: { qiftUsername: 'owner', fullName: null },
+      };
+      const row = (id: string, publishedAt: Date): Record<string, unknown> => ({
+        id,
+        ownerUserId: 'owner_x',
+        direction: 'received',
+        publishedAt,
+        visibility: 'public',
+        revealSender: false,
+        revealRecipient: false,
+        deactivatedAt: null,
+        appreciationCount: 0,
+        publicSlug: id,
+        gift: { ...baseGift, id: `${id}_gift`, productId: 'prod_flowers' },
+      });
+      prisma.giftPost.findMany.mockResolvedValue([
+        row('post_3', new Date('2026-05-13T10:00:00Z')), // newest
+        row('post_2', new Date('2026-05-12T10:00:00Z')),
+        row('post_1', new Date('2026-05-11T10:00:00Z')),
+      ]);
+      const out = await service.listByUser('owner_x', null);
+      expect(out).toHaveLength(1);
+      expect((out[0] as { eventCount: number }).eventCount).toBe(3);
+      // Representative is the newest row.
+      expect((out[0] as { postId: string }).postId).toBe('post_3');
+    });
+
+    it('does NOT collapse posts that lack a productId (legacy free-text gifts)', async () => {
+      const legacyRow = (id: string): Record<string, unknown> => ({
+        id,
+        ownerUserId: 'owner_x',
+        direction: 'sent',
+        publishedAt: new Date(),
+        visibility: 'public',
+        revealSender: false,
+        revealRecipient: false,
+        deactivatedAt: null,
+        appreciationCount: 0,
+        publicSlug: id,
+        gift: {
+          id: `${id}_gift`,
+          senderId: 'owner_x',
+          receiverId: 'rcv',
+          productId: null,
+          storeId: null,
+          productName: 'free-text',
+          storeName: null,
+          product: null,
+          sender: { qiftUsername: 'owner', fullName: null },
+          receiver: { qiftUsername: 'rcv', fullName: null },
+        },
+      });
+      prisma.giftPost.findMany.mockResolvedValue([
+        legacyRow('post_a'),
+        legacyRow('post_b'),
+      ]);
+      const out = await service.listByUser('owner_x', null);
+      // Two legacy gifts stay as two entries — no productId means
+      // dedup can't safely group them; each stands alone.
+      expect(out).toHaveLength(2);
+      expect((out[0] as { eventCount: number }).eventCount).toBe(1);
+      expect((out[1] as { eventCount: number }).eventCount).toBe(1);
+    });
   });
 
   // ── appreciate ──────────────────────────────────────────────
@@ -513,6 +619,73 @@ describe('GiftPostsService', () => {
 
       const result = await service.appreciate(viewerId, postId);
       expect(result.appreciationCount).toBe(0);
+    });
+
+    it('fires an aggregate appreciation notification to the post owner on first toggle', async () => {
+      // Happy path: viewer appreciates a public post owned by
+      // someone else; throttle probe finds no recent notification;
+      // a fresh ping fires.
+      prisma.giftPost.findUnique.mockResolvedValue(publicPost);
+      prisma.giftPostAppreciation.create.mockResolvedValue({
+        id: 'app_1',
+        giftPostId: postId,
+        userId: viewerId,
+      });
+      prisma.giftPost.update.mockResolvedValue({ appreciationCount: 1 });
+      prisma.notification.findFirst.mockResolvedValueOnce(null);
+
+      await service.appreciate(viewerId, postId);
+
+      // Allow the void-fired notification microtask to settle.
+      await new Promise((r) => setImmediate(r));
+
+      expect(notifications.trigger).toHaveBeenCalledTimes(1);
+      const call = notifications.trigger.mock.calls[0][0];
+      // Privacy invariants — body never names the appreciator;
+      // type is the new aggregate-friendly key; userId routes to
+      // the OWNER, never the appreciator.
+      expect(call.userId).toBe(ownerId);
+      expect(call.type).toBe('gift_post.appreciated');
+      expect(call.body).toBeNull();
+      // Link encodes the post id so the throttle probe can match
+      // on link string without a separate column.
+      expect(call.link).toBe(`/profile?post=${encodeURIComponent(postId)}`);
+    });
+
+    it('does NOT fire a second notification within the 24h throttle window', async () => {
+      // Throttle probe finds a recent ping — we stay silent.
+      prisma.giftPost.findUnique.mockResolvedValue(publicPost);
+      prisma.giftPostAppreciation.create.mockResolvedValue({
+        id: 'app_1',
+        giftPostId: postId,
+        userId: viewerId,
+      });
+      prisma.giftPost.update.mockResolvedValue({ appreciationCount: 2 });
+      prisma.notification.findFirst.mockResolvedValueOnce({ id: 'n_recent' });
+
+      await service.appreciate(viewerId, postId);
+      await new Promise((r) => setImmediate(r));
+
+      expect(notifications.trigger).not.toHaveBeenCalled();
+    });
+
+    it('does NOT fire a notification on the un-appreciate path', async () => {
+      // Toggle-off (delete+decrement) MUST NOT generate a ping —
+      // we only notify on real new appreciations.
+      prisma.giftPost.findUnique.mockResolvedValue({
+        ...publicPost,
+        appreciationCount: 1,
+      });
+      const uniqueErr: Error & { code?: string } = new Error('duplicate');
+      uniqueErr.code = 'P2002';
+      prisma.giftPostAppreciation.create.mockRejectedValueOnce(uniqueErr);
+      prisma.giftPostAppreciation.delete.mockResolvedValue({ id: 'app_1' });
+      prisma.giftPost.update.mockResolvedValue({ appreciationCount: 0 });
+
+      await service.appreciate(viewerId, postId);
+      await new Promise((r) => setImmediate(r));
+
+      expect(notifications.trigger).not.toHaveBeenCalled();
     });
   });
 

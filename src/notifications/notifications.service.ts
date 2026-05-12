@@ -35,6 +35,13 @@ export const NotificationType = {
   // the merchant's delivery zones. Add or pick a covered address,
   // or the gift will stay blocked.
   GiftAutoFallbackBlocked: 'gift.auto_fallback_blocked',
+  // Owner of a published GiftPost: someone appreciated your gifting
+  // moment. Aggregate-only — body NEVER names the appreciator
+  // (privacy + no engagement-farming surface; see
+  // `project_interaction_philosophy`). Throttled to at most one
+  // notification per (post, owner) per 24h so a burst of
+  // appreciations doesn't generate a burst of pings.
+  GiftPostAppreciated: 'gift_post.appreciated',
 } as const;
 export type NotificationType =
   (typeof NotificationType)[keyof typeof NotificationType];
