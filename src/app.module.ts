@@ -22,6 +22,7 @@ import { BlocksModule } from './blocks/blocks.module';
 import { ReportsModule } from './reports/reports.module';
 import { MediaModule } from './media/media.module';
 import { PostsModule } from './posts/posts.module';
+import { GiftPostsModule } from './gift-posts/gift-posts.module';
 import { AdminModule } from './admin/admin.module';
 import { MailModule } from './mail/mail.module';
 
@@ -47,6 +48,7 @@ import { MailModule } from './mail/mail.module';
     ReportsModule,
     MediaModule,
     PostsModule,
+    GiftPostsModule,
     AdminModule,
     MailModule,
   ],

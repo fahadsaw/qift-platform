@@ -23,13 +23,13 @@ datasource db {
 }
 
 model User {
-  id             String  @id @default(cuid())
-  fullName       String?
-  phone          String  @unique
-  email          String? @unique
-  qiftUsername   String  @unique
-  passwordHash   String?
-  defaultAddress String?
+  id              String    @id @default(cuid())
+  fullName        String?
+  phone           String    @unique
+  email           String?   @unique
+  qiftUsername    String    @unique
+  passwordHash    String?
+  defaultAddress  String?
   // Verification timestamps for the canonical contact channels.
   // Set when a fresh OTP successfully verifies the channel; cleared
   // when the user changes the channel value (the new value needs a
@@ -54,7 +54,7 @@ model User {
   //            another admin can grant the role; the very first
   //            admin is set manually in the DB (UPDATE "User" SET
   //            role='admin' WHERE id='…').
-  role           String  @default("user")
+  role            String    @default("user")
 
   // -- Profile content (added in Step 2) --
   // Short biography rendered on /u/[username]. App-level cap of 280 chars
@@ -67,15 +67,15 @@ model User {
   // -- Privacy flags (added in Step 2) --
   // "public" | "private". When private, /u/[username] returns the limited
   // profile view (avatar + name + handle + private-account message).
-  profileVisibility String  @default("public")
+  profileVisibility   String  @default("public")
   // Per-section privacy. The API enforces these — the schema only stores
   // them. When false, the corresponding count or list is omitted from
   // /users/@/:username responses entirely (the client sees an absent field
   // rather than a "0" or a forbidden flag).
-  showGiftsReceived Boolean @default(true)
-  showGiftsSent     Boolean @default(true)
-  showFollowers     Boolean @default(true)
-  showFollowing     Boolean @default(true)
+  showGiftsReceived   Boolean @default(true)
+  showGiftsSent       Boolean @default(true)
+  showFollowers       Boolean @default(true)
+  showFollowing       Boolean @default(true)
   // Phone-discoverability switch. When false this account is hidden
   // from `/users/search?type=phone` even if the searcher knows the
   // exact number. Phone is the most privacy-sensitive contact channel
@@ -119,42 +119,49 @@ model User {
   // history; the API filters live users via `where deletedAt is null`.
   deletedAt   DateTime?
 
-  addresses         Address[]
-  socialAccounts    SocialAccount[]
-  sentGifts         Gift[]             @relation("SenderGifts")
-  receivedGifts     Gift[]             @relation("ReceiverGifts")
-  orders            Order[]
-  notifications     Notification[]
-  ownedStores       Store[]
-  pushSubscriptions PushSubscription[]
+  addresses             Address[]
+  socialAccounts        SocialAccount[]
+  sentGifts             Gift[]                 @relation("SenderGifts")
+  receivedGifts         Gift[]                 @relation("ReceiverGifts")
+  orders                Order[]
+  notifications         Notification[]
+  ownedStores           Store[]
+  pushSubscriptions     PushSubscription[]
   // Follows (added in Step 2). `following` = rows where this user IS the
   // follower; `followers` = rows where this user IS being followed.
-  following         Follow[]           @relation("OutgoingFollows")
-  followers         Follow[]           @relation("IncomingFollows")
+  following             Follow[]               @relation("OutgoingFollows")
+  followers             Follow[]               @relation("IncomingFollows")
   // Wishlist items. Per-Wish visibility ("public" | "private") gates which
   // ones appear on /u/:username; the owner sees them all on /profile.
-  wishes            Wish[]
+  wishes                Wish[]
+  // Gift posts this user owns (sender's "sent" post or receiver's
+  // "received" post). The Gift Wall on /profile + /u/:username is a
+  // simple `WHERE ownerUserId = :userId` query. See model GiftPost.
+  ownedGiftPosts        GiftPost[]             @relation("OwnedGiftPosts")
+  // 👍 appreciations this user has placed on others' gift posts.
+  // See model GiftPostAppreciation.
+  giftPostAppreciations GiftPostAppreciation[]
   // Failed gift-send attempts where this user was the sender or the
   // receiver. We notify the sender once the receiver finally sets a
   // default address. See model GiftAttempt below.
-  attemptedGifts    GiftAttempt[] @relation("SenderAttempts")
-  pendingAttempts   GiftAttempt[] @relation("ReceiverAttempts")
+  attemptedGifts        GiftAttempt[]          @relation("SenderAttempts")
+  pendingAttempts       GiftAttempt[]          @relation("ReceiverAttempts")
   // Granular ops-role assignments (layered on top of the coarse
   // `role` field for admin users). See model OpsRoleAssignment.
-  opsRoles          OpsRoleAssignment[]
+  opsRoles              OpsRoleAssignment[]
   // Block relations. `outgoingBlocks` = rows where this user IS the
   // blocker; `incomingBlocks` = rows where this user IS being blocked.
   // Search + public-profile + send-gift surfaces filter both directions
   // out so blocked users can't interact in either direction.
-  outgoingBlocks    Block[]       @relation("Blocker")
-  incomingBlocks    Block[]       @relation("Blocked")
+  outgoingBlocks        Block[]                @relation("Blocker")
+  incomingBlocks        Block[]                @relation("Blocked")
   // Reports filed by this user against another. We don't expose the
   // reverse relation publicly — reports are admin-only.
-  filedReports      Report[]      @relation("Reporter")
+  filedReports          Report[]               @relation("Reporter")
   // Profile posts (added in Step 3). Each post has one media item
   // (photo or short video) stored on R2. Visible on /profile (owner)
   // and on the user's public profile when profile visibility allows.
-  posts             Post[]
+  posts                 Post[]
 }
 
 model Address {
@@ -185,12 +192,12 @@ model Address {
 }
 
 model SocialAccount {
-  id        String   @id @default(cuid())
-  userId    String
-  platform  String
-  handle    String
-  url       String?
-  verified  Boolean  @default(false)
+  id                String   @id @default(cuid())
+  userId            String
+  platform          String
+  handle            String
+  url               String?
+  verified          Boolean  @default(false)
   // Tri-state ownership signal:
   //   'unverified'    — manual link (current default for /social-accounts).
   //   'verified'      — OTP / SMS / email OTP proved control (for the
@@ -201,8 +208,8 @@ model SocialAccount {
   // whenever verificationLevel != 'unverified'. Reads should prefer
   // `verificationLevel` for the chip; writes should set both fields.
   verificationLevel String   @default("unverified")
-  isPrimary Boolean  @default(false)
-  createdAt DateTime @default(now())
+  isPrimary         Boolean  @default(false)
+  createdAt         DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -262,11 +269,11 @@ model Gift {
 
   createdAt DateTime @default(now())
 
-  sender   User     @relation("SenderGifts", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver User     @relation("ReceiverGifts", fields: [receiverId], references: [id], onDelete: Cascade)
-  address  Address? @relation("GiftDeliveryAddress", fields: [addressId], references: [id], onDelete: SetNull)
-  store    Store?   @relation(fields: [storeId], references: [id], onDelete: SetNull)
-  product  Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  sender   User      @relation("SenderGifts", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User      @relation("ReceiverGifts", fields: [receiverId], references: [id], onDelete: Cascade)
+  address  Address?  @relation("GiftDeliveryAddress", fields: [addressId], references: [id], onDelete: SetNull)
+  store    Store?    @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  product  Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
   order    Order?
   shipment Shipment?
   post     GiftPost?
@@ -330,11 +337,11 @@ model GiftAttempt {
 // delivery coverage. All new columns are NULLABLE so legacy stores
 // (pre-onboarding-v2) continue to work without migration data backfill.
 model Store {
-  id                String   @id @default(cuid())
-  name              String
-  ownerId           String
-  city              String
-  category          String
+  id       String @id @default(cuid())
+  name     String
+  ownerId  String
+  city     String
+  category String
 
   // ── Business / legal identity ─────────────────────────────────
   // All optional — pre-v2 stores have these as null and the admin
@@ -352,17 +359,17 @@ model Store {
   vatNumber                    String?
 
   // ── Contact PoC ───────────────────────────────────────────────
-  contactPerson                String?
-  contactPhone                 String?
-  contactEmail                 String?
+  contactPerson String?
+  contactPhone  String?
+  contactEmail  String?
 
   // ── Branding & social ─────────────────────────────────────────
-  logoUrl                      String?
-  coverImageUrl                String?
-  websiteUrl                   String?
-  instagramHandle              String?
-  tiktokHandle                 String?
-  snapchatHandle               String?
+  logoUrl         String?
+  coverImageUrl   String?
+  websiteUrl      String?
+  instagramHandle String?
+  tiktokHandle    String?
+  snapchatHandle  String?
 
   // ── Delivery coverage ─────────────────────────────────────────
   // Authoritative coverage definition. JSON array of
@@ -372,12 +379,12 @@ model Store {
   // (the existing canDeliverTo matcher already does this). Snapshot
   // is forwarded to Order.deliveryZones at create time so a mid-
   // flight zone change can't invalidate pending gifts.
-  deliveryZones                Json?
+  deliveryZones Json?
 
   // "none" | "api" | "shopify" | "woocommerce" | "custom"
-  integrationType   String   @default("none")
+  integrationType   String @default("none")
   // "disconnected" | "connected" | "error"
-  integrationStatus String   @default("disconnected")
+  integrationStatus String @default("disconnected")
 
   // ── Merchant plan ─────────────────────────────────────────────
   // Tiered feature gating. Stable string union so adding tiers
@@ -397,14 +404,14 @@ model Store {
   // The capability map (apps/api/src/stores/merchant-plans.ts)
   // is the only thing that should consume this field; never
   // hardcode a plan check inline.
-  plan              String   @default("starter")
+  plan String @default("starter")
 
   // Marketplace surfacing. When true, the store appears in the
   // "Featured" rail on /stores and gets boosted placement. Admin-
   // toggled today (PATCH /admin/stores/:id/featured); future
   // editorial / earned-placement rules can layer on top without
   // a schema change.
-  featured          Boolean  @default(false)
+  featured Boolean @default(false)
 
   // ── Approval lifecycle ────────────────────────────────────────
   // Onboarding-v2 expanded states (string union, additive — every
@@ -422,26 +429,26 @@ model Store {
   // Existing rows backfilled to "approved" so the migration is non-
   // destructive (every store created before this column existed was
   // implicitly live).
-  status            String   @default("pending")
+  status String @default("pending")
 
   // Operator-supplied note when the admin rejects or requests
   // changes. Surfaced on the merchant's pending-approval screen so
   // they know what to fix. Cleared when a fresh submission moves
   // back to `submitted`/`pending_review`.
-  rejectionReason   String?
-  submittedAt       DateTime?
-  reviewedAt        DateTime?
+  rejectionReason String?
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
   // FK to User.id of the admin who reviewed. Audit trail; not used
   // for auth (the admin guard runs against the JWT viewer at
   // request time).
-  reviewedBy        String?
+  reviewedBy      String?
 
   // Used to verify webhook signatures from the upstream platform. Null
   // for manual stores; generated when an integration is connected.
-  webhookSecret     String?
-  createdAt         DateTime @default(now())
+  webhookSecret String?
+  createdAt     DateTime @default(now())
 
-  owner     User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owner     User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   products  Product[]
   gifts     Gift[]
   documents StoreDocument[]
@@ -518,11 +525,11 @@ model Product {
   // "N people want this" on the public product page is gated by
   // a future per-product visibility flag (out of scope here); the
   // count itself never exposes WHO wishlisted.
-  wishlistedByCount Int       @default(0)
+  wishlistedByCount Int @default(0)
 
-  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  gifts   Gift[]
-  wishes  Wish[]
+  store  Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  gifts  Gift[]
+  wishes Wish[]
 
   // Upstream platforms use their own ids; pinning uniqueness per-store
   // means the same Shopify product id can exist across two stores
@@ -610,7 +617,7 @@ model Shipment {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  gift   Gift             @relation(fields: [giftId], references: [id], onDelete: Cascade)
+  gift   Gift            @relation(fields: [giftId], references: [id], onDelete: Cascade)
   events ShipmentEvent[]
 }
 
@@ -683,39 +690,82 @@ model ShipmentEvent {
 //   existing self-send guards on Gift to fold self-purchase
 //   here.
 model GiftPost {
-  id            String   @id @default(cuid())
-  giftId        String   @unique
-  // Null when the GiftPost row exists but has not been published
-  // (e.g. the sender saved a draft post before deciding).
-  // Indexed (visibility, publishedAt DESC) so the feed query
-  // can paginate efficiently when this surface ships.
-  publishedAt   DateTime?
-  // 'private' | 'followers' | 'public'. Defaults to 'private' so
-  // an accidental post-row creation never leaks to the feed.
-  visibility    String   @default("private")
-  // Opt-in identity reveal. Both default to false — the post is
-  // about the product + moment, not the relationship. A user
-  // who explicitly wants to brag flips these on per-post.
-  revealSender    Boolean @default(false)
-  revealRecipient Boolean @default(false)
+  id                String    @id @default(cuid())
+  giftId            String    @unique
+  // Owner of the post — for V1 always equals Gift.senderId OR
+  // Gift.receiverId, depending on which side opted to publish.
+  // Stored explicitly (rather than re-derived from Gift each
+  // time) so the Gift Wall on a user's profile is a simple
+  // `WHERE ownerUserId = :userId` query.
+  ownerUserId       String
+  // 'sent' | 'received' | 'self' — see `project_gift_post_dedup`
+  // memory. V1 ships with the column populated; dedup itself is
+  // future work.
+  direction         String
+  // Null when the GiftPost row exists but has not been published.
+  publishedAt       DateTime?
+  // 'private' | 'public'. V1 ships these two only;
+  // 'followers' / 'mutual' tiers land alongside the richer
+  // profile-privacy work.
+  visibility        String    @default("private")
+  // Opt-in identity reveal. Both default to false — V1 has no UI
+  // to flip these; defaults to identity-masked posts forever.
+  revealSender      Boolean   @default(false)
+  revealRecipient   Boolean   @default(false)
+  // Short, opaque, non-enumerable token for /p/<publicSlug>
+  // share URLs (see `project_gift_post_sharing` memory).
+  // Generated at first publish; reused across publish/unpublish
+  // cycles so a shared link doesn't 404 when the user
+  // re-publishes after a moment of doubt.
+  publicSlug        String?   @unique
+  // Denormalized 👍 count. Updated transactionally by the
+  // appreciation toggle alongside GiftPostAppreciation row
+  // writes. Aggregate-only — never identity-attributed on
+  // public surfaces (see `project_interaction_philosophy`).
+  appreciationCount Int       @default(0)
   // Set when the linked Product or Store is deleted / unpublished.
   // The feed query filters on `deactivatedAt IS NULL`; the post
   // detail UI renders a "no longer available" placeholder when
   // someone deep-links into a deactivated post.
-  deactivatedAt DateTime?
-  // Operator-supplied reason for deactivation (e.g.
-  // "merchant_deleted_product", "moderation_takedown"). Free
-  // text; not surfaced to end users.
+  deactivatedAt     DateTime?
+  // Operator-supplied reason for deactivation.
   deactivatedReason String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  gift Gift @relation(fields: [giftId], references: [id], onDelete: Cascade)
+  gift          Gift                   @relation(fields: [giftId], references: [id], onDelete: Cascade)
+  owner         User                   @relation("OwnedGiftPosts", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  appreciations GiftPostAppreciation[]
 
-  // Future feed query: published, public, not deactivated, newest
-  // first. Composite covers the common path.
+  // Profile Gift Wall query: `WHERE ownerUserId = :userId
+  // AND publishedAt IS NOT NULL AND deactivatedAt IS NULL`,
+  // ordered by publishedAt DESC.
+  @@index([ownerUserId, publishedAt])
+  // Future public feed query.
   @@index([visibility, publishedAt])
   @@index([deactivatedAt])
+}
+
+// Per-user appreciation on a GiftPost. Composite-unique so each
+// user can only appreciate a post once (no spam-tapping the
+// counter). Counter writes happen transactionally with row
+// creates/deletes — same pattern as Wish + Product.wishlistedByCount.
+//
+// Privacy: aggregate-only on public surfaces. The list of
+// appreciators is NOT exposed to third parties — only the post
+// owner (and admins) can see it. This is the "no leaderboards,
+// no vanity rosters" rule from `feedback_no_generic_social`.
+model GiftPostAppreciation {
+  id         String   @id @default(cuid())
+  giftPostId String
+  userId     String
+  createdAt  DateTime @default(now())
+
+  giftPost GiftPost @relation(fields: [giftPostId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([giftPostId, userId])
+  @@index([userId])
 }
 
 // ── RBAC foundation ──────────────────────────────────────────
@@ -788,25 +838,25 @@ model OpsRoleAssignment {
 // future ops + accounting features have a stable home; the
 // /store/payouts mock keeps deriving from Order.
 model PayoutEvent {
-  id          String   @id @default(cuid())
-  storeId     String
+  id         String   @id @default(cuid())
+  storeId    String
   // Optional FK to a specific gift/order this event is tied to.
   // Null for store-level adjustments (e.g. credit, fee waiver).
-  giftId      String?
+  giftId     String?
   // accrued | held | released | paid | reversed | adjustment
-  type        String
+  type       String
   // Signed amount in `currency` units (e.g. SAR). Positive for
   // funds owed to merchant; negative for deductions.
-  amount      Float
-  currency    String
+  amount     Float
+  currency   String
   // Operator note — required for `adjustment` events, optional
   // for the rest.
-  reason      String?
+  reason     String?
   // User.id of the operator who recorded the event. Required so
   // every row has an audit trail.
-  recordedBy  String
-  occurredAt  DateTime
-  createdAt   DateTime @default(now())
+  recordedBy String
+  occurredAt DateTime
+  createdAt  DateTime @default(now())
 
   // Per-store ledger reads: filter by storeId, order by
   // occurredAt. Per-gift drilldown uses (giftId).
@@ -944,29 +994,29 @@ model Payment {
 //     Product row (wishlistedByCount) — distinct-user count
 //     guaranteed by the unique constraint.
 model Wish {
-  id            String   @id @default(cuid())
-  userId        String
+  id     String  @id @default(cuid())
+  userId String
   // Legacy free-text fields. Required at insert time even for
   // product-linked rows (productName mirrors into title for
   // backwards compat).
-  title         String
-  store         String?
+  title  String
+  store  String?
 
   // Product link (new). Null on legacy rows.
-  productId     String?
-  storeId       String?
+  productId String?
+  storeId   String?
 
   // Denormalized snapshot — kept stable when the product is later
   // edited so the wishlist card doesn't visually break. Refreshed
   // on each heart-tap upsert.
-  productName   String?
-  storeName     String?
-  imageUrl      String?
-  price         Float?
-  currency      String?
+  productName String?
+  storeName   String?
+  imageUrl    String?
+  price       Float?
+  currency    String?
 
   // "public" | "private". Matches the frontend Wish.visibility convention.
-  visibility    String   @default("public")
+  visibility String @default("public")
 
   // Deactivation cascade (when Product or Store deactivated).
   // Same vocabulary as the product availability rule (see
@@ -974,10 +1024,10 @@ model Wish {
   deactivatedAt     DateTime?
   deactivatedReason String?
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   // Relation field is named `linkedProduct` / `linkedStore` to
   // avoid colliding with the legacy scalar `store: String?` field
   // (free-text storeName for pre-v2 wishes). The scalar wins the
@@ -986,13 +1036,13 @@ model Wish {
   linkedProduct Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
   linkedStore   Store?   @relation(fields: [storeId], references: [id], onDelete: SetNull)
 
-  @@index([userId])
-  // Hot path: list a user's public wishes newest-first.
-  @@index([userId, visibility, createdAt])
   // One wishlist row per (userId, productId). Postgres treats NULL
   // as distinct, so multiple legacy free-text rows with productId =
   // null on the same user are still allowed.
   @@unique([userId, productId])
+  @@index([userId])
+  // Hot path: list a user's public wishes newest-first.
+  @@index([userId, visibility, createdAt])
   // "N people want this" aggregate query.
   @@index([productId])
 }
