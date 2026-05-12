@@ -345,6 +345,48 @@ export class GiftsService {
       );
     }
 
+    // Wishlist purchase fulfillment. When the gift's product matches
+    // a row on the receiver's wishlist, soft-deactivate that row so
+    // the receiver's visible wishlist clears AND other senders
+    // browsing the same wishlist don't accidentally double-buy.
+    //
+    // See `project_wishlist_purchase_fulfillment.md` memory:
+    //   - Soft state only; the row stays in the DB.
+    //   - Counter (Product.wishlistedByCount) does NOT decrement —
+    //     the user still wants this product semantically; one gift
+    //     satisfied the signal.
+    //   - Race: two simultaneous senders → first hook wins; second
+    //     finds the row already deactivated and no-ops.
+    //   - Reversal: re-heart (existing upsert path clears
+    //     deactivatedAt) OR gift cancel (see cancel() below).
+    //
+    // Privacy: the deactivation reason is generic; we do NOT store
+    // who bought it or which gift fulfilled it on the Wish row.
+    // Admin/support correlate via Gift table (productId + receiverId)
+    // when needed.
+    if (created.productId) {
+      try {
+        await this.prisma.wish.updateMany({
+          where: {
+            userId: receiver.id,
+            productId: created.productId,
+            deactivatedAt: null,
+          },
+          data: {
+            deactivatedAt: new Date(),
+            deactivatedReason: 'purchased_for_recipient',
+          },
+        });
+      } catch (err) {
+        // Non-fatal — the gift was created successfully; if the
+        // wishlist hook fails, the receiver just keeps seeing the
+        // row until they re-heart / a subsequent gift fulfills it.
+        this.logger.warn(
+          `[gifts] wishlist fulfillment failed for giftId=${created.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
     // Two notifications fire as soon as a gift is created:
     //   1. "you have a new gift" — celebratory (or mystery, when surprise)
     //   2. "please confirm the delivery address" — actionable
@@ -712,6 +754,42 @@ export class GiftsService {
       });
       if (!fresh) throw new NotFoundException('Gift not found');
       return applyGiftVisibility(fresh as GiftWithParties, viewerUserId);
+    }
+
+    // Wishlist purchase un-fulfillment. If this gift was the one
+    // that fulfilled a wishlist row (deactivatedReason =
+    // 'purchased_for_recipient' on (receiverId, productId)), the
+    // cancel reverses that — the row reappears on the receiver's
+    // visible wishlist.
+    //
+    // We don't track which specific Gift triggered which Wish
+    // deactivation; we just match on (userId, productId, reason).
+    // If a second Gift hooked the same Wish after this one
+    // cancelled, that second gift's hook would have no-op'd
+    // (already deactivated), so un-deactivating here might be
+    // "too eager" — the wish reappears even though another gift
+    // is still in flight. That's acceptable: a redundant gift
+    // pairing on the same item is the original double-buy concern
+    // and the receiver will see the visible wish again; the
+    // second gift still proceeds independently.
+    if (gift.productId) {
+      try {
+        await this.prisma.wish.updateMany({
+          where: {
+            userId: gift.receiverId,
+            productId: gift.productId,
+            deactivatedReason: 'purchased_for_recipient',
+          },
+          data: {
+            deactivatedAt: null,
+            deactivatedReason: null,
+          },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `[gifts] wishlist un-fulfillment failed for giftId=${gift.id}: ${(err as Error).message}`,
+        );
+      }
     }
 
     // Notify the receiver. We don't notify the sender — they just
