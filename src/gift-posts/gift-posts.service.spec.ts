@@ -35,6 +35,7 @@ type MockPrisma = {
     create: jest.Mock;
     delete: jest.Mock;
   };
+  block: { findFirst: jest.Mock };
   $transaction: jest.Mock;
 };
 
@@ -62,6 +63,10 @@ function createPrismaMock(): MockPrisma {
     gift: { findUnique: jest.fn() },
     giftPost,
     giftPostAppreciation,
+    // Block probe — defaults to "no block exists" so the happy-path
+    // tests don't need to set it explicitly. Block-aware tests
+    // override per-test.
+    block: { findFirst: jest.fn().mockResolvedValue(null) },
     $transaction,
   };
 }
@@ -344,6 +349,26 @@ describe('GiftPostsService', () => {
       const view = await service.getBySlug('abc', receiverId);
       expect(view.productName).toBe('باقة جوري');
     });
+
+    it('404s when a third-party viewer is blocked by the owner (or vice versa)', async () => {
+      // Public post on the wire — would normally be viewable.
+      prisma.giftPost.findUnique.mockResolvedValue(baseRow);
+      // Block exists either direction → collapse to 404 (no existence leak).
+      prisma.block.findFirst.mockResolvedValueOnce({ blockerId: senderId });
+      await expect(
+        service.getBySlug('abc', 'random_viewer'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('lets the owner view their own post without consulting the block probe', async () => {
+      // Defensive: a block row that mentions the owner must NOT
+      // affect the owner's own view. The block probe should not
+      // even be called for the owner-viewer case.
+      prisma.giftPost.findUnique.mockResolvedValue(baseRow);
+      const view = await service.getBySlug('abc', senderId);
+      expect(view).toBeDefined();
+      expect(prisma.block.findFirst).not.toHaveBeenCalled();
+    });
   });
 
   // ── listByUser ──────────────────────────────────────────────
@@ -357,6 +382,40 @@ describe('GiftPostsService', () => {
       expect(where.publishedAt).toEqual({ not: null });
       expect(where.visibility).toBe('public');
       expect(where.deactivatedAt).toBeNull();
+    });
+
+    it('returns empty when the viewer has blocked the wall owner', async () => {
+      // Viewer initiated the block. Either direction hides the wall.
+      prisma.block.findFirst.mockResolvedValueOnce({ blockerId: 'viewer_a' });
+      const out = await service.listByUser('owner_b', 'viewer_a');
+      expect(out).toEqual([]);
+      // listByUser should short-circuit BEFORE hitting the posts table.
+      expect(prisma.giftPost.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns empty when the wall owner has blocked the viewer', async () => {
+      // Reverse direction — owner blocked the viewer.
+      prisma.block.findFirst.mockResolvedValueOnce({ blockerId: 'owner_b' });
+      const out = await service.listByUser('owner_b', 'viewer_a');
+      expect(out).toEqual([]);
+      expect(prisma.giftPost.findMany).not.toHaveBeenCalled();
+    });
+
+    it('skips the block probe for anonymous viewers', async () => {
+      // Anonymous viewer (no JWT) — no block possible, no probe.
+      prisma.giftPost.findMany.mockResolvedValue([]);
+      await service.listByUser('owner_b', null);
+      expect(prisma.block.findFirst).not.toHaveBeenCalled();
+      expect(prisma.giftPost.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the block probe when viewer is the owner', async () => {
+      // Owner viewing their own wall via the public endpoint — no
+      // block check needed; you can't block yourself.
+      prisma.giftPost.findMany.mockResolvedValue([]);
+      await service.listByUser('user_a', 'user_a');
+      expect(prisma.block.findFirst).not.toHaveBeenCalled();
+      expect(prisma.giftPost.findMany).toHaveBeenCalledTimes(1);
     });
   });
 

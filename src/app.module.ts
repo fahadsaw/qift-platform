@@ -21,7 +21,11 @@ import { WishesModule } from './wishes/wishes.module';
 import { BlocksModule } from './blocks/blocks.module';
 import { ReportsModule } from './reports/reports.module';
 import { MediaModule } from './media/media.module';
-import { PostsModule } from './posts/posts.module';
+// Note: the generic `PostsModule` (media-upload posts) was retired
+// in the dormant-generic-posting cleanup. Gift posts have their own
+// `GiftPostsModule` below; the legacy `Post` table is kept in the
+// database for now (data preservation), with a future migration
+// task to drop it once historical data is reviewed.
 import { GiftPostsModule } from './gift-posts/gift-posts.module';
 import { AdminModule } from './admin/admin.module';
 import { MailModule } from './mail/mail.module';
@@ -47,7 +51,6 @@ import { MailModule } from './mail/mail.module';
     BlocksModule,
     ReportsModule,
     MediaModule,
-    PostsModule,
     GiftPostsModule,
     AdminModule,
     MailModule,

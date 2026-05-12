@@ -107,6 +107,17 @@ model User {
   // senders. UI gate only; backend doesn't currently enforce it on
   // gift create.
   acceptsSurpriseGifts  Boolean @default(true)
+  // Per-field publicity flags for the preferences above. JSON for
+  // policy flexibility — adding a new preference field doesn't need
+  // a schema migration. Default null = ALL private (owner-only). The
+  // shape is a small `{ <field>: boolean }` object; recognized keys:
+  //   clothingSize | shoeSize | ringSize | fragrance | colors |
+  //   categories | brands | allergies | surprises
+  // The public-profile endpoint reads this to decide which
+  // preference fields to project into the response. Per-field
+  // privacy is opt-in: each flag defaults to false until the owner
+  // explicitly flips it.
+  preferencesVisibility Json?
 
   // -- Account state --
   // Read by /users/me. The frontend renders the red "address required"
@@ -1116,21 +1127,26 @@ model Report {
   @@index([reportedUserId])
 }
 
-// Profile post — one media item (photo or short video) plus an
-// optional caption. Lives on the user's profile feed; the public-
-// profile endpoint filters by viewer privacy. Kept deliberately minimal
-// for the MVP: no comments, likes, or repost graph yet.
+// DORMANT — legacy generic-posting model.
 //
-// `mediaType` is one of:
-//   - 'photo' — single image (jpg/png/webp/heic/avif)
-//   - 'video' — short MP4 / WebM clip
-// We store the type explicitly rather than guessing from the URL so
-// signed-URL rotations and CDN rewrites don't break the UI's renderer
-// selection.
+// The application code that consumed this model (PostsModule on the
+// backend, lib/posts.ts + PostsViewer on the frontend) was retired
+// in the dormant-generic-posting cleanup. Qift posts now originate
+// from gifting events ONLY (see `project_gift_centric_social.md`
+// + the GiftPost model below).
 //
-// `mediaUrl` is the public URL returned by MediaService; the bucket
-// itself stays private — only the configured public domain serves
-// reads.
+// The table is kept in the database for now so historical rows are
+// not destroyed. A future migration will drop the table once the
+// data is reviewed / archived. Until then:
+//   - No service writes to this table.
+//   - No service reads from this table.
+//   - The relation field on User (`posts Post[]`) is retained for
+//     schema integrity but is never queried.
+//
+// Do NOT add new consumers. If you find yourself needing a
+// "user-uploaded media" surface, route it through GiftPost or
+// surface a design discussion first — generic posting is an
+// explicit non-direction for the platform.
 model Post {
   id        String   @id @default(cuid())
   userId    String
@@ -1141,6 +1157,5 @@ model Post {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Hot path: list a user's posts newest-first.
   @@index([userId, createdAt])
 }

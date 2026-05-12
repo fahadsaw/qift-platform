@@ -5,7 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
 import { userHasDefaultAddress } from '../addresses/default-address.helper';
@@ -130,6 +130,8 @@ export class UsersService {
           favoriteBrands: true,
           allergies: true,
           acceptsSurpriseGifts: true,
+          // Per-field publicity dict for /preferences. Owner-only.
+          preferencesVisibility: true,
           addresses: {
             where: { isDefault: true },
             take: 1,
@@ -325,6 +327,11 @@ export class UsersService {
       favoriteBrands?: string | null;
       allergies?: string | null;
       acceptsSurpriseGifts?: boolean;
+      // Per-field publicity dict — opt-in basis (every key defaults
+      // to false). Keys: clothingSize | shoeSize | ringSize |
+      // fragrance | colors | categories | brands | allergies |
+      // surprises. Unknown keys are filtered server-side.
+      preferencesVisibility?: Record<string, boolean> | null;
     },
   ) {
     // The string-field loop writes through a typed bag instead of
@@ -362,6 +369,35 @@ export class UsersService {
     Object.assign(data, strBag);
     if (body.acceptsSurpriseGifts !== undefined) {
       data.acceptsSurpriseGifts = body.acceptsSurpriseGifts === true;
+    }
+    // Visibility flags — only known keys are stored. Unknown keys
+    // are silently dropped (forward-compat: a future preference
+    // can be added without rejecting older payloads). Each value
+    // is coerced to a strict boolean so a buggy frontend can't
+    // store strings.
+    if (body.preferencesVisibility !== undefined) {
+      if (body.preferencesVisibility === null) {
+        data.preferencesVisibility = Prisma.JsonNull;
+      } else {
+        const allowedKeys = [
+          'clothingSize',
+          'shoeSize',
+          'ringSize',
+          'fragrance',
+          'colors',
+          'categories',
+          'brands',
+          'allergies',
+          'surprises',
+        ] as const;
+        const clean: Record<string, boolean> = {};
+        for (const k of allowedKeys) {
+          if (k in body.preferencesVisibility) {
+            clean[k] = body.preferencesVisibility[k] === true;
+          }
+        }
+        data.preferencesVisibility = clean;
+      }
     }
 
     if (Object.keys(data).length === 0) return this.getProfile(viewerId);
@@ -754,6 +790,20 @@ export class UsersService {
         showFollowing: true,
         showGiftsSent: true,
         showGiftsReceived: true,
+        // Preferences + per-field publicity flags. We project the
+        // owner's preferences and the visibility dict here; the
+        // public-shape construction below selects which fields
+        // actually leave the server based on the dict.
+        preferredClothingSize: true,
+        preferredShoeSize: true,
+        preferredRingSize: true,
+        preferredPerfume: true,
+        favoriteColors: true,
+        favoriteCategories: true,
+        favoriteBrands: true,
+        allergies: true,
+        acceptsSurpriseGifts: true,
+        preferencesVisibility: true,
       },
     });
     this.logger.log(
@@ -866,6 +916,13 @@ export class UsersService {
     if (giftsReceivedCount !== undefined)
       stats.giftsReceived = giftsReceivedCount;
 
+    // Public preferences projection — per-field opt-in. The visibility
+    // dict is owner-controlled (PATCH /users/me/preferences); each key
+    // defaults to false (owner-only). We omit keys with no value to
+    // keep the public payload lean: `preferences: undefined` reads as
+    // "this user hasn't shared any preferences yet" on the client.
+    const publicPreferences = buildPublicPreferencesProjection(user);
+
     return {
       id: user.id,
       fullName: user.fullName,
@@ -876,6 +933,7 @@ export class UsersService {
       stats,
       isFollowing,
       isFollowedBy,
+      ...(publicPreferences ? { preferences: publicPreferences } : {}),
     };
   }
 
@@ -1242,4 +1300,122 @@ export function resolvePhoneE164(
   // matching, which we already prevented above.
   if (digits.length < 7 || digits.length > 15) return null;
   return candidate;
+}
+
+// Public preferences projection. Reads the owner's per-field
+// publicity flags (stored as JSON on User.preferencesVisibility) and
+// returns ONLY the fields the owner has opted to share. Returns null
+// when the owner shared nothing — the caller omits the `preferences`
+// key entirely so the wire shape stays clean.
+//
+// Privacy: default state is all-private. Every flag is opt-in. The
+// projection NEVER includes a field that wasn't explicitly opted in,
+// regardless of whether the underlying value exists.
+//
+// Why a helper: keeps the privacy gate in ONE place. If a future
+// preference field is added, extending this helper (and only this
+// helper) controls what reaches the public shape. The publicProfile
+// service is the only call site.
+type PreferencesVisibilityKey =
+  | 'clothingSize'
+  | 'shoeSize'
+  | 'ringSize'
+  | 'fragrance'
+  | 'colors'
+  | 'categories'
+  | 'brands'
+  | 'allergies'
+  | 'surprises';
+
+type OwnerPreferences = {
+  preferredClothingSize: string | null;
+  preferredShoeSize: string | null;
+  preferredRingSize: string | null;
+  preferredPerfume: string | null;
+  favoriteColors: string | null;
+  favoriteCategories: string | null;
+  favoriteBrands: string | null;
+  allergies: string | null;
+  acceptsSurpriseGifts: boolean | null;
+  preferencesVisibility: unknown;
+};
+
+export type PublicPreferences = {
+  clothingSize?: string;
+  shoeSize?: string;
+  ringSize?: string;
+  fragrance?: string;
+  colors?: string;
+  categories?: string;
+  brands?: string;
+  allergies?: string;
+  acceptsSurpriseGifts?: boolean;
+};
+
+function buildPublicPreferencesProjection(
+  owner: OwnerPreferences,
+): PublicPreferences | null {
+  const flags = readVisibilityFlags(owner.preferencesVisibility);
+  if (flags === null) return null;
+  const out: PublicPreferences = {};
+  if (flags.clothingSize && owner.preferredClothingSize) {
+    out.clothingSize = owner.preferredClothingSize;
+  }
+  if (flags.shoeSize && owner.preferredShoeSize) {
+    out.shoeSize = owner.preferredShoeSize;
+  }
+  if (flags.ringSize && owner.preferredRingSize) {
+    out.ringSize = owner.preferredRingSize;
+  }
+  if (flags.fragrance && owner.preferredPerfume) {
+    out.fragrance = owner.preferredPerfume;
+  }
+  if (flags.colors && owner.favoriteColors) {
+    out.colors = owner.favoriteColors;
+  }
+  if (flags.categories && owner.favoriteCategories) {
+    out.categories = owner.favoriteCategories;
+  }
+  if (flags.brands && owner.favoriteBrands) {
+    out.brands = owner.favoriteBrands;
+  }
+  if (flags.allergies && owner.allergies) {
+    out.allergies = owner.allergies;
+  }
+  if (flags.surprises) {
+    // Surprise acceptance is a boolean, not a string. Always render
+    // when opted-in — even false matters for the gift-sender flow.
+    out.acceptsSurpriseGifts = owner.acceptsSurpriseGifts ?? true;
+  }
+  return Object.keys(out).length === 0 ? null : out;
+}
+
+// Validate + read the visibility dict. Tolerates malformed JSON
+// (defensive — returns null = "treat all as private"). Recognized
+// keys mapped to booleans; unknown keys are ignored.
+function readVisibilityFlags(
+  raw: unknown,
+): Record<PreferencesVisibilityKey, boolean> | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const keys: PreferencesVisibilityKey[] = [
+    'clothingSize',
+    'shoeSize',
+    'ringSize',
+    'fragrance',
+    'colors',
+    'categories',
+    'brands',
+    'allergies',
+    'surprises',
+  ];
+  const out = {} as Record<PreferencesVisibilityKey, boolean>;
+  for (const k of keys) {
+    out[k] = obj[k] === true;
+  }
+  // If nothing is opted-in, treat as null so the caller doesn't render
+  // an empty preferences block.
+  const anyTrue = keys.some((k) => out[k]);
+  return anyTrue ? out : null;
 }

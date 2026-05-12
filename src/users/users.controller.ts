@@ -117,6 +117,9 @@ export class UsersController {
       favoriteBrands?: string | null;
       allergies?: string | null;
       acceptsSurpriseGifts?: boolean;
+      // Per-field publicity for the public profile preferences
+      // section. Service-side filtered to a known-key allow-list.
+      preferencesVisibility?: Record<string, boolean> | null;
     },
     @Req() req: AuthedRequest,
   ) {

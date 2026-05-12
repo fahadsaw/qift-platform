@@ -236,7 +236,21 @@ export class GiftPostsService {
   // public + not-deactivated posts. Owner viewing their own wall via
   // this endpoint sees the same filter — they have listMine() for
   // their full wall.
+  //
+  // Privacy: when the viewer has blocked the wall owner (or vice
+  // versa), we return an empty list. Blocks are bidirectional —
+  // either direction hides the wall, matching the existing block
+  // semantics elsewhere in the codebase (search + send-gift +
+  // public profile). A blocked relationship should erase the other
+  // side from the viewer's experience entirely.
   async listByUser(targetUserId: string, viewerUserId: string | null) {
+    if (
+      viewerUserId !== null &&
+      viewerUserId !== targetUserId &&
+      (await this.isBlockedEitherWay(viewerUserId, targetUserId))
+    ) {
+      return [];
+    }
     const rows = await this.prisma.giftPost.findMany({
       where: {
         ownerUserId: targetUserId,
@@ -252,9 +266,10 @@ export class GiftPostsService {
 
   // /p/<slug> public route. Returns the privacy-masked view; throws
   // 404 when the slug doesn't exist OR the post is no longer publicly
-  // viewable to the caller. We collapse "private" and "deactivated"
-  // into the same 404 deliberately — the existence of a private post
-  // is itself information we don't want to leak through 403s.
+  // viewable to the caller. We collapse "private" / "deactivated" /
+  // "blocked" into the same 404 deliberately — the existence of a
+  // private post (or a blocked-user's post) is itself information
+  // we don't want to leak through 403s.
   async getBySlug(slug: string, viewerUserId: string | null) {
     const trimmed = slug?.trim();
     if (!trimmed) throw new NotFoundException('Post not found');
@@ -268,6 +283,17 @@ export class GiftPostsService {
       viewerUserId !== null &&
       (viewerUserId === row.gift.senderId ||
         viewerUserId === row.gift.receiverId);
+    // Block check — only when the viewer is authenticated AND is
+    // NOT the owner / gift party (owner and gift parties always see
+    // their own gift moment regardless of blocks).
+    if (
+      viewerUserId !== null &&
+      !isOwner &&
+      !isGiftParty &&
+      (await this.isBlockedEitherWay(viewerUserId, row.ownerUserId))
+    ) {
+      throw new NotFoundException('Post not found');
+    }
     const publiclyViewable =
       row.publishedAt !== null &&
       row.visibility === 'public' &&
@@ -276,6 +302,24 @@ export class GiftPostsService {
       throw new NotFoundException('Post not found');
     }
     return this.toView(row, viewerUserId);
+  }
+
+  // Bidirectional block probe. Either user blocking the other
+  // produces the same effect: the relationship is erased from the
+  // viewer's experience. Single row read; the composite-PK index
+  // on Block(blockerId, blockedId) covers both directions in a
+  // single OR query.
+  private async isBlockedEitherWay(a: string, b: string): Promise<boolean> {
+    const row = await this.prisma.block.findFirst({
+      where: {
+        OR: [
+          { blockerId: a, blockedId: b },
+          { blockerId: b, blockedId: a },
+        ],
+      },
+      select: { blockerId: true },
+    });
+    return row !== null;
   }
 
   // 👍 toggle. Returns the post-toggle state so the frontend can
