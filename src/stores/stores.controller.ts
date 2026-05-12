@@ -85,4 +85,36 @@ export class StoresController {
   submit(@Param('id') id: string, @Req() req: AuthedRequest) {
     return this.service.submit(req.user!.userId, id);
   }
+
+  // ── Storefront theme (Phase 5) ──────────────────────────────
+  //
+  // Update the store's selected theme + bounded branding overrides.
+  // Service enforces ownership + plan-gating + config sanitization.
+  // The dashboard theme picker is the intended caller.
+  @Patch(':id/theme')
+  @UseGuards(JwtAuthGuard)
+  setTheme(
+    @Param('id') id: string,
+    @Body() body: { themeSlug?: string; themeConfig?: unknown },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.service.setStoreTheme(req.user!.userId, id, body);
+  }
+
+  // Update per-metric publicity flags. Same opt-in pattern as the
+  // user-side preferencesVisibility — every key defaults to false
+  // (owner-only). The visibility dashboard is the intended caller.
+  @Patch(':id/visibility')
+  @UseGuards(JwtAuthGuard)
+  setVisibility(
+    @Param('id') id: string,
+    @Body() body: { metricsVisibility?: Record<string, boolean> | null },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.service.setStoreMetricsVisibility(
+      req.user!.userId,
+      id,
+      body.metricsVisibility,
+    );
+  }
 }

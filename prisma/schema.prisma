@@ -280,11 +280,11 @@ model Gift {
 
   createdAt DateTime @default(now())
 
-  sender   User      @relation("SenderGifts", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver User      @relation("ReceiverGifts", fields: [receiverId], references: [id], onDelete: Cascade)
-  address  Address?  @relation("GiftDeliveryAddress", fields: [addressId], references: [id], onDelete: SetNull)
-  store    Store?    @relation(fields: [storeId], references: [id], onDelete: SetNull)
-  product  Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
+  sender   User       @relation("SenderGifts", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User       @relation("ReceiverGifts", fields: [receiverId], references: [id], onDelete: Cascade)
+  address  Address?   @relation("GiftDeliveryAddress", fields: [addressId], references: [id], onDelete: SetNull)
+  store    Store?     @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  product  Product?   @relation(fields: [productId], references: [id], onDelete: SetNull)
   order    Order?
   shipment Shipment?
   // One GiftPost per (gift, owner) — both sender and receiver can
@@ -464,6 +464,46 @@ model Store {
   webhookSecret String?
   createdAt     DateTime @default(now())
 
+  // ── Storefront theme (Phase 5) ────────────────────────────────
+  // Currently selected presentation layer. Stable string union
+  // (NOT a Prisma enum) so adding a new theme is a one-line
+  // change in the `themes.ts` manifest + a new component file —
+  // no schema migration required. Plan gating is enforced by
+  // StoreService on every set + every render via the live plan
+  // capability check (capabilitiesFor() / planHas() from
+  // merchant-plans.ts). A downgrade leaves this value alone but
+  // the server-side dispatcher falls back to `classic` until the
+  // plan is restored.
+  themeSlug   String @default("classic")
+  // Bounded per-store overrides. Recognized keys (validated
+  // server-side; unknown keys silently dropped):
+  //   accentColor     — hex (sanitized to known palette)
+  //   bannerImageUrl  — R2 URL pointer
+  //   heroHeadline    — max 80 chars
+  //   heroSubhead     — max 160 chars
+  //   themeSpecific.<slug>.* — per-theme sub-config (each theme
+  //     declares its own validator)
+  // See `project_storefront_architecture.md` Section 2.4 / 3.2.
+  themeConfig Json?
+
+  // ── Merchant metrics visibility (Phase 5) ─────────────────────
+  // Per-metric publicity flags. JSON column following the same
+  // pattern as User.preferencesVisibility — opt-in basis, each key
+  // defaults to false (owner-only). Recognized keys:
+  //   wishlistSaves      — "N people saved this"
+  //   purchaseCount      — "N bought"
+  //   giftedCount        — "N gifted via Qift"
+  //   popularityScore    — "trending" badge
+  //   ratingsCount       — review count
+  //   stockCount         — "only N left"
+  //   soldCount          — "M sold this month"
+  //   trendingIndicator  — "trending now"
+  // The storefront primitives (<MetricChip>) render nothing for
+  // missing keys. The API projection drops hidden keys server-
+  // side so themes never see raw values they shouldn't render.
+  // Default null = ALL HIDDEN (treated as every flag = false).
+  metricsVisibility Json?
+
   owner     User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   products  Product[]
   gifts     Gift[]
@@ -471,6 +511,42 @@ model Store {
   wishes    Wish[]
 
   @@index([ownerId])
+}
+
+// Storefront theme registry. Display metadata + plan gating for
+// the available themes. The actual theme COMPONENTS live in the
+// frontend codebase under `components/storefront/themes/<slug>/`;
+// this table carries only the metadata the dashboard picker needs
+// (preview thumbnail, localized name/description, plan gate, on/off).
+//
+// V1 seed rows: 'classic' (starter+), 'gallery' (pro+),
+// 'editorial' (enterprise). Adding a new theme = one INSERT here
+// + a new component file + an entry in the frontend `themes.ts`
+// manifest. No schema change required.
+//
+// Plan gating is enforced server-side by StoreService — the
+// dashboard picker uses `minPlan` to grey out ineligible options,
+// but the authoritative check happens on every `setTheme` + every
+// public storefront render.
+model StoreTheme {
+  slug           String   @id
+  // Localized via translation key `themes.<slug>.name`. The `name`
+  // column stores the canonical English name as a fallback.
+  name           String
+  // 'starter' | 'pro' | 'enterprise'. Plan capability gating is
+  // the source of truth — minPlan is a display hint for the
+  // picker. The matching capability ('theme_gallery' /
+  // 'theme_editorial') is what the service actually checks.
+  minPlan        String
+  // R2 URL pointer to a static preview image (PNG/WebP). Live-
+  // rendered previews are deferred — see
+  // `project_storefront_architecture.md` Section 9.
+  previewUrl     String
+  // Translation key for the picker description. Null on themes
+  // that ship without a description (only the name shows).
+  descriptionKey String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
 }
 
 // Per-store onboarding documents (CR scan, VAT certificate,

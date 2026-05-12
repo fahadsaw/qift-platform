@@ -11,6 +11,13 @@ import {
   planHas,
   type MerchantCapability,
 } from './merchant-plans';
+import {
+  STOREFRONT_THEME_SLUGS,
+  isStorefrontThemeSlug,
+  isThemeEligible,
+  sanitizeThemeConfig,
+  sanitizeMetricsVisibility,
+} from './storefront-themes';
 
 const FORBIDDEN_MSG = 'غير مصرح لك';
 
@@ -40,6 +47,13 @@ const PUBLIC_STORE_SELECT = {
   instagramHandle: true,
   tiktokHandle: true,
   snapchatHandle: true,
+  // Storefront theme (Phase 5). themeSlug + themeConfig power the
+  // server-side dispatcher; metricsVisibility powers the per-metric
+  // opt-in sanitization in primitives. See
+  // `project_storefront_architecture.md`.
+  themeSlug: true,
+  themeConfig: true,
+  metricsVisibility: true,
 } as const;
 
 // Owner / admin select. Adds the merchant-application fields the
@@ -373,6 +387,104 @@ export class StoresService {
       where: { id: storeId },
       data: { featured },
       select: OWNER_STORE_SELECT,
+    });
+  }
+
+  // ── Storefront theme (Phase 5) ──────────────────────────────
+  //
+  // Merchant-side: set the selected theme + optional bounded
+  // branding overrides. Plan gating + config sanitization are
+  // enforced server-side; the dashboard picker uses these for
+  // optimistic UX but the authoritative check lives here.
+  //
+  // The stored `themeSlug` is NEVER reset on plan downgrade —
+  // `resolveActiveTheme()` falls back to 'classic' at render time
+  // until the plan is restored, then the stored choice resumes.
+  async setStoreTheme(
+    viewerUserId: string,
+    storeId: string,
+    body: {
+      themeSlug?: string;
+      themeConfig?: unknown; // sanitized by storefront-themes.ts
+    },
+  ) {
+    await this.assertOwner(viewerUserId, storeId);
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { id: true, plan: true },
+    });
+    if (!store) throw new NotFoundException('Store not found');
+
+    const data: Prisma.StoreUpdateInput = {};
+
+    if (body.themeSlug !== undefined) {
+      const slug = String(body.themeSlug).trim();
+      if (!isStorefrontThemeSlug(slug)) {
+        throw new BadRequestException(
+          `Unknown theme: ${slug}. Allowed: ${STOREFRONT_THEME_SLUGS.join(' | ')}`,
+        );
+      }
+      if (!isThemeEligible(store.plan, slug)) {
+        throw new ForbiddenException('هذه الواجهة تتطلب ترقية باقة المتجر');
+      }
+      data.themeSlug = slug;
+    }
+
+    if (body.themeConfig !== undefined) {
+      // null clears all overrides; otherwise sanitize through
+      // the allow-list. Unknown keys silently dropped. The cast
+      // to `InputJsonValue` is safe because sanitizeThemeConfig
+      // emits a known-shape object with primitive values plus a
+      // bounded themeSpecific dict; Prisma's stricter
+      // `InputJsonObject` rejects the open `Record<string,
+      // unknown>` index signature even though the runtime
+      // values are JSON-compatible.
+      const sanitized = sanitizeThemeConfig(body.themeConfig);
+      data.themeConfig =
+        sanitized === null
+          ? Prisma.JsonNull
+          : (sanitized as Prisma.InputJsonValue);
+    }
+
+    if (Object.keys(data).length === 0) {
+      // Nothing to do — return the current row.
+      return this.prisma.store.findUnique({
+        where: { id: storeId },
+        select: PUBLIC_STORE_SELECT,
+      });
+    }
+
+    return this.prisma.store.update({
+      where: { id: storeId },
+      data,
+      select: PUBLIC_STORE_SELECT,
+    });
+  }
+
+  // Per-metric publicity flags. Same opt-in pattern as the
+  // user-side preferencesVisibility — every key defaults to
+  // false (owner-only). The dashboard visibility page is the
+  // intended caller; the storefront primitives consume the
+  // sanitized projection produced by `applyMetricsVisibility()`
+  // below, so themes never see hidden values.
+  async setStoreMetricsVisibility(
+    viewerUserId: string,
+    storeId: string,
+    dict: unknown,
+  ) {
+    await this.assertOwner(viewerUserId, storeId);
+    const existing = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Store not found');
+    const sanitized = sanitizeMetricsVisibility(dict);
+    return this.prisma.store.update({
+      where: { id: storeId },
+      data: {
+        metricsVisibility: sanitized === null ? Prisma.JsonNull : sanitized,
+      },
+      select: PUBLIC_STORE_SELECT,
     });
   }
 

@@ -56,7 +56,15 @@ export type MerchantCapability =
   // White-glove integration support + named contact. Enterprise.
   | 'sla_support'
   // Future split-payment + held-funds gateway. Enterprise.
-  | 'split_payment';
+  | 'split_payment'
+  // Gallery storefront theme (image-led, magazine grid). Pro+.
+  // Theme gating is enforced server-side by StoreService on every
+  // theme set + every storefront render — the dispatcher reads
+  // live plan, so a downgrade falls back to Classic automatically.
+  | 'theme_gallery'
+  // Editorial storefront theme (premium serif, story-blocks).
+  // Enterprise. Same server-side enforcement.
+  | 'theme_editorial';
 
 const CAPABILITIES_BY_PLAN: Record<MerchantPlan, MerchantCapability[]> = {
   starter: ['core_storefront'],
@@ -68,6 +76,7 @@ const CAPABILITIES_BY_PLAN: Record<MerchantPlan, MerchantCapability[]> = {
     'campaigns',
     'automation',
     'advanced_analytics',
+    'theme_gallery',
   ],
   enterprise: [
     'core_storefront',
@@ -80,6 +89,8 @@ const CAPABILITIES_BY_PLAN: Record<MerchantPlan, MerchantCapability[]> = {
     'branded_gifting',
     'sla_support',
     'split_payment',
+    'theme_gallery',
+    'theme_editorial',
   ],
 };
 
