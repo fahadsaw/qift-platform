@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -19,16 +20,18 @@ import { JwtAuthGuard } from '../auth/jwt.guard';
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
 // Routes:
-//   POST   /wishes       — create a wish owned by the JWT subject.
-//   GET    /wishes/me    — list the JWT subject's wishes (public + private).
-//   PATCH  /wishes/:id   — update one of the JWT subject's wishes.
-//   DELETE /wishes/:id   — delete one of the JWT subject's wishes.
+//   POST   /wishes                       — create or upsert a wish.
+//   GET    /wishes/me                    — viewer's full wishlist (public + private).
+//   GET    /wishes/check?productId=…     — "is this product in my wishlist?"
+//   PATCH  /wishes/:id                   — update one wish (legacy fields).
+//   DELETE /wishes/:id                   — delete a specific wish.
+//   DELETE /wishes/by-product/:productId — unheart by product id (no wish-id lookup).
 //
 // Public-profile reads still live on UsersController as
 // `GET /users/:userId/wishes` (privacy-gated, public-only).
 //
-// `:id` route order: `me` declared before `:id` so the literal segment
-// wins the match.
+// Route order: literal segments (`me`, `check`, `by-product`) MUST
+// come before the parametric `:id` so the literal wins the match.
 @Controller('wishes')
 @UseGuards(JwtAuthGuard)
 export class WishesController {
@@ -44,6 +47,17 @@ export class WishesController {
     return this.service.listMine(req.user.userId);
   }
 
+  // Lightweight heart-state probe used by every surface that
+  // renders a ❤️ button. Drives the filled-vs-outline state without
+  // requiring the full wishlist payload.
+  @Get('check')
+  check(
+    @Query('productId') productId: string | undefined,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.service.checkMembership(req.user.userId, productId ?? '');
+  }
+
   @Patch(':id')
   update(
     @Param('id') id: string,
@@ -51,6 +65,18 @@ export class WishesController {
     @Req() req: AuthedRequest,
   ) {
     return this.service.update(req.user.userId, id, body);
+  }
+
+  // Symmetric unheart endpoint — the frontend doesn't have to
+  // round-trip for the wish id before deleting. Idempotent: if the
+  // product isn't wishlisted, returns ok without error so the
+  // optimistic local state stays consistent.
+  @Delete('by-product/:productId')
+  removeByProduct(
+    @Param('productId') productId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.service.removeByProduct(req.user.userId, productId);
   }
 
   @Delete(':id')

@@ -445,6 +445,7 @@ model Store {
   products  Product[]
   gifts     Gift[]
   documents StoreDocument[]
+  wishes    Wish[]
 
   @@index([ownerId])
 }
@@ -506,8 +507,22 @@ model Product {
   lastSyncedAt      DateTime?
   createdAt         DateTime  @default(now())
 
-  store Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  gifts Gift[]
+  // Denormalized counter: distinct users who have this product on
+  // their wishlist. Updated transactionally by WishesService on
+  // upsert / delete. Uniqueness is guaranteed by the
+  // @@unique([userId, productId]) on Wish — this counter and
+  // SELECT COUNT(DISTINCT userId) WHERE productId = ? should
+  // always match.
+  //
+  // Privacy: this counter is internal foundation today. Surfacing
+  // "N people want this" on the public product page is gated by
+  // a future per-product visibility flag (out of scope here); the
+  // count itself never exposes WHO wishlisted.
+  wishlistedByCount Int       @default(0)
+
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  gifts   Gift[]
+  wishes  Wish[]
 
   // Upstream platforms use their own ids; pinning uniqueness per-store
   // means the same Shopify product id can exist across two stores
@@ -901,20 +916,85 @@ model Payment {
 // no FK to the catalog yet, since wishes can refer to things outside the
 // connected stores). When wishes get linked to real Product rows later,
 // add an optional productId here next to `store`.
+// Wishlist item. The Wishlist is Qift's "❤️ destination" — every
+// product the user has expressed interest in. The schema supports
+// both legacy free-text wishes (the original shape — `title` +
+// optional `store` string) AND product-linked entries (a real
+// FK to Product, with denormalized snapshot fields for resilience
+// when the Product is later edited or deactivated).
+//
+// PRODUCT-LINKED MIGRATION (additive)
+//   - productId + storeId are new FKs.
+//   - imageUrl / price / currency / productName / storeName are
+//     denormalized snapshots taken at heart-time so the wishlist
+//     keeps rendering a real card even if the underlying Product
+//     or Store is later updated or deactivated.
+//   - title remains required for legacy compatibility — when
+//     productId is set, the writer mirrors productName into title
+//     so existing /wishes/me consumers keep working.
+//   - One wishlist row per (userId, productId) when productId is
+//     non-null. Postgres NULL semantics make `@@unique([userId,
+//     productId])` skip rows where productId IS NULL, which is
+//     exactly what we want for legacy free-text rows.
+//
+// PRIVACY
+//   - The visibility field stays per-row ('public' | 'private');
+//     orthogonal to the user's profile visibility tier.
+//   - Aggregate counts ("N people want this") are stored on the
+//     Product row (wishlistedByCount) — distinct-user count
+//     guaranteed by the unique constraint.
 model Wish {
-  id         String   @id @default(cuid())
-  userId     String
-  title      String
-  store      String?
-  // "public" | "private". Matches the frontend Wish.visibility convention.
-  visibility String   @default("public")
-  createdAt  DateTime @default(now())
+  id            String   @id @default(cuid())
+  userId        String
+  // Legacy free-text fields. Required at insert time even for
+  // product-linked rows (productName mirrors into title for
+  // backwards compat).
+  title         String
+  store         String?
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Product link (new). Null on legacy rows.
+  productId     String?
+  storeId       String?
+
+  // Denormalized snapshot — kept stable when the product is later
+  // edited so the wishlist card doesn't visually break. Refreshed
+  // on each heart-tap upsert.
+  productName   String?
+  storeName     String?
+  imageUrl      String?
+  price         Float?
+  currency      String?
+
+  // "public" | "private". Matches the frontend Wish.visibility convention.
+  visibility    String   @default("public")
+
+  // Deactivation cascade (when Product or Store deactivated).
+  // Same vocabulary as the product availability rule (see
+  // QIFT_PLATFORM_ARCHITECTURE Section 9.6).
+  deactivatedAt     DateTime?
+  deactivatedReason String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Relation field is named `linkedProduct` / `linkedStore` to
+  // avoid colliding with the legacy scalar `store: String?` field
+  // (free-text storeName for pre-v2 wishes). The scalar wins the
+  // name `store` for backwards compat; relations use the
+  // `linked*` prefix.
+  linkedProduct Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  linkedStore   Store?   @relation(fields: [storeId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   // Hot path: list a user's public wishes newest-first.
   @@index([userId, visibility, createdAt])
+  // One wishlist row per (userId, productId). Postgres treats NULL
+  // as distinct, so multiple legacy free-text rows with productId =
+  // null on the same user are still allowed.
+  @@unique([userId, productId])
+  // "N people want this" aggregate query.
+  @@index([productId])
 }
 
 // Many-to-many social graph (added in Step 2). One row = "follower
