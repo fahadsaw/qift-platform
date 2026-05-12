@@ -1022,10 +1022,24 @@ export class UsersService {
       throw new ForbiddenException('wishes_hidden');
     }
 
+    // Projection expanded to carry the product-linked snapshot fields
+    // so the public profile renders the same rich card surface as
+    // /wishlist + /profile (unified wishlist experience — see the
+    // profile identity refactor + `project_wishlist_first_class.md`).
+    // We additionally filter out rows soft-deactivated by purchase
+    // fulfillment (`purchased_for_recipient`) — those wishes were
+    // "satisfied" by an incoming gift and shouldn't be re-amplified
+    // back to gift-senders browsing the wishlist.
     const wishes = await this.prisma.wish.findMany({
       where: {
         userId: targetUserId,
         visibility: 'public',
+        OR: [
+          { deactivatedReason: null },
+          {
+            deactivatedReason: { not: 'purchased_for_recipient' },
+          },
+        ],
       },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -1033,6 +1047,14 @@ export class UsersService {
         title: true,
         store: true,
         createdAt: true,
+        productId: true,
+        storeId: true,
+        productName: true,
+        storeName: true,
+        imageUrl: true,
+        price: true,
+        currency: true,
+        deactivatedAt: true,
       },
     });
 
