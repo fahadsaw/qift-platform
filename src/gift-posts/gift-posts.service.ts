@@ -104,6 +104,7 @@ export class GiftPostsService {
         senderId: true,
         receiverId: true,
         productId: true,
+        status: true,
       },
     });
     if (!gift) throw new NotFoundException('Gift not found');
@@ -119,6 +120,16 @@ export class GiftPostsService {
           : (() => {
               throw new ForbiddenException(FORBIDDEN_MSG);
             })();
+
+    // Gift-status gate. A cancelled gift never represents a real
+    // gifting moment we want to amplify — block publish here so an
+    // admin-cancelled or sender-cancelled gift can't be retroactively
+    // posted. Note: a *publish* of an already-published gift that
+    // then gets cancelled is handled separately — GiftsService.cancel
+    // deactivates the GiftPost row downstream.
+    if (gift.status === 'cancelled') {
+      throw new BadRequestException('لا يمكن مشاركة هدية ملغاة');
+    }
 
     // GiftPost is keyed on giftId @unique — one post per gift.
     // Each side (sender / receiver) gets their own row only when we
@@ -303,53 +314,65 @@ export class GiftPostsService {
       throw new ForbiddenException(FORBIDDEN_MSG);
     }
 
-    const existing = await this.prisma.giftPostAppreciation.findUnique({
-      where: {
-        giftPostId_userId: { giftPostId: postId, userId: viewerUserId },
-      },
-    });
-
-    if (existing) {
-      // Un-appreciate path. Decrement the counter, clamping at zero
-      // defensively (the unique constraint plus this branch means we
-      // should never go negative, but the clamp is cheap).
+    // Race-safe toggle. Instead of read-then-write (where two
+    // concurrent toggle calls could both find existing=null and
+    // both try to create — second create would 500 on the unique
+    // constraint), we attempt the create optimistically and catch
+    // the unique-constraint error as the "already appreciated"
+    // signal, then run the delete+decrement path. Same pattern
+    // used elsewhere in the codebase for upsert-style toggles.
+    //
+    // The unique index on (giftPostId, userId) is the authoritative
+    // race resolver — no two concurrent calls can both succeed.
+    try {
       const updated = await this.prisma.$transaction(async (tx) => {
-        await tx.giftPostAppreciation.delete({
-          where: { id: existing.id },
+        await tx.giftPostAppreciation.create({
+          data: { giftPostId: postId, userId: viewerUserId },
         });
         return tx.giftPost.update({
           where: { id: postId },
-          data: { appreciationCount: { decrement: 1 } },
+          data: { appreciationCount: { increment: 1 } },
           select: { appreciationCount: true },
         });
       });
-      const next = Math.max(0, updated.appreciationCount);
-      // If we ever go negative, log + heal (the transaction is what
-      // it is — we can't un-decrement here without another round-trip,
-      // so just log and clamp the response).
-      if (updated.appreciationCount < 0) {
-        this.logger.warn(
-          `[gift-posts] negative appreciationCount on post ${postId}: ` +
-            `${updated.appreciationCount} — clamped to 0 in response`,
-        );
+      return {
+        appreciated: true,
+        appreciationCount: updated.appreciationCount,
+      };
+    } catch (err) {
+      // Prisma surface for "unique constraint violation" is
+      // P2002. Treat as "already appreciated, so this call is the
+      // un-appreciate gesture" and flip to the delete+decrement
+      // path. Any other error re-throws unchanged.
+      if (!isUniqueConstraintError(err)) {
+        throw err;
       }
-      return { appreciated: false, appreciationCount: next };
     }
 
+    // Un-appreciate path. Decrement the counter; clamp negatives
+    // defensively in the response (the unique constraint and the
+    // transactional create+increment make negatives near-impossible,
+    // but the clamp is cheap insurance against any future drift).
     const updated = await this.prisma.$transaction(async (tx) => {
-      await tx.giftPostAppreciation.create({
-        data: { giftPostId: postId, userId: viewerUserId },
+      await tx.giftPostAppreciation.delete({
+        where: {
+          giftPostId_userId: { giftPostId: postId, userId: viewerUserId },
+        },
       });
       return tx.giftPost.update({
         where: { id: postId },
-        data: { appreciationCount: { increment: 1 } },
+        data: { appreciationCount: { decrement: 1 } },
         select: { appreciationCount: true },
       });
     });
-    return {
-      appreciated: true,
-      appreciationCount: updated.appreciationCount,
-    };
+    const next = Math.max(0, updated.appreciationCount);
+    if (updated.appreciationCount < 0) {
+      this.logger.warn(
+        `[gift-posts] negative appreciationCount on post ${postId}: ` +
+          `${updated.appreciationCount} — clamped to 0 in response`,
+      );
+    }
+    return { appreciated: false, appreciationCount: next };
   }
 
   // Look up the post for a specific gift, owned by the viewer. Used
@@ -393,6 +416,15 @@ export class GiftPostsService {
           storeId: true,
           productName: true,
           storeName: true,
+          // Pull the product image at view time (single-source-of-
+          // truth rule from `project_product_media_single_source.md`).
+          // Joining here avoids an N+1 when listMine / listByUser
+          // render walls with many rows. product may be null when
+          // the Product was deleted (FK is ON DELETE SET NULL); we
+          // null-coalesce in toView. The relation name `product` is
+          // the Gift model's own (Wish uses `linkedProduct` only
+          // because of a legacy scalar-name collision).
+          product: { select: { imageUrl: true } },
           sender: {
             select: { qiftUsername: true, fullName: true },
           },
@@ -436,6 +468,7 @@ export class GiftPostsService {
         storeName: row.gift.storeName,
         productId: row.gift.productId ?? null,
         storeId: row.gift.storeId ?? null,
+        productImageUrl: row.gift.product?.imageUrl ?? null,
         sender: row.gift.sender,
         receiver: row.gift.receiver,
       },
@@ -473,6 +506,14 @@ export class GiftPostsService {
     return post;
   }
 
+  // Narrow check for Prisma's unique-constraint violation. We don't
+  // import the full Prisma error namespace to keep this module
+  // dependency-light; checking the `code` field on the error object
+  // is the documented contract and stable across minor Prisma
+  // versions.
+  // (Helper kept inside the class body so future toggles can share
+  // it without exporting Prisma error plumbing module-wide.)
+
   // crypto-grade slug; collision-retry loop bounded so we never spin
   // forever in the pathological case.
   private async generateUniqueSlug(): Promise<string> {
@@ -492,4 +533,14 @@ export class GiftPostsService {
     // upstream (e.g. randomBytes returning a constant in a test mock).
     throw new Error('Could not generate a unique gift-post slug');
   }
+}
+
+// Module-level helper so the toggle path can detect Prisma's
+// unique-constraint violation without importing the full Prisma
+// error class. The `code` field is part of the documented Prisma
+// client error shape.
+function isUniqueConstraintError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  return code === 'P2002';
 }

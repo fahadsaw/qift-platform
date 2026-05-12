@@ -792,6 +792,34 @@ export class GiftsService {
       }
     }
 
+    // GiftPost cascade. A published gift-post advertises a gifting
+    // moment that — if the gift is cancelled — no longer happened.
+    // Soft-deactivate the post so it disappears from /u/<username>
+    // walls and the /p/<slug> share page, and the public surface
+    // doesn't keep promoting a non-event.
+    //
+    // We do NOT delete the row (publicSlug + appreciationCount stay
+    // intact); if the situation is reversed downstream (admin un-
+    // cancels, etc.) the operator can clear deactivatedAt + reason.
+    // Same vocabulary as the wishlist deactivation pattern.
+    //
+    // Hook is non-fatal: a failure here does not roll back the gift
+    // cancellation. The receiver-notification and the gift state
+    // change have already happened.
+    try {
+      await this.prisma.giftPost.updateMany({
+        where: { giftId: gift.id, deactivatedAt: null },
+        data: {
+          deactivatedAt: new Date(),
+          deactivatedReason: 'gift_cancelled',
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[gifts] gift-post cancel-deactivation failed for giftId=${gift.id}: ${(err as Error).message}`,
+      );
+    }
+
     // Notify the receiver. We don't notify the sender — they just
     // performed the action and don't need a self-notification.
     void this.notifications.trigger({

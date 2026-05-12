@@ -53,8 +53,18 @@ export type GiftPostView = {
   // available" placeholder in that case.
   productId: string | null;
   storeId: string | null;
+  // Product image — single-source-of-truth URL from the linked
+  // Product row. We do NOT copy the binary; the post and the
+  // wishlist and any other surface that wants to render the
+  // product all pull from the same pointer. Null when the post
+  // is deactivated or the linked Product was deleted (matches
+  // the `productId === null` projection). See
+  // `project_product_media_single_source.md`.
+  productImageUrl: string | null;
   // Stable URL the post links into. Empty when the post is
-  // deactivated.
+  // deactivated. When productId is present, the link deep-links
+  // to the specific product on the store page so the viewer
+  // lands directly on what was gifted, not the storefront index.
   productHref: string | null;
   // Identity slots: present + populated only when the matching
   // reveal flag is true. Otherwise null and the UI renders an
@@ -85,6 +95,11 @@ export type GiftPostInputs = {
     storeName: string;
     productId: string | null;
     storeId: string | null;
+    // Product image, sourced from the linked Product row at read
+    // time (NOT denormalized onto Gift). Null when no Product is
+    // linked (legacy / sample gifts) or when the Product was
+    // deleted. The service layer does the join.
+    productImageUrl: string | null;
     sender: { qiftUsername: string; fullName: string | null } | null;
     receiver: { qiftUsername: string; fullName: string | null } | null;
   };
@@ -126,10 +141,17 @@ export function buildGiftPostView(input: GiftPostInputs): GiftPostView {
     storeName: gift.storeName,
     productId: deactivated ? null : gift.productId,
     storeId: deactivated ? null : gift.storeId,
+    productImageUrl: deactivated ? null : gift.productImageUrl,
+    // Deep-link to the product when we have one (`?product=<id>` is
+    // the storefront's product-modal convention; see
+    // /stores/[id]/page.tsx). Falls back to the storefront index
+    // when only storeId is known.
     productHref:
-      deactivated || !gift.productId || !gift.storeId
+      deactivated || !gift.storeId
         ? null
-        : `/stores/${gift.storeId}`,
+        : gift.productId
+          ? `/stores/${gift.storeId}?product=${gift.productId}`
+          : `/stores/${gift.storeId}`,
     senderUsername: showSender ? (gift.sender?.qiftUsername ?? null) : null,
     senderName: showSender ? (gift.sender?.fullName ?? null) : null,
     receiverUsername: showReceiver

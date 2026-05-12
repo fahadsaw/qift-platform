@@ -31,6 +31,7 @@ type MockPrisma = {
   giftAttempt: { create: jest.Mock; findFirst: jest.Mock };
   address: { count: jest.Mock; findFirst: jest.Mock; findUnique: jest.Mock };
   wish: { updateMany: jest.Mock };
+  giftPost: { updateMany: jest.Mock };
   store: { findUnique: jest.Mock };
   product: { findUnique: jest.Mock };
 };
@@ -51,6 +52,13 @@ function createPrismaMock(): MockPrisma {
       findUnique: jest.fn(),
     },
     wish: { updateMany: jest.fn() },
+    // GiftPost cancel-cascade hook. Each cancel test sets a return
+    // value so the count assertion can verify whether the row was
+    // touched. Default `count: 0` means "no published post for this
+    // gift" — the legacy / no-product cancel path.
+    giftPost: {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
     store: { findUnique: jest.fn() },
     product: { findUnique: jest.fn() },
   };
@@ -390,6 +398,39 @@ describe('GiftsService — wishlist purchase fulfillment hook', () => {
       await service.cancel('gift_legacy', SENDER_ID);
 
       expect(prisma.wish.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('soft-deactivates any published GiftPost for the cancelled gift', async () => {
+      setupCancellableGift();
+      // Pretend a published post exists for this gift — the cascade
+      // hook should match it and the updateMany returns count=1.
+      prisma.giftPost.updateMany.mockResolvedValue({ count: 1 });
+
+      await service.cancel('gift_1', SENDER_ID);
+
+      expect(prisma.giftPost.updateMany).toHaveBeenCalledTimes(1);
+      const call = prisma.giftPost.updateMany.mock.calls[0][0];
+      // Privacy + correctness: the cascade matches strictly on
+      // (giftId, deactivatedAt: null) so a previously-deactivated
+      // post is not touched, and only the published post for THIS
+      // specific gift is affected — no cross-user collateral.
+      expect(call.where).toEqual({ giftId: 'gift_1', deactivatedAt: null });
+      // Reason is the operator-visible breadcrumb; never carries
+      // buyer identity or the cancelling user id.
+      expect(call.data).toEqual({
+        deactivatedAt: expect.any(Date),
+        deactivatedReason: 'gift_cancelled',
+      });
+    });
+
+    it('does not block the cancel when the GiftPost cascade fails', async () => {
+      setupCancellableGift();
+      prisma.giftPost.updateMany.mockRejectedValue(
+        new Error('db down for this hook'),
+      );
+
+      // Cancel still succeeds end-to-end — the hook is best-effort.
+      await expect(service.cancel('gift_1', SENDER_ID)).resolves.toBeDefined();
     });
   });
 });
