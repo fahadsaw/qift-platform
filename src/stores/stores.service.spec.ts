@@ -145,32 +145,34 @@ describe('Storefront themes — pure helpers', () => {
     });
 
     it('coerces known keys to strict booleans, drops unknown', () => {
+      // Storefront refinement: dropped keys (purchaseCount,
+      // soldCount, etc.) are no longer in METRICS_VISIBILITY_KEYS
+      // so they get treated as "unknown" by the sanitizer — same
+      // path as a key the merchant invented.
       const out = sanitizeMetricsVisibility({
         wishlistSaves: true,
-        purchaseCount: 'yes', // truthy string but NOT strict true
-        unknownMetric: true,
+        giftedCount: 'yes', // truthy string but NOT strict true
+        unknownMetric: true, // not in allow-list — silently dropped
+        purchaseCount: true, // dropped from V1 allow-list — also dropped here
       });
-      // wishlistSaves is true; purchaseCount becomes false (strict !== true);
-      // unknownMetric silently dropped.
+      // wishlistSaves stays true; giftedCount coerces to false
+      // (strict !== true); both unknown / dropped keys are
+      // silently filtered out.
       expect(out).toEqual({
         wishlistSaves: true,
-        purchaseCount: false,
+        giftedCount: false,
       });
     });
 
     it('readMetricsVisibility tolerates malformed DB rows as all-false', () => {
       // JSON column drift / pre-migration row could land as null or
-      // a non-object — fall through to all-false.
+      // a non-object — fall through to all-false on the trimmed
+      // V1 key set.
       const out1 = readMetricsVisibility(null);
       const out2 = readMetricsVisibility('not an object');
       for (const out of [out1, out2]) {
         expect(out.wishlistSaves).toBe(false);
-        expect(out.purchaseCount).toBe(false);
         expect(out.giftedCount).toBe(false);
-        expect(out.popularityScore).toBe(false);
-        expect(out.ratingsCount).toBe(false);
-        expect(out.stockCount).toBe(false);
-        expect(out.soldCount).toBe(false);
         expect(out.trendingIndicator).toBe(false);
       }
     });
@@ -310,15 +312,15 @@ describe('StoresService — Phase 5 (theme + visibility)', () => {
 
       await service.setStoreMetricsVisibility('owner_1', 'store_a', {
         wishlistSaves: true,
-        unknownMetric: true,
+        unknownMetric: true, // not in allow-list — dropped
         // truthy non-true coerces to false (strict bool)
-        purchaseCount: 'yes',
+        giftedCount: 'yes',
       });
 
       const data = prisma.store.update.mock.calls[0][0].data;
       expect(data.metricsVisibility).toEqual({
         wishlistSaves: true,
-        purchaseCount: false,
+        giftedCount: false,
       });
     });
 

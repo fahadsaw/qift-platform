@@ -158,15 +158,37 @@ export function sanitizeThemeConfig(input: unknown): StoreThemeConfig | null {
 // preferencesVisibility (Phase 2). Per-field opt-in basis —
 // every key defaults to false (owner-only). Unknown keys
 // silently dropped; values coerced to strict boolean.
-
+//
+// V1 ships THREE gifting-emotional signals. The previous draft
+// included five additional keys (purchaseCount, soldCount,
+// stockCount, ratingsCount, popularityScore) that were either
+// "aggressive ecommerce" framings or required schemas Qift
+// hasn't built yet. They were trimmed in the storefront
+// refinement pass — see commit notes for the philosophy:
+//
+//   - stockCount: "only N left" is the most aggressive scarcity
+//     pressure tactic in ecommerce. Anti-Qift.
+//   - purchaseCount / soldCount: redundant with giftedCount in
+//     a gifting context, and read as "sales dashboard".
+//   - popularityScore: vague composite; trendingIndicator
+//     already covers "this is having a moment" calmly.
+//   - ratingsCount: legitimate gifting signal IF anonymized,
+//     but requires the ProductRating model + a way to create
+//     ratings (still unbuilt — `project_gift_post_ratings.md`
+//     specifies the target shape). Deferred to its own feature
+//     phase rather than shipped as another no-source toggle.
+//
+// What remains is intentional and complete: three calm signals
+// that all speak to gifting trust.
 export const METRICS_VISIBILITY_KEYS = [
+  // "N people love this" — wishlist density as social proof.
   'wishlistSaves',
-  'purchaseCount',
+  // "N gifted" — the canonical Qift signal. Stronger than a
+  // raw sales count because it specifically means "people
+  // picked this AS A GIFT".
   'giftedCount',
-  'popularityScore',
-  'ratingsCount',
-  'stockCount',
-  'soldCount',
+  // A boolean badge — no numbers, no pressure. Surfaces when
+  // the product is having a recent engagement moment.
   'trendingIndicator',
 ] as const;
 export type MetricsVisibilityKey = (typeof METRICS_VISIBILITY_KEYS)[number];

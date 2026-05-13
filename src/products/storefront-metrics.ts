@@ -20,16 +20,19 @@
 //      each key on (mirrors User.preferencesVisibility — same
 //      opt-in basis).
 //
-// V1 metric sources:
+// V1 metric sources — three gifting-emotional signals:
 //
 //   wishlistSaves      → Product.wishlistedByCount (denormalized)
 //   giftedCount        → Product.giftedByCount (denormalized)
 //   trendingIndicator  → Product.trendingAt within TRENDING_WINDOW
-//   {other keys}       → no source yet; the projection NEVER ships
-//                        the key (so the visibility dashboard can
-//                        already toggle them on without a leak
-//                        risk; once a source lands, the chip
-//                        starts rendering automatically).
+//
+// The set was deliberately trimmed in the storefront refinement
+// pass — see METRICS_VISIBILITY_KEYS in storefront-themes.ts for
+// the philosophy. Adding a new metric is: one entry in
+// METRICS_VISIBILITY_KEYS, one case in resolveMetricValue, one
+// translation pair. The exhaustiveness guard at the bottom of
+// the switch ensures TypeScript catches every site that needs
+// to be updated.
 //
 // See `project_storefront_architecture.md` Section 11 +
 // `apps/api/src/stores/storefront-themes.ts`
@@ -56,12 +59,7 @@ export const TRENDING_HEART_THRESHOLD = 3;
 // stay one-line.
 export type ProjectedMetrics = {
   wishlistSaves?: number;
-  purchaseCount?: number;
   giftedCount?: number;
-  popularityScore?: number;
-  ratingsCount?: number;
-  stockCount?: number;
-  soldCount?: number;
   trendingIndicator?: boolean;
 };
 
@@ -132,19 +130,6 @@ function resolveMetricValue(
       // Boolean only — the raw timestamp NEVER reaches the wire.
       if (!source.trendingAt) return false;
       return now.getTime() - source.trendingAt.getTime() < TRENDING_WINDOW_MS;
-
-    case 'purchaseCount':
-    case 'soldCount':
-    case 'stockCount':
-    case 'ratingsCount':
-    case 'popularityScore':
-      // No source wired yet. Returning undefined keeps the key
-      // OFF the wire even though the merchant flipped it on —
-      // the dashboard remains usable (no error) but the chip
-      // simply doesn't render. When a source lands, this case
-      // gets a value and the chip starts rendering with zero
-      // frontend changes.
-      return undefined;
 
     default: {
       // Exhaustiveness guard. If a new key is added to

@@ -157,11 +157,13 @@ describe('projectStorefrontMetrics', () => {
     });
   });
 
-  describe('unsourced metrics (purchaseCount, soldCount, etc.)', () => {
-    it('NEVER reaches the wire even when opted in (no source = no key)', () => {
-      // The merchant flipped these on in the dashboard — but the
-      // backend hasn't wired sources for them yet. The contract
-      // says: don't render the chip until the value is real.
+  describe('unknown keys (dropped from V1 allow-list)', () => {
+    it('keys not in METRICS_VISIBILITY_KEYS are silently dropped', () => {
+      // V1 dropped purchaseCount / soldCount / stockCount /
+      // ratingsCount / popularityScore from the allow-list (see
+      // storefront-themes.ts for the philosophy). A merchant who
+      // somehow gets one of these keys into their stored dict
+      // (e.g. from a pre-trim cache) must NOT have it surface.
       const out = projectStorefrontMetrics(source({ wishlistedByCount: 5 }), {
         purchaseCount: true,
         soldCount: true,
@@ -169,18 +171,19 @@ describe('projectStorefrontMetrics', () => {
         ratingsCount: true,
         popularityScore: true,
       });
-      // None of the unsourced keys appear; the function returns
-      // undefined because no sourced key was opted in.
+      // readMetricsVisibility filters to METRICS_VISIBILITY_KEYS,
+      // so none of the dropped keys propagate. With no recognized
+      // key opted in, the projection returns undefined.
       expect(out).toBeUndefined();
     });
 
-    it('returns ONLY the sourced opted-in keys when both kinds are mixed', () => {
+    it('returns ONLY the recognized opted-in keys when both kinds are mixed', () => {
       const out = projectStorefrontMetrics(
         source({ wishlistedByCount: 5, giftedByCount: 3 }),
         {
           wishlistSaves: true,
           giftedCount: true,
-          purchaseCount: true /* unsourced */,
+          purchaseCount: true /* dropped from allow-list */,
         },
       );
       expect(out).toEqual({ wishlistSaves: 5, giftedCount: 3 });
@@ -245,11 +248,6 @@ describe('projectStorefrontMetrics', () => {
         wishlistSaves: false,
         giftedCount: false,
         trendingIndicator: false,
-        purchaseCount: false,
-        soldCount: false,
-        stockCount: false,
-        ratingsCount: false,
-        popularityScore: false,
       });
       expect(out).toBeUndefined();
     });
