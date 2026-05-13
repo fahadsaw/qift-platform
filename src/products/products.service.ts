@@ -20,6 +20,16 @@ const PUBLIC_PRODUCT_SELECT = {
   isAvailable: true,
   lastSyncedAt: true,
   createdAt: true,
+  // Phase 5 storefront gallery — ordered product media for the
+  // theme's hero. The first row (displayOrder = 0) mirrors
+  // `imageUrl`; downstream consumers that only need the primary
+  // can keep reading `imageUrl`. The storefront theme renderer
+  // uses the full list for galleries (perfumes, jewelry, gift
+  // sets benefit most). No binary copy — URL pointers only.
+  images: {
+    select: { url: true, displayOrder: true },
+    orderBy: { displayOrder: 'asc' as const },
+  },
 } as const;
 
 export type CreateProductInput = {
