@@ -107,14 +107,6 @@ model User {
   // senders. UI gate only; backend doesn't currently enforce it on
   // gift create.
   acceptsSurpriseGifts  Boolean @default(true)
-  // Gender hint for gift-sender context. Strictly opt-in via the
-  // preferencesVisibility allow-list (key: 'gender'). V1 accepts
-  // 'male' | 'female' | NULL. Drives optional UI-side affordances
-  // on /preferences (e.g. localised clothing-size labels) and
-  // surfaces as a chip on the public profile when shared. NO
-  // platform feature treats men/women differently in commerce —
-  // this is purely a hint for human gift-senders.
-  gender                String?
   // Free-form note from the owner to gift senders. Capped on
   // write at 280 chars (server enforces). Opt-in shareable via
   // preferencesVisibility key 'giftNote'. Examples:
@@ -129,7 +121,7 @@ model User {
   // a schema migration. Default null = ALL private (owner-only). The
   // shape is a small `{ <field>: boolean }` object; recognized keys:
   //   clothingSize | shoeSize | ringSize | fragrance | colors |
-  //   categories | brands | allergies | surprises | gender | giftNote
+  //   categories | brands | allergies | surprises | giftNote
   // The public-profile endpoint reads this to decide which
   // preference fields to project into the response. Per-field
   // privacy is opt-in: each flag defaults to false until the owner

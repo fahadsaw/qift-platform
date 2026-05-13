@@ -130,7 +130,6 @@ export class UsersService {
           favoriteBrands: true,
           allergies: true,
           acceptsSurpriseGifts: true,
-          gender: true,
           giftNote: true,
           // Per-field publicity dict for /preferences. Owner-only.
           preferencesVisibility: true,
@@ -329,10 +328,6 @@ export class UsersService {
       favoriteBrands?: string | null;
       allergies?: string | null;
       acceptsSurpriseGifts?: boolean;
-      // 'male' | 'female' | null — strict allow-list enforced
-      // below. UI-only signal for gift senders; no commerce path
-      // treats men/women differently.
-      gender?: string | null;
       // Free-form note from the owner to gift senders. Capped at
       // 280 chars below (longer than other preference fields
       // because the note can carry a sentence or two).
@@ -340,7 +335,7 @@ export class UsersService {
       // Per-field publicity dict — opt-in basis (every key defaults
       // to false). Keys: clothingSize | shoeSize | ringSize |
       // fragrance | colors | categories | brands | allergies |
-      // surprises | gender | giftNote. Unknown keys are filtered
+      // surprises | giftNote. Unknown keys are filtered
       // server-side.
       preferencesVisibility?: Record<string, boolean> | null;
     },
@@ -381,20 +376,6 @@ export class UsersService {
     }
     Object.assign(data, strBag);
 
-    // Gender: strict allow-list. Anything else (other strings,
-    // empty string after trim, non-string) reads as "clear the
-    // field" so a misconfigured client can't pollute the column.
-    if (body.gender !== undefined) {
-      if (body.gender === null) {
-        data.gender = null;
-      } else if (body.gender === 'male' || body.gender === 'female') {
-        data.gender = body.gender;
-      } else {
-        // Reject silently — set to null. The frontend allow-list
-        // matches; this branch only fires on a buggy client.
-        data.gender = null;
-      }
-    }
     // Gift note: same shape as the other strings but with a longer
     // cap (280 chars). Trimmed; empty-after-trim → null.
     if (body.giftNote !== undefined) {
@@ -430,7 +411,6 @@ export class UsersService {
           'brands',
           'allergies',
           'surprises',
-          'gender',
           'giftNote',
         ] as const;
         const clean: Record<string, boolean> = {};
@@ -846,7 +826,6 @@ export class UsersService {
         favoriteBrands: true,
         allergies: true,
         acceptsSurpriseGifts: true,
-        gender: true,
         giftNote: true,
         preferencesVisibility: true,
       },
@@ -1371,7 +1350,6 @@ type PreferencesVisibilityKey =
   | 'brands'
   | 'allergies'
   | 'surprises'
-  | 'gender'
   | 'giftNote';
 
 export type OwnerPreferences = {
@@ -1384,7 +1362,6 @@ export type OwnerPreferences = {
   favoriteBrands: string | null;
   allergies: string | null;
   acceptsSurpriseGifts: boolean | null;
-  gender: string | null;
   giftNote: string | null;
   preferencesVisibility: unknown;
 };
@@ -1399,7 +1376,6 @@ export type PublicPreferences = {
   brands?: string;
   allergies?: string;
   acceptsSurpriseGifts?: boolean;
-  gender?: string;
   giftNote?: string;
 };
 
@@ -1462,14 +1438,6 @@ export function buildPublicPreferencesProjection(
     // when opted-in — even false matters for the gift-sender flow.
     out.acceptsSurpriseGifts = owner.acceptsSurpriseGifts ?? true;
   }
-  if (flags.gender && owner.gender) {
-    // Validate against the allow-list — a corrupted row with an
-    // unrecognised value stays hidden so the chip never renders
-    // something nonsensical.
-    if (owner.gender === 'male' || owner.gender === 'female') {
-      out.gender = owner.gender;
-    }
-  }
   if (flags.giftNote && owner.giftNote) {
     out.giftNote = owner.giftNote;
   }
@@ -1495,7 +1463,6 @@ function readVisibilityFlags(
     'brands',
     'allergies',
     'surprises',
-    'gender',
     'giftNote',
   ];
   const out = {} as Record<PreferencesVisibilityKey, boolean>;

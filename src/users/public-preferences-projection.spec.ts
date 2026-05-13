@@ -34,7 +34,6 @@ const fullSource = (visibility: unknown): OwnerPreferences => ({
   favoriteBrands: 'Chanel',
   allergies: 'no nuts',
   acceptsSurpriseGifts: false,
-  gender: 'female',
   giftNote: 'I prefer practical gifts',
   preferencesVisibility: visibility,
 });
@@ -223,7 +222,6 @@ describe('buildPublicPreferencesProjection', () => {
           flag: 'surprises',
           expected: { acceptsSurpriseGifts: false },
         },
-        { flag: 'gender', expected: { gender: 'female' } },
         {
           flag: 'giftNote',
           expected: { giftNote: 'I prefer practical gifts' },
@@ -277,40 +275,6 @@ describe('buildPublicPreferencesProjection', () => {
       };
       const out = buildPublicPreferencesProjection(owner);
       expect(out).toBeNull();
-    });
-  });
-
-  describe('gender allow-list', () => {
-    it('surfaces "male" / "female" when opted in', () => {
-      for (const value of ['male', 'female']) {
-        const owner: OwnerPreferences = {
-          ...fullSource({ gender: true }),
-          gender: value,
-        };
-        expect(buildPublicPreferencesProjection(owner)).toEqual({
-          gender: value,
-        });
-      }
-    });
-
-    it('drops unrecognised gender values defensively', () => {
-      // A corrupted row with a non-allow-list value must NOT surface
-      // any string on the public chip.
-      for (const value of ['unspecified', 'other', '', 'M', 'female ']) {
-        const owner: OwnerPreferences = {
-          ...fullSource({ gender: true }),
-          gender: value,
-        };
-        expect(buildPublicPreferencesProjection(owner)).toBeNull();
-      }
-    });
-
-    it('drops gender when the visibility flag is off, regardless of value', () => {
-      const owner: OwnerPreferences = {
-        ...fullSource({}),
-        gender: 'female',
-      };
-      expect(buildPublicPreferencesProjection(owner)).toBeNull();
     });
   });
 

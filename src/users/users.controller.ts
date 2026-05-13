@@ -117,8 +117,6 @@ export class UsersController {
       favoriteBrands?: string | null;
       allergies?: string | null;
       acceptsSurpriseGifts?: boolean;
-      // 'male' | 'female' | null. UI-only hint for gift senders.
-      gender?: string | null;
       // Free-text note (≤ 280 chars). Plain text only.
       giftNote?: string | null;
       // Per-field publicity for the public profile preferences

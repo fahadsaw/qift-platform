@@ -1,0 +1,21 @@
+-- Remove the User.gender column added one migration ago
+-- (20260520000000_user_gender_giftnote). The "Preference type"
+-- selector that this column powered was simplified out of the UI:
+-- the curated category subsets felt artificial and added cognitive
+-- weight without real benefit, since all OTHER preference fields
+-- stay universal.
+--
+-- This is a SIMPLIFICATION pass — the structured preferences
+-- system, per-field visibility model, and public profile tab all
+-- stay. Only the gender / preference-type layer goes.
+--
+-- If a future iteration needs recommendation segmentation, AI
+-- gifting personalization, or storefront targeting, that work
+-- will introduce its own field(s) with a fresh migration — not
+-- a re-use of this column.
+--
+-- Data impact: any non-null gender values written between the
+-- 20260520 migration and now are discarded. The column was added
+-- ~1 day ago; production data carrying meaningful values is
+-- minimal to none.
+ALTER TABLE "User" DROP COLUMN IF EXISTS "gender";
