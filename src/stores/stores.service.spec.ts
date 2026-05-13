@@ -221,9 +221,11 @@ describe('StoresService — Phase 5 (theme + visibility)', () => {
       // (some implementations use findUnique) and the post-assert
       // store load. Either way, an unknown slug rejects BEFORE
       // anything touches the DB beyond the plan read.
-      const owner = jest
-        .spyOn(service, 'assertOwner')
-        .mockResolvedValue({ id: 'store_a', ownerId: 'owner_1', status: 'active' });
+      const owner = jest.spyOn(service, 'assertOwner').mockResolvedValue({
+        id: 'store_a',
+        ownerId: 'owner_1',
+        status: 'active',
+      });
       await expect(
         service.setStoreTheme('owner_1', 'store_a', {
           themeSlug: 'totally-fake-theme',
@@ -235,7 +237,11 @@ describe('StoresService — Phase 5 (theme + visibility)', () => {
 
     it('rejects a theme that requires a higher plan than the store has', async () => {
       mockOwned('starter');
-      jest.spyOn(service, 'assertOwner').mockResolvedValue({ id: 'store_a', ownerId: 'owner_1', status: 'active' });
+      jest.spyOn(service, 'assertOwner').mockResolvedValue({
+        id: 'store_a',
+        ownerId: 'owner_1',
+        status: 'active',
+      });
       // Gallery requires Pro+; starter merchant tries → 403.
       await expect(
         service.setStoreTheme('owner_1', 'store_a', { themeSlug: 'gallery' }),
@@ -245,7 +251,11 @@ describe('StoresService — Phase 5 (theme + visibility)', () => {
 
     it('persists themeSlug + sanitized themeConfig when both plan and config are valid', async () => {
       mockOwned('enterprise');
-      jest.spyOn(service, 'assertOwner').mockResolvedValue({ id: 'store_a', ownerId: 'owner_1', status: 'active' });
+      jest.spyOn(service, 'assertOwner').mockResolvedValue({
+        id: 'store_a',
+        ownerId: 'owner_1',
+        status: 'active',
+      });
       prisma.store.update.mockResolvedValue({
         id: 'store_a',
         themeSlug: 'editorial',
@@ -270,7 +280,11 @@ describe('StoresService — Phase 5 (theme + visibility)', () => {
 
     it('clears themeConfig when null is passed', async () => {
       mockOwned('pro');
-      jest.spyOn(service, 'assertOwner').mockResolvedValue({ id: 'store_a', ownerId: 'owner_1', status: 'active' });
+      jest.spyOn(service, 'assertOwner').mockResolvedValue({
+        id: 'store_a',
+        ownerId: 'owner_1',
+        status: 'active',
+      });
       prisma.store.update.mockResolvedValue({});
 
       await service.setStoreTheme('owner_1', 'store_a', {
@@ -287,7 +301,11 @@ describe('StoresService — Phase 5 (theme + visibility)', () => {
   describe('setStoreMetricsVisibility', () => {
     it('persists only known keys with strict-boolean values', async () => {
       mockOwned('starter');
-      jest.spyOn(service, 'assertOwner').mockResolvedValue({ id: 'store_a', ownerId: 'owner_1', status: 'active' });
+      jest.spyOn(service, 'assertOwner').mockResolvedValue({
+        id: 'store_a',
+        ownerId: 'owner_1',
+        status: 'active',
+      });
       prisma.store.update.mockResolvedValue({});
 
       await service.setStoreMetricsVisibility('owner_1', 'store_a', {
@@ -306,7 +324,11 @@ describe('StoresService — Phase 5 (theme + visibility)', () => {
 
     it('clears the column when nothing is opted in', async () => {
       mockOwned('starter');
-      jest.spyOn(service, 'assertOwner').mockResolvedValue({ id: 'store_a', ownerId: 'owner_1', status: 'active' });
+      jest.spyOn(service, 'assertOwner').mockResolvedValue({
+        id: 'store_a',
+        ownerId: 'owner_1',
+        status: 'active',
+      });
       prisma.store.update.mockResolvedValue({});
 
       await service.setStoreMetricsVisibility('owner_1', 'store_a', {});
