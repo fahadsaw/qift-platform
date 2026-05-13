@@ -21,12 +21,27 @@ import {
   type OccasionKind,
 } from './occasion-kinds';
 import {
-  canSeeOccasion,
   type OccasionVisibility,
   type ViewerContext,
 } from './occasion-privacy';
-import { nextOccurrence, type OccasionDateSpec } from './occasion-recurrence';
 import type { Calendar } from '../lib/hijri';
+import {
+  projectOwnOccasion,
+  projectOccasionForViewer,
+  sortUpcoming,
+  type OccasionRow,
+  type OwnerSummary,
+  type PublicOccasion,
+  type RelationshipOccasion,
+} from './occasion-projection';
+
+// Re-exported so controllers / sibling modules don't need to
+// reach into the projection helper directly. The service is the
+// stable seam.
+export type {
+  PublicOccasion,
+  RelationshipOccasion,
+} from './occasion-projection';
 
 const LABEL_MAX = 80;
 const VALID_CALENDARS: ReadonlyArray<Calendar> = ['gregorian', 'hijri'];
@@ -60,26 +75,14 @@ export type CreateReminderInput = {
   enabled?: boolean;
 };
 
-// Row shape projected over the wire. Strips the raw `userId` /
-// `deactivatedAt` from public reads (visitor doesn't need them);
-// keeps the canonical date triple + the resolved next-occurrence
-// Date for the rendering layer.
-export type PublicOccasion = {
-  id: string;
-  kind: string;
-  label: string | null;
-  calendar: Calendar;
-  year: number | null;
-  month: number;
-  day: number;
-  recurrence: 'once' | 'yearly';
-  visibility: OccasionVisibility;
-  regionCode: string | null;
-  relatedUserId: string | null;
-  // Resolved at read time so the UI never has to do calendar math.
-  // ISO string; the renderer formats per locale.
-  nextOccurrenceAt: string | null;
-};
+// Default window for the upcoming-for-followed feed. Wide enough
+// to surface the next month of activity without flooding the UI;
+// the caller can override via `windowDays` in the query string.
+const DEFAULT_UPCOMING_WINDOW_DAYS = 30;
+// Hard cap on the upcoming feed. Prevents accidental flooding when
+// a user follows thousands of accounts; the UI is expected to
+// paginate / lazy-load if a user genuinely needs more.
+const UPCOMING_HARD_LIMIT = 100;
 
 @Injectable()
 export class OccasionsService {
@@ -147,7 +150,7 @@ export class OccasionsService {
       }
     }
 
-    return this.toPublic(occasion);
+    return projectOwnOccasion(occasion, new Date());
   }
 
   // Owner's full list. Includes soft-deleted? No — the /occasions
@@ -158,7 +161,8 @@ export class OccasionsService {
       where: { userId: viewerId, deactivatedAt: null },
       orderBy: { createdAt: 'desc' },
     });
-    return rows.map((r) => this.toPublic(r));
+    const now = new Date();
+    return rows.map((r) => projectOwnOccasion(r, now));
   }
 
   // Single-occasion read by id. Auth-gated to the owner — public
@@ -169,7 +173,7 @@ export class OccasionsService {
       where: { id, userId: viewerId, deactivatedAt: null },
     });
     if (!row) throw new NotFoundException('occasion_not_found');
-    return this.toPublic(row);
+    return projectOwnOccasion(row, new Date());
   }
 
   // Update. Partial PATCH; validates only the fields present.
@@ -188,7 +192,7 @@ export class OccasionsService {
       where: { id },
       data: patch,
     });
-    return this.toPublic(row);
+    return projectOwnOccasion(row, new Date());
   }
 
   // Soft-delete. The architecture deliberately preserves the row
@@ -210,14 +214,18 @@ export class OccasionsService {
   // ── Public read: another user's occasions ───────────────────
 
   // Return the OWNER's occasions that the VIEWER is allowed to
-  // see. The privacy filter runs PER ROW — different rows on the
-  // same profile can have different visibility tiers, and the
-  // result reflects exactly what the viewer would see if they
-  // looked at the owner's profile.
+  // see, in the relationship-safe projection shape. The privacy
+  // filter runs PER ROW — different rows on the same profile can
+  // have different visibility tiers, and the result reflects
+  // exactly what the viewer would see on the owner's profile.
+  //
+  // `owner` is omitted from each row's projection because the
+  // route already identifies the owner (/users/:id/occasions).
+  // The feed-style upcoming endpoint, in contrast, attaches it.
   async listForUser(
     viewerId: string,
     ownerId: string,
-  ): Promise<PublicOccasion[]> {
+  ): Promise<RelationshipOccasion[]> {
     // Resolve the relationship context ONCE (block + follow
     // edges), then filter per row in memory — saves N+1 follow
     // queries when the owner has multiple occasions.
@@ -226,13 +234,125 @@ export class OccasionsService {
       where: { userId: ownerId, deactivatedAt: null },
       orderBy: { createdAt: 'desc' },
     });
-    const visible = rows.filter((r) =>
-      canSeeOccasion(ctx, {
-        userId: r.userId,
-        visibility: r.visibility as OccasionVisibility,
-      }),
+    const now = new Date();
+    const projected = rows
+      .map((r) => projectOccasionForViewer(ctx, r as OccasionRow, now))
+      .filter((p): p is RelationshipOccasion => p !== null);
+    return projected;
+  }
+
+  // Upcoming-for-followed feed. Returns occasions belonging to
+  // users the VIEWER currently follows (status='accepted'), within
+  // the next `windowDays` days, ordered by soonest-first.
+  //
+  // Privacy: every row routes through projectOccasionForViewer,
+  // which fails closed on any visibility tier the viewer doesn't
+  // satisfy. Block-list is applied as a pre-filter so we never
+  // even fetch the blocked accounts' rows.
+  //
+  // Scalability: the relationship context for each owner is built
+  // in batch (one block lookup for the viewer + one follow query
+  // for the reverse direction across all owners), giving O(1)
+  // privacy filtering per row.
+  //
+  // Note: reminder FIRING (digest scheduling, push) is still
+  // Phase 7. This endpoint just returns the data layer; the
+  // frontend renders a calm calendar rail.
+  async listUpcomingForFollowed(
+    viewerId: string,
+    opts: { windowDays?: number; limit?: number } = {},
+  ): Promise<RelationshipOccasion[]> {
+    const windowDays = Math.max(
+      1,
+      Math.min(opts.windowDays ?? DEFAULT_UPCOMING_WINDOW_DAYS, 365),
     );
-    return visible.map((r) => this.toPublic(r));
+    const limit = Math.max(1, Math.min(opts.limit ?? 50, UPCOMING_HARD_LIMIT));
+
+    // Who does the viewer follow (accepted)? Excluded IDs are the
+    // bidirectional block set — pre-filter at the SQL layer so
+    // blocked owners' occasion rows never enter the in-memory
+    // pipeline.
+    const [follows, excludedIds] = await Promise.all([
+      this.prisma.follow.findMany({
+        where: { followerId: viewerId, status: 'accepted' },
+        select: { followingId: true },
+      }),
+      this.blocks.listExcludedIds(viewerId),
+    ]);
+    const ownerIds = follows
+      .map((f) => f.followingId)
+      .filter((id) => !excludedIds.includes(id));
+    if (ownerIds.length === 0) return [];
+
+    // Fetch occasions for every followed owner. The (userId,
+    // deactivatedAt) index handles the IN clause. We pull a
+    // generous cap then trim post-projection, since some rows
+    // will be filtered out by privacy or window.
+    const FETCH_OVERFETCH = limit * 3;
+    const rows = await this.prisma.occasion.findMany({
+      where: { userId: { in: ownerIds }, deactivatedAt: null },
+      orderBy: { createdAt: 'desc' },
+      take: FETCH_OVERFETCH,
+    });
+
+    // Batch-resolve the reverse-follow edges (owner→viewer) so
+    // the `mutual` tier check is one query for ALL owners
+    // instead of one per owner. Same shape as listForUser but
+    // batched across the followed set.
+    const reverseFollows = await this.prisma.follow.findMany({
+      where: {
+        followerId: { in: ownerIds },
+        followingId: viewerId,
+        status: 'accepted',
+      },
+      select: { followerId: true },
+    });
+    const reverseSet = new Set(reverseFollows.map((r) => r.followerId));
+
+    // Hydrate owner summaries in one User query.
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: ownerIds }, deletedAt: null },
+      select: {
+        id: true,
+        qiftUsername: true,
+        fullName: true,
+        avatarUrl: true,
+      },
+    });
+    const ownerById = new Map<string, OwnerSummary>(
+      users.map((u) => [u.id, u]),
+    );
+
+    const now = new Date();
+    const windowEndMs = now.getTime() + windowDays * 24 * 60 * 60 * 1000;
+    const projections = rows.map((r) => {
+      const ctx: ViewerContext = {
+        viewerId,
+        // The fetch is already restricted to followed owners.
+        viewerFollowsOwner: true,
+        ownerFollowsViewer: reverseSet.has(r.userId!),
+        // Block-list was pre-filtered. We pass false here, NOT
+        // because we trust the pre-filter alone, but because the
+        // pre-filter has already excluded the row entirely. If a
+        // blocked row somehow reached this branch, the privacy
+        // tier would still gate `private`-tier rows correctly.
+        blocked: false,
+      };
+      return projectOccasionForViewer(
+        ctx,
+        r,
+        now,
+        ownerById.get(r.userId!) ?? null,
+      );
+    });
+
+    return sortUpcoming(projections)
+      .filter((p) => {
+        if (!p.nextOccurrenceAt) return false;
+        const ms = Date.parse(p.nextOccurrenceAt);
+        return ms <= windowEndMs;
+      })
+      .slice(0, limit);
   }
 
   // ── Reminder CRUD ────────────────────────────────────────────
@@ -359,46 +479,6 @@ export class OccasionsService {
       viewerFollowsOwner: !!viewerFollows,
       ownerFollowsViewer: !!ownerFollows,
       blocked: excludedIds.includes(ownerId),
-    };
-  }
-
-  // Project a raw row into the wire shape. Resolves the next
-  // occurrence at read time (cheap — pure CPU; the umalqura
-  // conversion benches at ~10μs per call).
-  private toPublic(row: {
-    id: string;
-    kind: string;
-    label: string | null;
-    calendar: string;
-    year: number | null;
-    month: number;
-    day: number;
-    recurrence: string;
-    visibility: string;
-    regionCode: string | null;
-    relatedUserId: string | null;
-  }): PublicOccasion {
-    const spec: OccasionDateSpec = {
-      calendar: row.calendar as Calendar,
-      year: row.year,
-      month: row.month,
-      day: row.day,
-      recurrence: row.recurrence as 'once' | 'yearly',
-    };
-    const next = nextOccurrence(spec, new Date());
-    return {
-      id: row.id,
-      kind: row.kind,
-      label: row.label,
-      calendar: row.calendar as Calendar,
-      year: row.year,
-      month: row.month,
-      day: row.day,
-      recurrence: row.recurrence as 'once' | 'yearly',
-      visibility: row.visibility as OccasionVisibility,
-      regionCode: row.regionCode,
-      relatedUserId: row.relatedUserId,
-      nextOccurrenceAt: next ? next.toISOString() : null,
     };
   }
 

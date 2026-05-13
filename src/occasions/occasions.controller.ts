@@ -12,6 +12,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -34,6 +35,33 @@ export class OccasionsController {
   @Get('me')
   listMine(@Req() req: AuthedRequest) {
     return this.service.listMine(req.user!.userId);
+  }
+
+  // Upcoming-for-followed feed. Returns occasions belonging to
+  // users the viewer follows (accepted), within the next
+  // `windowDays` days (default 30, capped at 365), ordered by
+  // soonest-first. Limit defaults to 50; hard-capped at 100.
+  //
+  // MUST appear before the `:id` route — Nest matches in
+  // declaration order, and 'upcoming' would otherwise hit the
+  // `:id` parameter pattern.
+  //
+  // Phase 7 owns reminder firing; this endpoint is the calm
+  // calendar rail (read-only, viewer-driven).
+  @Get('upcoming')
+  listUpcoming(
+    @Req() req: AuthedRequest,
+    @Query('windowDays') windowDays?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const parsedWindow = windowDays
+      ? Number.parseInt(windowDays, 10)
+      : undefined;
+    const parsedLimit = limit ? Number.parseInt(limit, 10) : undefined;
+    return this.service.listUpcomingForFollowed(req.user!.userId, {
+      windowDays: Number.isFinite(parsedWindow) ? parsedWindow : undefined,
+      limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+    });
   }
 
   // Single owned occasion (for the edit modal hydrate).
