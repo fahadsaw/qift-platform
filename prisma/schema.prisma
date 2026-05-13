@@ -613,11 +613,33 @@ model Product {
   // SELECT COUNT(DISTINCT userId) WHERE productId = ? should
   // always match.
   //
-  // Privacy: this counter is internal foundation today. Surfacing
-  // "N people want this" on the public product page is gated by
-  // a future per-product visibility flag (out of scope here); the
-  // count itself never exposes WHO wishlisted.
+  // Privacy: surfacing "N people want this" on the public
+  // storefront is GATED by the per-store `metricsVisibility`
+  // dict (wishlistSaves key). The projection helper
+  // `projectStorefrontMetrics` drops the value before the wire
+  // when the merchant hasn't opted in. The count itself never
+  // exposes WHO wishlisted.
   wishlistedByCount Int @default(0)
+
+  // Denormalized counter: gifts created against this product
+  // (excluding cancelled). Incremented atomically by
+  // GiftsService.create() when the gift carries a productId.
+  // Backfilled from existing Gift rows in the 20260519 migration.
+  //
+  // Privacy: gated by the per-store `metricsVisibility` dict
+  // (giftedCount key) before the wire. Never exposes WHO gifted.
+  giftedByCount Int @default(0)
+
+  // Timestamp of the most recent activity that qualifies this
+  // product as "trending". Set by WishesService when a heart
+  // crosses the heart-velocity threshold and by GiftsService on
+  // gift create. The projection treats the product as trending
+  // when `trendingAt > NOW() - TRENDING_WINDOW`.
+  //
+  // Privacy: gated by `metricsVisibility.trendingIndicator`.
+  // The wire never carries the raw timestamp — only the resolved
+  // boolean. Indexed for the descending-from-NOW range scan.
+  trendingAt DateTime?
 
   store  Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
   gifts  Gift[]
@@ -635,6 +657,7 @@ model Product {
   // without colliding.
   @@unique([storeId, externalProductId])
   @@index([storeId])
+  @@index([trendingAt])
 }
 
 // Ordered product media gallery. One row per image; `displayOrder`

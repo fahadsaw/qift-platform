@@ -5,6 +5,10 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StoresService } from '../stores/stores.service';
+import {
+  projectStorefrontMetrics,
+  type ProjectedMetrics,
+} from './storefront-metrics';
 
 const PUBLIC_PRODUCT_SELECT = {
   id: true,
@@ -30,7 +34,66 @@ const PUBLIC_PRODUCT_SELECT = {
     select: { url: true, displayOrder: true },
     orderBy: { displayOrder: 'asc' as const },
   },
+  // Phase 5 metrics-on-the-wire — denormalized counters + the
+  // trending timestamp. The projection helper
+  // `projectStorefrontMetrics` is the SINGLE place where these
+  // raw values get converted into the merchant-approved sparse
+  // dict that reaches the wire. Hidden keys never ship.
+  wishlistedByCount: true,
+  giftedByCount: true,
+  trendingAt: true,
 } as const;
+
+// Raw Product row as selected above. Used by the metric
+// projector + adapter helpers below.
+type RawProductRow = {
+  id: string;
+  storeId: string;
+  name: string;
+  price: number;
+  imageUrl: string | null;
+  category: string;
+  isFastDelivery: boolean;
+  sourceType: string;
+  externalProductId: string | null;
+  stockStatus: string;
+  isAvailable: boolean;
+  lastSyncedAt: Date | null;
+  createdAt: Date;
+  images: { url: string; displayOrder: number }[];
+  wishlistedByCount: number;
+  giftedByCount: number;
+  trendingAt: Date | null;
+};
+
+// Public product wire-format. The raw counter columns + trending
+// timestamp are intentionally DROPPED at this boundary — only the
+// merchant-projected `metrics` dict (possibly undefined) makes it
+// out. This guarantees that even if a future caller forgets to
+// project, the raw values aren't exposed.
+export type PublicProduct = Omit<
+  RawProductRow,
+  'wishlistedByCount' | 'giftedByCount' | 'trendingAt'
+> & {
+  metrics?: ProjectedMetrics;
+};
+
+// Strip the raw counter columns + apply the merchant's
+// visibility projection. Used by both list() and findOne() so
+// the projection logic stays in one place.
+function toPublic(
+  product: RawProductRow,
+  storeVisibility: unknown,
+  now: Date = new Date(),
+): PublicProduct {
+  const { wishlistedByCount, giftedByCount, trendingAt, ...rest } = product;
+  const metrics = projectStorefrontMetrics(
+    { wishlistedByCount, giftedByCount, trendingAt },
+    storeVisibility,
+    now,
+  );
+  return metrics === undefined ? rest : { ...rest, metrics };
+}
 
 export type CreateProductInput = {
   storeId?: string;
@@ -70,7 +133,7 @@ export class ProductsService {
     }
     await this.stores.assertOwner(viewerUserId, storeId);
 
-    return this.prisma.product.create({
+    const created = await this.prisma.product.create({
       data: {
         storeId,
         name,
@@ -85,33 +148,67 @@ export class ProductsService {
       },
       select: PUBLIC_PRODUCT_SELECT,
     });
+    // Brand-new product: no merchant could have opted any metric
+    // for it yet, but route through `toPublic` anyway so the wire
+    // shape stays consistent and the raw counter columns stay
+    // stripped. Visibility is read from the parent store.
+    const store = await this.prisma.store.findUnique({
+      where: { id: created.storeId },
+      select: { metricsVisibility: true },
+    });
+    return toPublic(created, store?.metricsVisibility);
   }
 
   // Public list, filtered by store. Returns only available + in-stock
   // products by default so the storefront never accidentally surfaces an
   // unsellable item; pass `includeUnavailable=true` (used by the dashboard)
   // to bypass that filter.
-  list(storeId: string, opts: { includeUnavailable?: boolean } = {}) {
+  //
+  // Metrics projection: every row in the result shares the same
+  // parent store, so we fetch `metricsVisibility` ONCE and reuse
+  // it for the full list. No N+1, no per-product visibility
+  // query. The empty-storeId guard short-circuits before any DB
+  // work, matching the legacy behavior.
+  async list(
+    storeId: string,
+    opts: { includeUnavailable?: boolean } = {},
+  ): Promise<PublicProduct[]> {
     if (!storeId) return [];
-    return this.prisma.product.findMany({
-      where: {
-        storeId,
-        ...(opts.includeUnavailable
-          ? {}
-          : { isAvailable: true, stockStatus: 'in_stock' }),
-      },
-      select: PUBLIC_PRODUCT_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
+    const [store, products] = await this.prisma.$transaction([
+      this.prisma.store.findUnique({
+        where: { id: storeId },
+        select: { metricsVisibility: true },
+      }),
+      this.prisma.product.findMany({
+        where: {
+          storeId,
+          ...(opts.includeUnavailable
+            ? {}
+            : { isAvailable: true, stockStatus: 'in_stock' }),
+        },
+        select: PUBLIC_PRODUCT_SELECT,
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    const visibility = store?.metricsVisibility;
+    const now = new Date();
+    return products.map((p) => toPublic(p, visibility, now));
   }
 
-  async findOne(id: string) {
+  async findOne(id: string): Promise<PublicProduct> {
     const product = await this.prisma.product.findUnique({
       where: { id },
-      select: PUBLIC_PRODUCT_SELECT,
+      // Pull in the parent store's visibility flags inline so we
+      // can project in one round-trip — no second query for the
+      // single-product path.
+      select: {
+        ...PUBLIC_PRODUCT_SELECT,
+        store: { select: { metricsVisibility: true } },
+      },
     });
     if (!product) throw new NotFoundException('Product not found');
-    return product;
+    const { store, ...row } = product;
+    return toPublic(row, store?.metricsVisibility);
   }
 
   async update(viewerUserId: string, id: string, body: UpdateProductInput) {
@@ -143,11 +240,19 @@ export class ProductsService {
     if (typeof body.isAvailable === 'boolean')
       data.isAvailable = body.isAvailable;
 
-    return this.prisma.product.update({
+    const updated = await this.prisma.product.update({
       where: { id },
       data,
       select: PUBLIC_PRODUCT_SELECT,
     });
+    // Merchant-driven update — they own the visibility dict
+    // already. Read it once and apply the projection so the wire
+    // shape matches every other path.
+    const store = await this.prisma.store.findUnique({
+      where: { id: updated.storeId },
+      select: { metricsVisibility: true },
+    });
+    return toPublic(updated, store?.metricsVisibility);
   }
 
   async remove(viewerUserId: string, id: string) {

@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TRENDING_HEART_THRESHOLD } from '../products/storefront-metrics';
 
 // Input shapes. The wishlist supports TWO heart paths:
 //
@@ -186,10 +187,37 @@ export class WishesService {
 
       // Counter bump only on INSERT (existing was null).
       if (!existing) {
-        await this.prisma.product.update({
+        const updated = await this.prisma.product.update({
           where: { id: productId },
           data: { wishlistedByCount: { increment: 1 } },
+          select: { wishlistedByCount: true },
         });
+        // Phase 5: trending heart-velocity hook. Once a product
+        // is above the threshold, every new heart bumps the
+        // trending timestamp so "recently active" products
+        // surface. We update OUTSIDE the increment so the read
+        // already sees the post-increment value.
+        //
+        // We don't run this for the very first hearts on a brand-
+        // new product (below the threshold) — a single signal
+        // shouldn't trigger a "trending" badge on the storefront,
+        // and avoiding the write keeps the hot path lean. Once
+        // the bar is cleared, every subsequent heart keeps the
+        // timestamp fresh, so a product stays flagged as long as
+        // engagement continues within the TRENDING_WINDOW.
+        if (updated.wishlistedByCount >= TRENDING_HEART_THRESHOLD) {
+          // Non-fatal — the heart succeeded; failing to update
+          // the trending timestamp just means the badge lags by
+          // one event. The projection still respects visibility.
+          try {
+            await this.prisma.product.update({
+              where: { id: productId },
+              data: { trendingAt: new Date() },
+            });
+          } catch {
+            /* counter bump succeeded; trending hint is best-effort */
+          }
+        }
       }
 
       return wish;

@@ -385,6 +385,33 @@ export class GiftsService {
           `[gifts] wishlist fulfillment failed for giftId=${created.id}: ${(err as Error).message}`,
         );
       }
+
+      // Phase 5: bump the denormalized gift counter + trending
+      // timestamp on the product. This is the SAME shape as the
+      // wishlist counter pattern — server-side, atomic, fed off
+      // a single canonical event (gift create).
+      //
+      // Why two writes vs one: trendingAt is a timestamp not a
+      // counter, so Prisma's `{ increment }` syntax doesn't apply.
+      // Both writes go to the same row in one Prisma update.
+      //
+      // Non-fatal: a counter regression doesn't justify rolling
+      // back a successful gift. We warn + carry on; a future
+      // reconciliation job can rebuild from Gift rows (the
+      // 20260519 migration already does this on initial backfill).
+      try {
+        await this.prisma.product.update({
+          where: { id: created.productId },
+          data: {
+            giftedByCount: { increment: 1 },
+            trendingAt: new Date(),
+          },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `[gifts] gifted-count bump failed for productId=${created.productId}: ${(err as Error).message}`,
+        );
+      }
     }
 
     // Two notifications fire as soon as a gift is created:
@@ -788,6 +815,28 @@ export class GiftsService {
       } catch (err) {
         this.logger.warn(
           `[gifts] wishlist un-fulfillment failed for giftId=${gift.id}: ${(err as Error).message}`,
+        );
+      }
+
+      // Phase 5: decrement the gifted-count counter so it stays
+      // in lockstep with non-cancelled Gift rows. We DON'T touch
+      // trendingAt — a cancelled gift still represents recent
+      // engagement signal; the timestamp will age out of the
+      // TRENDING_WINDOW on its own.
+      //
+      // Race: the create-time increment used `{ increment: 1 }`
+      // (atomic on the DB). The decrement is the symmetric pair.
+      // If a previous bug or manual fix pushed the counter to 0
+      // already, the decrement would go negative — the projection
+      // helper clamps to >= 0 so the wire stays clean either way.
+      try {
+        await this.prisma.product.update({
+          where: { id: gift.productId },
+          data: { giftedByCount: { decrement: 1 } },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `[gifts] gifted-count rollback failed for productId=${gift.productId}: ${(err as Error).message}`,
         );
       }
     }

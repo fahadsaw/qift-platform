@@ -99,7 +99,11 @@ describe('WishesService', () => {
       prisma.product.findUnique.mockResolvedValue(liveProduct);
       prisma.wish.findUnique.mockResolvedValue(null); // No existing row
       prisma.wish.upsert.mockResolvedValue(baseWishRow);
-      prisma.product.update.mockResolvedValue({});
+      // Counter increment: returns the post-increment value so
+      // the trending-heart-velocity check sees a real number.
+      // Below the TRENDING_HEART_THRESHOLD, so trendingAt does
+      // NOT get bumped (asserted below).
+      prisma.product.update.mockResolvedValue({ wishlistedByCount: 1 });
 
       const result = await service.create(userId, { productId });
 
@@ -114,12 +118,48 @@ describe('WishesService', () => {
           where: { userId_productId: { userId, productId } },
         }),
       );
-      // Counter bumped (this was a fresh heart).
+      // Counter bumped (this was a fresh heart). The `select`
+      // arg was added in Phase 5 so the service can read the
+      // post-increment value and decide whether to bump the
+      // trending timestamp.
       expect(prisma.product.update).toHaveBeenCalledWith({
         where: { id: productId },
         data: { wishlistedByCount: { increment: 1 } },
+        select: { wishlistedByCount: true },
       });
+      // Below TRENDING_HEART_THRESHOLD (3) — trendingAt MUST
+      // NOT be bumped on the first heart. The wishlist increment
+      // was the ONLY product.update call.
+      expect(prisma.product.update).toHaveBeenCalledTimes(1);
       expect(result).toEqual(baseWishRow);
+    });
+
+    it('bumps trendingAt once the heart-velocity threshold is crossed', async () => {
+      // Same flow as above but the mock returns a post-increment
+      // count of 3 (== TRENDING_HEART_THRESHOLD) so the service
+      // fires a SECOND product.update setting trendingAt = now.
+      prisma.product.findUnique.mockResolvedValue(liveProduct);
+      prisma.wish.findUnique.mockResolvedValue(null);
+      prisma.wish.upsert.mockResolvedValue(baseWishRow);
+      prisma.product.update.mockResolvedValue({ wishlistedByCount: 3 });
+
+      await service.create(userId, { productId });
+
+      // Two updates: the counter increment, then the trending
+      // timestamp. Order matters — counter first so the read
+      // shows the post-increment value.
+      expect(prisma.product.update).toHaveBeenCalledTimes(2);
+      expect(prisma.product.update).toHaveBeenNthCalledWith(1, {
+        where: { id: productId },
+        data: { wishlistedByCount: { increment: 1 } },
+        select: { wishlistedByCount: true },
+      });
+      const second = prisma.product.update.mock.calls[1][0] as {
+        where: { id: string };
+        data: { trendingAt: unknown };
+      };
+      expect(second.where).toEqual({ id: productId });
+      expect(second.data.trendingAt).toBeInstanceOf(Date);
     });
 
     it('re-heart does NOT bump the counter again', async () => {
