@@ -67,6 +67,8 @@ const baseUserRow = () => ({
   favoriteBrands: null as string | null,
   allergies: null as string | null,
   acceptsSurpriseGifts: true as boolean | null,
+  gender: null as string | null,
+  giftNote: null as string | null,
   preferencesVisibility: null as unknown,
   addresses: [{ id: 'addr_1' }],
 });
@@ -232,6 +234,8 @@ describe('UsersService — preferences save + read flow', () => {
         favoriteBrands: null,
         allergies: null,
         acceptsSurpriseGifts: true as boolean | null,
+        gender: null as string | null,
+        giftNote: null as string | null,
         preferencesVisibility: {
           clothingSize: true,
           shoeSize: false,
@@ -262,6 +266,8 @@ describe('UsersService — preferences save + read flow', () => {
         favoriteBrands: null,
         allergies: null,
         acceptsSurpriseGifts: true as boolean | null,
+        gender: null as string | null,
+        giftNote: null as string | null,
         preferencesVisibility: {
           clothingSize: true,
           shoeSize: true,
@@ -272,6 +278,8 @@ describe('UsersService — preferences save + read flow', () => {
           brands: false,
           allergies: false,
           surprises: false,
+          gender: false,
+          giftNote: false,
         },
       };
       const projected = buildPublicPreferencesProjection(finalDbRow);
@@ -297,6 +305,8 @@ describe('UsersService — preferences save + read flow', () => {
         favoriteBrands: null,
         allergies: null,
         acceptsSurpriseGifts: null,
+        gender: null,
+        giftNote: null,
         preferencesVisibility: {
           clothingSize: true, // flag ON, but…
           shoeSize: false,
@@ -328,6 +338,8 @@ describe('UsersService — preferences save + read flow', () => {
         favoriteBrands: null,
         allergies: null,
         acceptsSurpriseGifts: null,
+        gender: null,
+        giftNote: null,
         preferencesVisibility: {
           clothingSize: true,
           shoeSize: false,

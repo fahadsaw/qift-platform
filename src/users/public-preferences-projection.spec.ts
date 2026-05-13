@@ -34,6 +34,8 @@ const fullSource = (visibility: unknown): OwnerPreferences => ({
   favoriteBrands: 'Chanel',
   allergies: 'no nuts',
   acceptsSurpriseGifts: false,
+  gender: 'female',
+  giftNote: 'I prefer practical gifts',
   preferencesVisibility: visibility,
 });
 
@@ -221,6 +223,11 @@ describe('buildPublicPreferencesProjection', () => {
           flag: 'surprises',
           expected: { acceptsSurpriseGifts: false },
         },
+        { flag: 'gender', expected: { gender: 'female' } },
+        {
+          flag: 'giftNote',
+          expected: { giftNote: 'I prefer practical gifts' },
+        },
       ];
       for (const c of cases) {
         const out = buildPublicPreferencesProjection(
@@ -228,6 +235,104 @@ describe('buildPublicPreferencesProjection', () => {
         );
         expect(out).toEqual(c.expected);
       }
+    });
+  });
+
+  describe('shoe-size defensive validator', () => {
+    // Production-observed bug: legacy rows could contain just the
+    // scale ("EU") without a number. The projection must filter
+    // those out so the public profile never reads "EU" alone.
+
+    it('omits shoeSize when value is just the scale ("EU")', () => {
+      const owner: OwnerPreferences = {
+        ...fullSource({ shoeSize: true }),
+        preferredShoeSize: 'EU',
+      };
+      const out = buildPublicPreferencesProjection(owner);
+      expect(out).toBeNull();
+    });
+
+    it('omits shoeSize when value is just the scale with trailing space', () => {
+      const owner: OwnerPreferences = {
+        ...fullSource({ shoeSize: true }),
+        preferredShoeSize: 'EU ',
+      };
+      const out = buildPublicPreferencesProjection(owner);
+      expect(out).toBeNull();
+    });
+
+    it('surfaces shoeSize when value has scale + number ("EU 42")', () => {
+      const owner: OwnerPreferences = {
+        ...fullSource({ shoeSize: true }),
+        preferredShoeSize: 'EU 42',
+      };
+      const out = buildPublicPreferencesProjection(owner);
+      expect(out).toEqual({ shoeSize: 'EU 42' });
+    });
+
+    it('rejects unrecognised scale prefixes', () => {
+      const owner: OwnerPreferences = {
+        ...fullSource({ shoeSize: true }),
+        preferredShoeSize: 'IT 42', // fictional scale
+      };
+      const out = buildPublicPreferencesProjection(owner);
+      expect(out).toBeNull();
+    });
+  });
+
+  describe('gender allow-list', () => {
+    it('surfaces "male" / "female" when opted in', () => {
+      for (const value of ['male', 'female']) {
+        const owner: OwnerPreferences = {
+          ...fullSource({ gender: true }),
+          gender: value,
+        };
+        expect(buildPublicPreferencesProjection(owner)).toEqual({
+          gender: value,
+        });
+      }
+    });
+
+    it('drops unrecognised gender values defensively', () => {
+      // A corrupted row with a non-allow-list value must NOT surface
+      // any string on the public chip.
+      for (const value of ['unspecified', 'other', '', 'M', 'female ']) {
+        const owner: OwnerPreferences = {
+          ...fullSource({ gender: true }),
+          gender: value,
+        };
+        expect(buildPublicPreferencesProjection(owner)).toBeNull();
+      }
+    });
+
+    it('drops gender when the visibility flag is off, regardless of value', () => {
+      const owner: OwnerPreferences = {
+        ...fullSource({}),
+        gender: 'female',
+      };
+      expect(buildPublicPreferencesProjection(owner)).toBeNull();
+    });
+  });
+
+  describe('giftNote free-text field', () => {
+    it('surfaces when opted in with a value', () => {
+      const out = buildPublicPreferencesProjection(
+        fullSource({ giftNote: true }),
+      );
+      expect(out).toEqual({ giftNote: 'I prefer practical gifts' });
+    });
+
+    it('omits when opted in but value is null', () => {
+      const owner: OwnerPreferences = {
+        ...fullSource({ giftNote: true }),
+        giftNote: null,
+      };
+      expect(buildPublicPreferencesProjection(owner)).toBeNull();
+    });
+
+    it('omits when value is set but flag is off (no leak)', () => {
+      const out = buildPublicPreferencesProjection(fullSource({}));
+      expect(out).toBeNull();
     });
   });
 });

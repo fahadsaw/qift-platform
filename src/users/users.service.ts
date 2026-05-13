@@ -130,6 +130,8 @@ export class UsersService {
           favoriteBrands: true,
           allergies: true,
           acceptsSurpriseGifts: true,
+          gender: true,
+          giftNote: true,
           // Per-field publicity dict for /preferences. Owner-only.
           preferencesVisibility: true,
           addresses: {
@@ -327,10 +329,19 @@ export class UsersService {
       favoriteBrands?: string | null;
       allergies?: string | null;
       acceptsSurpriseGifts?: boolean;
+      // 'male' | 'female' | null — strict allow-list enforced
+      // below. UI-only signal for gift senders; no commerce path
+      // treats men/women differently.
+      gender?: string | null;
+      // Free-form note from the owner to gift senders. Capped at
+      // 280 chars below (longer than other preference fields
+      // because the note can carry a sentence or two).
+      giftNote?: string | null;
       // Per-field publicity dict — opt-in basis (every key defaults
       // to false). Keys: clothingSize | shoeSize | ringSize |
       // fragrance | colors | categories | brands | allergies |
-      // surprises. Unknown keys are filtered server-side.
+      // surprises | gender | giftNote. Unknown keys are filtered
+      // server-side.
       preferencesVisibility?: Record<string, boolean> | null;
     },
   ) {
@@ -341,6 +352,8 @@ export class UsersService {
     // UserUpdateInput shape, so the final assignment back to `data`
     // is safe.
     const data: Prisma.UserUpdateInput = {};
+    // Length-200 fields. giftNote is handled separately below
+    // because its cap is higher (280 chars).
     const STR_FIELDS = [
       'preferredClothingSize',
       'preferredShoeSize',
@@ -367,6 +380,34 @@ export class UsersService {
       strBag[k] = v.length === 0 ? null : v;
     }
     Object.assign(data, strBag);
+
+    // Gender: strict allow-list. Anything else (other strings,
+    // empty string after trim, non-string) reads as "clear the
+    // field" so a misconfigured client can't pollute the column.
+    if (body.gender !== undefined) {
+      if (body.gender === null) {
+        data.gender = null;
+      } else if (body.gender === 'male' || body.gender === 'female') {
+        data.gender = body.gender;
+      } else {
+        // Reject silently — set to null. The frontend allow-list
+        // matches; this branch only fires on a buggy client.
+        data.gender = null;
+      }
+    }
+    // Gift note: same shape as the other strings but with a longer
+    // cap (280 chars). Trimmed; empty-after-trim → null.
+    if (body.giftNote !== undefined) {
+      if (body.giftNote === null) {
+        data.giftNote = null;
+      } else {
+        const v = String(body.giftNote).trim();
+        if (v.length > 280) {
+          throw new BadRequestException('giftNote must be at most 280 chars');
+        }
+        data.giftNote = v.length === 0 ? null : v;
+      }
+    }
     if (body.acceptsSurpriseGifts !== undefined) {
       data.acceptsSurpriseGifts = body.acceptsSurpriseGifts === true;
     }
@@ -389,6 +430,8 @@ export class UsersService {
           'brands',
           'allergies',
           'surprises',
+          'gender',
+          'giftNote',
         ] as const;
         const clean: Record<string, boolean> = {};
         for (const k of allowedKeys) {
@@ -803,6 +846,8 @@ export class UsersService {
         favoriteBrands: true,
         allergies: true,
         acceptsSurpriseGifts: true,
+        gender: true,
+        giftNote: true,
         preferencesVisibility: true,
       },
     });
@@ -922,38 +967,6 @@ export class UsersService {
     // keep the public payload lean: `preferences: undefined` reads as
     // "this user hasn't shared any preferences yet" on the client.
     const publicPreferences = buildPublicPreferencesProjection(user);
-
-    // Diagnostic logging — added during the "preferences card doesn't
-    // appear on /u/[username]" investigation. Logs ONLY SHAPES (no
-    // values, no PII): which visibility flags are true on disk, and
-    // which projected keys actually reach the wire. Once we've
-    // confirmed the production path is correct (or found the real
-    // mismatch), this can be downgraded to debug-level or removed.
-    //
-    // Privacy: this NEVER logs the actual preference values. Only:
-    //   - the OWNER's qiftUsername (already public)
-    //   - which visibility flags are ON (this is meta-info the owner
-    //     intends to publicise — log surface is fine)
-    //   - which projected keys are non-empty.
-    const visibilityRaw = user.preferencesVisibility;
-    const visibilityShape =
-      visibilityRaw === null || visibilityRaw === undefined
-        ? 'null'
-        : typeof visibilityRaw !== 'object'
-          ? `non-object(${typeof visibilityRaw})`
-          : `object{${
-              Object.entries(visibilityRaw as Record<string, unknown>)
-                .filter(([, v]) => v === true)
-                .map(([k]) => k)
-                .join(',') || '∅'
-            }}`;
-    const projectedKeys = publicPreferences
-      ? Object.keys(publicPreferences).join(',') || '∅'
-      : 'null';
-    this.logger.log(
-      `getPublicProfile preferences: user=${user.qiftUsername} ` +
-        `visibility=${visibilityShape} → projected=${projectedKeys}`,
-    );
 
     return {
       id: user.id,
@@ -1357,7 +1370,9 @@ type PreferencesVisibilityKey =
   | 'categories'
   | 'brands'
   | 'allergies'
-  | 'surprises';
+  | 'surprises'
+  | 'gender'
+  | 'giftNote';
 
 export type OwnerPreferences = {
   preferredClothingSize: string | null;
@@ -1369,6 +1384,8 @@ export type OwnerPreferences = {
   favoriteBrands: string | null;
   allergies: string | null;
   acceptsSurpriseGifts: boolean | null;
+  gender: string | null;
+  giftNote: string | null;
   preferencesVisibility: unknown;
 };
 
@@ -1382,11 +1399,30 @@ export type PublicPreferences = {
   brands?: string;
   allergies?: string;
   acceptsSurpriseGifts?: boolean;
+  gender?: string;
+  giftNote?: string;
 };
 
 // Exported so the privacy contract can be unit-tested directly
 // without the full UsersService graph. The service is the only
 // caller in production; tests are the only OTHER consumer.
+// Shoe-size shape validator. The owner can produce a partial value
+// in local UI state (scale selected but no number — "EU" alone)
+// which the frontend SHOULD prevent at save time, but production
+// has surfaced rows that look like just the scale on the wire.
+// This defensive check filters those out so the public profile
+// never shows "EU" alone.
+//
+// Valid shapes:
+//   "EU 42" / "US 9" / "UK 8" (scale + numeric)
+// Invalid (filtered):
+//   "EU" / "US" / "UK" (scale only, no number)
+//   "" (empty)
+function isCompleteShoeSize(v: string | null): boolean {
+  if (!v) return false;
+  return /^(EU|US|UK)\s+\S+/.test(v.trim());
+}
+
 export function buildPublicPreferencesProjection(
   owner: OwnerPreferences,
 ): PublicPreferences | null {
@@ -1396,8 +1432,12 @@ export function buildPublicPreferencesProjection(
   if (flags.clothingSize && owner.preferredClothingSize) {
     out.clothingSize = owner.preferredClothingSize;
   }
-  if (flags.shoeSize && owner.preferredShoeSize) {
-    out.shoeSize = owner.preferredShoeSize;
+  if (flags.shoeSize && isCompleteShoeSize(owner.preferredShoeSize)) {
+    // Defensive: only surface a shoe size that has BOTH scale AND
+    // numeric. A legacy row with just "EU" is dropped here so the
+    // public profile never reads as "this person wears EU" (which
+    // is meaningless without the number).
+    out.shoeSize = owner.preferredShoeSize as string;
   }
   if (flags.ringSize && owner.preferredRingSize) {
     out.ringSize = owner.preferredRingSize;
@@ -1422,6 +1462,17 @@ export function buildPublicPreferencesProjection(
     // when opted-in — even false matters for the gift-sender flow.
     out.acceptsSurpriseGifts = owner.acceptsSurpriseGifts ?? true;
   }
+  if (flags.gender && owner.gender) {
+    // Validate against the allow-list — a corrupted row with an
+    // unrecognised value stays hidden so the chip never renders
+    // something nonsensical.
+    if (owner.gender === 'male' || owner.gender === 'female') {
+      out.gender = owner.gender;
+    }
+  }
+  if (flags.giftNote && owner.giftNote) {
+    out.giftNote = owner.giftNote;
+  }
   return Object.keys(out).length === 0 ? null : out;
 }
 
@@ -1444,6 +1495,8 @@ function readVisibilityFlags(
     'brands',
     'allergies',
     'surprises',
+    'gender',
+    'giftNote',
   ];
   const out = {} as Record<PreferencesVisibilityKey, boolean>;
   for (const k of keys) {
