@@ -923,6 +923,38 @@ export class UsersService {
     // "this user hasn't shared any preferences yet" on the client.
     const publicPreferences = buildPublicPreferencesProjection(user);
 
+    // Diagnostic logging — added during the "preferences card doesn't
+    // appear on /u/[username]" investigation. Logs ONLY SHAPES (no
+    // values, no PII): which visibility flags are true on disk, and
+    // which projected keys actually reach the wire. Once we've
+    // confirmed the production path is correct (or found the real
+    // mismatch), this can be downgraded to debug-level or removed.
+    //
+    // Privacy: this NEVER logs the actual preference values. Only:
+    //   - the OWNER's qiftUsername (already public)
+    //   - which visibility flags are ON (this is meta-info the owner
+    //     intends to publicise — log surface is fine)
+    //   - which projected keys are non-empty.
+    const visibilityRaw = user.preferencesVisibility;
+    const visibilityShape =
+      visibilityRaw === null || visibilityRaw === undefined
+        ? 'null'
+        : typeof visibilityRaw !== 'object'
+          ? `non-object(${typeof visibilityRaw})`
+          : `object{${
+              Object.entries(visibilityRaw as Record<string, unknown>)
+                .filter(([, v]) => v === true)
+                .map(([k]) => k)
+                .join(',') || '∅'
+            }}`;
+    const projectedKeys = publicPreferences
+      ? Object.keys(publicPreferences).join(',') || '∅'
+      : 'null';
+    this.logger.log(
+      `getPublicProfile preferences: user=${user.qiftUsername} ` +
+        `visibility=${visibilityShape} → projected=${projectedKeys}`,
+    );
+
     return {
       id: user.id,
       fullName: user.fullName,
