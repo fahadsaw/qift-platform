@@ -1327,7 +1327,7 @@ type PreferencesVisibilityKey =
   | 'allergies'
   | 'surprises';
 
-type OwnerPreferences = {
+export type OwnerPreferences = {
   preferredClothingSize: string | null;
   preferredShoeSize: string | null;
   preferredRingSize: string | null;
@@ -1352,7 +1352,10 @@ export type PublicPreferences = {
   acceptsSurpriseGifts?: boolean;
 };
 
-function buildPublicPreferencesProjection(
+// Exported so the privacy contract can be unit-tested directly
+// without the full UsersService graph. The service is the only
+// caller in production; tests are the only OTHER consumer.
+export function buildPublicPreferencesProjection(
   owner: OwnerPreferences,
 ): PublicPreferences | null {
   const flags = readVisibilityFlags(owner.preferencesVisibility);
