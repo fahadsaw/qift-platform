@@ -29,6 +29,7 @@
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.1",
     "@prisma/client": "^5.22.0",
+    "@umalqura/core": "^0.0.7",
     "bcryptjs": "^2.4.3",
     "dotenv": "^17.4.2",
     "passport": "^0.7.0",

@@ -182,6 +182,26 @@ model User {
   // (photo or short video) stored on R2. Visible on /profile (owner)
   // and on the user's public profile when profile visibility allows.
   posts                 Post[]
+
+  // Phase 6 — Occasions infrastructure. Two distinct relations:
+  //
+  //   ownedOccasions    : occasions the user owns (their own birthday,
+  //                       their wedding anniversary, custom events).
+  //   relatedOccasions  : occasions someone ELSE created that point at
+  //                       this user as the related party (e.g. "Sarah's
+  //                       birthday" — a remembrance row owned by the
+  //                       remembering user but pointing at Sarah).
+  //   occasionReminders : reminder rows the user owns. Reminders are
+  //                       owned by the recipient of the reminder, not
+  //                       the occasion's owner — a remembering user
+  //                       can have their own reminder cadence on a
+  //                       relatedOccasion.
+  //
+  // The actual reminder FIRING is gated to Phase 7 (notification
+  // budget infrastructure). Phase 6.1 ships the data layer only.
+  ownedOccasions        Occasion[]             @relation("OwnedOccasions")
+  relatedOccasions      Occasion[]             @relation("RelatedOccasions")
+  occasionReminders     OccasionReminder[]
 }
 
 model Address {
@@ -249,6 +269,14 @@ model Gift {
   // so the dashboard can filter by ownership.
   storeId     String?
   productId   String?
+  // Phase 6 — optional FK tagging a gift to an occasion the sender
+  // is acknowledging ("Sarah's birthday"). Sender-side metadata
+  // ONLY: receivers never see the sender's occasion tag on a gift
+  // they received (prevents tone-pushing abuse). On occasion soft-
+  // delete the FK stays — the tag value preserves through deletion
+  // because gifting history shouldn't lose meaning when an
+  // occasion row gets cleaned up. SetNull on hard delete only.
+  occasionId  String?
   // Buyer's gift message — rendered in the receiver's gift detail AFTER
   // delivery. The store NEVER sees this field; the message-reveal gate
   // strips it from any non-sender, non-delivered viewer.
@@ -294,6 +322,7 @@ model Gift {
   address  Address?   @relation("GiftDeliveryAddress", fields: [addressId], references: [id], onDelete: SetNull)
   store    Store?     @relation(fields: [storeId], references: [id], onDelete: SetNull)
   product  Product?   @relation(fields: [productId], references: [id], onDelete: SetNull)
+  occasion Occasion?  @relation("OccasionGifts", fields: [occasionId], references: [id], onDelete: SetNull)
   order    Order?
   shipment Shipment?
   // One GiftPost per (gift, owner) — both sender and receiver can
@@ -1316,4 +1345,173 @@ model Post {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+// ============================================================
+// Phase 6 — Occasions infrastructure
+// ============================================================
+//
+// Birthdays, anniversaries, religious events, milestones. Stored
+// as relationship infrastructure, NOT as a content feed. Every
+// downstream system that needs gifting-timing context — reminders,
+// recommendations, AI gifting, discovery rails — reads from this
+// model.
+//
+// Full architecture: project_occasions_architecture.md in user
+// memory. Read that document before touching this schema.
+//
+// CRITICAL DECISIONS BAKED INTO THIS SHAPE:
+//
+//   1. (calendar, year?, month, day) triple, NOT a DateTime.
+//      A Gregorian DateTime can't represent "every year on the
+//      second of Shawwal" correctly — Hijri drifts ~11 days per
+//      Gregorian year. The triple lets nextOccurrence() resolve
+//      in either calendar; the Hijri ↔ Gregorian conversion goes
+//      through lib/hijri.ts (single shared helper).
+//
+//   2. recurrence is 'once' | 'yearly' ONLY. Not 'monthly',
+//      'weekly', or 'cron-style' — those don't map to gifting
+//      reality and would open the door to spam patterns.
+//
+//   3. visibility is 'private' | 'followers' | 'mutual' | 'public'.
+//      Defaults to 'private'. canSeeOccasion() in OccasionsService
+//      is the SINGLE enforcement boundary; every read path routes
+//      through it.
+//
+//   4. relatedUserId is OPTIONAL. Set when one user remembers
+//      ANOTHER user's occasion ("Sarah's birthday" owned by me,
+//      pointing at Sarah). The owner of the row is whoever wants
+//      the reminder, not necessarily the person the occasion is
+//      "about".
+//
+//   5. The reminder firing job is NOT BUILT IN PHASE 6.1. The
+//      OccasionReminder model is created (so future Phase 7 work
+//      has a populated data layer to switch on), but no cron, no
+//      notification firing. Reminders default to digest channel
+//      and `enabled: true`; the budget infrastructure in Phase 7
+//      activates them.
+
+model Occasion {
+  id              String    @id @default(cuid())
+
+  // -- Identity ---------------------------------------------------
+  // Who owns this row. The owner is whoever wants the reminder
+  // / sees it on their /occasions page. NULL is reserved for
+  // future platform-defined cultural rows (Eid, Saudi National
+  // Day) — V1 doesn't ship those seeds yet, but the column allows
+  // them. User-created rows always have a userId.
+  userId          String?
+  // Discriminator. Validated server-side against the OCCASION_KINDS
+  // allow-list in OccasionsService — unknown values are rejected
+  // at the API boundary, not at the schema layer (the column stays
+  // a free string so the allow-list can evolve without a migration).
+  kind            String
+  // Optional free-text title. Used for 'custom' kind ("Mom's 60th"),
+  // for an extra label on a recurring birthday ("at the new place"),
+  // or left null when the kind speaks for itself. Length-capped
+  // server-side (80 chars).
+  label           String?
+
+  // -- Date (calendar-aware triple) ------------------------------
+  calendar        String    // 'gregorian' | 'hijri'
+  // Month + day are 1-indexed, in the chosen calendar. For one-off
+  // dated occasions (graduation, wedding), the year is also set so
+  // the row identifies a specific moment; for yearly recurring,
+  // year is null.
+  year            Int?
+  month           Int       // 1-12
+  day             Int       // 1-31 (per calendar)
+
+  // -- Recurrence ------------------------------------------------
+  recurrence      String    // 'once' | 'yearly'
+
+  // -- Privacy ---------------------------------------------------
+  // 'private' | 'followers' | 'mutual' | 'public'. Default
+  // private. canSeeOccasion() is the single read-time enforcement
+  // point; do NOT add bare prisma.occasion.find* outside
+  // OccasionsService.
+  visibility      String    @default("private")
+
+  // -- Regional / cultural metadata -----------------------------
+  // ISO 3166-1 alpha-2 (e.g. 'SA') or a region group ('GULF',
+  // 'MENA') for shared cultural occasions. NULL for user-created
+  // rows. Drives the UI's "show cultural occasions for my region"
+  // toggle in a future iteration.
+  regionCode      String?
+
+  // -- Relationships --------------------------------------------
+  // OPTIONAL link to a related user — "Sarah's birthday" sets
+  // userId = me, relatedUserId = Sarah's user id. Drives the
+  // reminder copy that names the person. NULL when the occasion
+  // is about the owner themselves OR about a person not on Qift.
+  relatedUserId   String?
+
+  // -- Lifecycle ------------------------------------------------
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  // Soft-delete so reminder firing history + gift FKs survive. A
+  // hard delete would orphan Gift.occasionId pointing at it (we
+  // SetNull on that side); the deactivatedAt flag lets the
+  // OccasionsService filter "active" rows without losing the
+  // historical link.
+  deactivatedAt   DateTime?
+
+  // -- Relations ------------------------------------------------
+  user            User?              @relation("OwnedOccasions", fields: [userId], references: [id], onDelete: Cascade)
+  relatedUser     User?              @relation("RelatedOccasions", fields: [relatedUserId], references: [id], onDelete: SetNull)
+  gifts           Gift[]             @relation("OccasionGifts")
+  reminders       OccasionReminder[]
+
+  // -- Indexes --------------------------------------------------
+  // Owner's /occasions page list query.
+  @@index([userId, deactivatedAt])
+  // "Who remembers this person's birthday" — used when surfacing
+  // mutual-follow occasions on /u/[username].
+  @@index([relatedUserId, deactivatedAt])
+  // Hot path for the future reminder sweep — find every occasion
+  // firing today across all users. O(matched), not O(N).
+  @@index([calendar, month, day, deactivatedAt])
+}
+
+// Per-user reminder for an occasion. The reminder OWNS the cadence
+// + channel + enabled flag; the occasion itself is just the
+// anchor date.
+//
+// One reminder row per (userId, occasionId, daysBefore). A user
+// who wants both T-7 and T-1 has two rows.
+//
+// The reminder OWNER is the user receiving the reminder, not the
+// occasion's owner — when a remembering user creates a reminder
+// for someone else's occasion, the reminder's userId = the
+// remembering user. This makes the reminder sweep a simple
+// `WHERE userId = :viewerId AND enabled = true` per user.
+//
+// Phase 6.1 ships the data layer ONLY. Reminder FIRING is gated
+// to Phase 7's notification budget infrastructure.
+model OccasionReminder {
+  id            String    @id @default(cuid())
+  userId        String
+  occasionId    String
+  // Days before the occurrence. Default cadence (Section 7.2 of
+  // the architecture doc) seeds T-7 and T-1 for personal recurring
+  // kinds; user can override or disable per row.
+  daysBefore    Int
+  // 'digest' | 'real_time'. Default 'digest' — the architecture
+  // memory's notification discipline (Section 17 of the canonical
+  // doc) puts low-priority reminders in the daily digest, with
+  // opt-in real-time only for high-priority life-milestone rows.
+  channel       String    @default("digest")
+  // Soft-disable so the user can mute one reminder without
+  // deleting the whole row (preserves the daysBefore choice for
+  // re-enabling).
+  enabled       Boolean   @default(true)
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  occasion      Occasion  @relation(fields: [occasionId], references: [id], onDelete: Cascade)
+
+  // One reminder per (user, occasion, daysBefore) — re-creating
+  // the same shape is an idempotent no-op via upsert.
+  @@unique([userId, occasionId, daysBefore])
+  // Per-user enabled-reminder query for the future sweep.
+  @@index([userId, enabled])
 }

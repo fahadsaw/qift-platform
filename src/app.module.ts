@@ -27,6 +27,7 @@ import { MediaModule } from './media/media.module';
 // database for now (data preservation), with a future migration
 // task to drop it once historical data is reviewed.
 import { GiftPostsModule } from './gift-posts/gift-posts.module';
+import { OccasionsModule } from './occasions/occasions.module';
 import { AdminModule } from './admin/admin.module';
 import { MailModule } from './mail/mail.module';
 
@@ -52,6 +53,7 @@ import { MailModule } from './mail/mail.module';
     ReportsModule,
     MediaModule,
     GiftPostsModule,
+    OccasionsModule,
     AdminModule,
     MailModule,
   ],
