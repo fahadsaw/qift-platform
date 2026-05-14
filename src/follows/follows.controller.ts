@@ -41,12 +41,12 @@ export class UserFollowsController {
   constructor(private service: FollowsService) {}
 
   @Get(':userId/followers')
-  followers(@Param('userId') userId: string) {
-    return this.service.listFollowers(userId);
+  followers(@Param('userId') userId: string, @Req() req: AuthedRequest) {
+    return this.service.listFollowers(req.user.userId, userId);
   }
 
   @Get(':userId/following')
-  following(@Param('userId') userId: string) {
-    return this.service.listFollowing(userId);
+  following(@Param('userId') userId: string, @Req() req: AuthedRequest) {
+    return this.service.listFollowing(req.user.userId, userId);
   }
 }

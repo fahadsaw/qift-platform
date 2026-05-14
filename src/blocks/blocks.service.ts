@@ -95,4 +95,35 @@ export class BlocksService {
     for (const r of inn) set.add(r.blockerId);
     return Array.from(set);
   }
+
+  // Point-check shortcut: is there a block in EITHER direction
+  // between `viewerId` and `otherId`? Cheaper than listExcludedIds
+  // when the caller only needs a single yes/no (a Block.findFirst
+  // with an OR against the composite-PK columns is one indexed
+  // query). Used by every "give me one specific user's data"
+  // endpoint — public profile, follower/following lists, wishlist,
+  // gift history.
+  //
+  // self-check short-circuits: a user can't block themselves
+  // (the BadRequestException in block() prevents it) so the
+  // viewer can always see their own data.
+  async isBlockedEitherWay(
+    viewerId: string,
+    otherId: string,
+  ): Promise<boolean> {
+    if (viewerId === otherId) return false;
+    const row = await this.prisma.block.findFirst({
+      where: {
+        OR: [
+          { blockerId: viewerId, blockedId: otherId },
+          { blockerId: otherId, blockedId: viewerId },
+        ],
+      },
+      // Block has a composite PK (blockerId, blockedId) — no `id`
+      // column. Select one FK to get a truthy result without
+      // dragging extra fields.
+      select: { blockerId: true },
+    });
+    return row !== null;
+  }
 }

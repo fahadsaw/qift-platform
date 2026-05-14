@@ -14,6 +14,7 @@ import {
 import type { Prisma } from '@prisma/client';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
+import { AdminGuard } from '../admin/admin.guard';
 import { RateLimiter } from '../common/rate-limiter';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
@@ -34,12 +35,25 @@ const contactSearchLimiter = new RateLimiter(30, 5 * 60 * 1000);
 export class UsersController {
   constructor(private usersService: UsersService) {}
 
+  // Direct admin-only "create a user row" — bypasses the OTP-bound
+  // /auth/register flow. Locked behind AdminGuard since (1) the body
+  // is the raw Prisma type and a non-admin caller could set arbitrary
+  // fields (incl. role='admin'), and (2) registration is the
+  // canonical user-creation path. Kept for one-off admin tooling.
   @Post()
+  @UseGuards(JwtAuthGuard, AdminGuard)
   create(@Body() body: Prisma.UserUncheckedCreateInput) {
     return this.usersService.create(body);
   }
 
+  // Admin-only enumeration. The response includes phone + email +
+  // defaultAddress (SAFE_USER_SELECT for ALL users) — a non-admin
+  // caller could scrape the entire user table in one request. Gate
+  // strictly. Public look-ups go through /users/@/:username (returns
+  // the privacy-projected PublicProfile) or /users/check (returns
+  // the narrow recipient-confirmation shape).
   @Get()
+  @UseGuards(JwtAuthGuard, AdminGuard)
   findAll() {
     return this.usersService.findAll();
   }
@@ -223,27 +237,39 @@ export class UsersController {
   }
 
   // GET /users/:userId/gifts/received — public received-gifts list.
-  // Privacy gated by showGiftsReceived + profileVisibility (service layer).
+  // Privacy gated by showGiftsReceived + profileVisibility + block
+  // list (service layer).
   @Get(':userId/gifts/received')
-  giftsReceived(@Param('userId') userId: string) {
-    return this.usersService.listReceivedGifts(userId);
+  giftsReceived(@Param('userId') userId: string, @Req() req: AuthedRequest) {
+    return this.usersService.listReceivedGifts(req.user.userId, userId);
   }
 
   // GET /users/:userId/gifts/sent — public sent-gifts list.
-  // Privacy gated by showGiftsSent + profileVisibility (service layer).
+  // Privacy gated by showGiftsSent + profileVisibility + block list.
   @Get(':userId/gifts/sent')
-  giftsSent(@Param('userId') userId: string) {
-    return this.usersService.listSentGifts(userId);
+  giftsSent(@Param('userId') userId: string, @Req() req: AuthedRequest) {
+    return this.usersService.listSentGifts(req.user.userId, userId);
   }
 
   // GET /users/:userId/wishes — public wishlist (visibility = 'public').
-  // Private accounts return 403 (whole-profile gate).
+  // Private accounts return 403 (whole-profile gate). Block list
+  // returns 404 (same shape as "user not found" — never leaks the
+  // existence of the block).
   @Get(':userId/wishes')
-  wishes(@Param('userId') userId: string) {
-    return this.usersService.listWishes(userId);
+  wishes(@Param('userId') userId: string, @Req() req: AuthedRequest) {
+    return this.usersService.listWishes(req.user.userId, userId);
   }
 
+  // Admin-only lookup by id. Returns the SAFE_USER_SELECT shape
+  // which includes phone + email + defaultAddress — these MUST NOT
+  // be exposed to non-admins. Public-facing "look this user up"
+  // surfaces:
+  //   - GET /users/@/:username  → privacy-projected PublicProfile
+  //   - GET /users/check         → narrow recipient-confirmation
+  //   - GET /users/search        → username / handle / phone with
+  //                                the discoverability gates
   @Get(':id')
+  @UseGuards(JwtAuthGuard, AdminGuard)
   findOne(@Param('id') id: string) {
     return this.usersService.findOne(id);
   }

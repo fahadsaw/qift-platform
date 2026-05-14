@@ -77,6 +77,15 @@ export type GiftLike = {
 
 // Hide the sender from the receiver's view when the gift is anonymous.
 // Sender always sees their own info on the sent side.
+//
+// We zero out BOTH the nested `sender` object AND the top-level
+// `senderId` column. The sender object alone was previously masked,
+// but `senderId` still shipped over the wire — a non-sender viewer
+// could pair it with any user-lookup endpoint (e.g. follower lists,
+// gift-post owners, mutual-graph traversals) to de-anonymise the
+// gift, defeating the headline anonymous-gift privacy promise.
+// `senderId: ''` is also the value reads use as the empty-string
+// sentinel so the typed `string` contract stays intact.
 export function maskAnonymous<T extends GiftLike>(
   gift: T,
   viewerUserId: string | null,
@@ -85,6 +94,7 @@ export function maskAnonymous<T extends GiftLike>(
   if (viewerUserId && viewerUserId === gift.senderId) return gift;
   return {
     ...gift,
+    senderId: '',
     sender: { id: '', qiftUsername: '', fullName: null },
   };
 }

@@ -841,6 +841,16 @@ export class UsersService {
     );
     if (!user) throw new NotFoundException('user_not_found');
 
+    // Block-list gate. Either side of a block must not be able to
+    // reach the other's public profile (the canonical "this person
+    // doesn't exist as far as you're concerned" surface). We throw
+    // the same NotFoundException as the missing-user path so the
+    // viewer can't distinguish "blocked" from "doesn't exist" —
+    // any other distinction would leak the existence of the block.
+    if (await this.blocks.isBlockedEitherWay(viewerId, user.id)) {
+      throw new NotFoundException('user_not_found');
+    }
+
     const isPrivate = user.profileVisibility === 'private';
 
     // Skip count queries entirely for stats the viewer can't see — saves
@@ -998,7 +1008,13 @@ export class UsersService {
   //
   // Cancelled gifts and gifts whose sender has been soft-deleted are
   // dropped. Newest first.
-  async listReceivedGifts(targetUserId: string) {
+  async listReceivedGifts(viewerId: string, targetUserId: string) {
+    // Block-list gate. Same shape as getPublicProfile — either side
+    // of a block can't read the other's data. 404 (not 403) so the
+    // distinction "blocked vs missing" doesn't leak.
+    if (await this.blocks.isBlockedEitherWay(viewerId, targetUserId)) {
+      throw new NotFoundException('user_not_found');
+    }
     const target = await this.loadTargetWithFlags(targetUserId);
     if (target.profileVisibility === 'private' || !target.showGiftsReceived) {
       throw new ForbiddenException('gifts_received_hidden');
@@ -1052,7 +1068,10 @@ export class UsersService {
   //
   // Same field-surface narrowing as listReceivedGifts. Cancelled and
   // dead-receiver rows are dropped.
-  async listSentGifts(targetUserId: string) {
+  async listSentGifts(viewerId: string, targetUserId: string) {
+    if (await this.blocks.isBlockedEitherWay(viewerId, targetUserId)) {
+      throw new NotFoundException('user_not_found');
+    }
     const target = await this.loadTargetWithFlags(targetUserId);
     if (target.profileVisibility === 'private' || !target.showGiftsSent) {
       throw new ForbiddenException('gifts_sent_hidden');
@@ -1104,7 +1123,10 @@ export class UsersService {
   // Returns only Wish rows with visibility = 'public'. Per-row private
   // wishes are owner-visible only and would be served by a separate
   // /users/me/wishes endpoint when that lands.
-  async listWishes(targetUserId: string) {
+  async listWishes(viewerId: string, targetUserId: string) {
+    if (await this.blocks.isBlockedEitherWay(viewerId, targetUserId)) {
+      throw new NotFoundException('user_not_found');
+    }
     const target = await this.loadTargetWithFlags(targetUserId);
     if (target.profileVisibility === 'private') {
       throw new ForbiddenException('wishes_hidden');
