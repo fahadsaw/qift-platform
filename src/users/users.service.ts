@@ -8,6 +8,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
+import { normalizeHandle } from '../social-accounts/social-accounts.service';
 import { userHasDefaultAddress } from '../addresses/default-address.helper';
 import { matchAddressToStoreZones } from '../stores/delivery-zones';
 
@@ -723,28 +724,50 @@ export class UsersService {
       }));
     }
 
-    // Social platform — search the SocialAccount table for matching
-    // handles on this platform, then resolve back to the owner.
+    // Social platform — EXACT-match lookup against the
+    // SocialAccount table. The previous behaviour was `contains`
+    // substring matching which turned social search into an
+    // autocomplete / fishing surface: any 2-character query would
+    // surface accounts whose handle merely contained those letters.
+    //
+    // The Phase 6.7 privacy refinement reframes social search as
+    // INTENTIONAL identity lookup, not discovery. The user must
+    // type the full handle and submit explicitly; the backend
+    // applies the same `normalizeHandle()` used at write time so a
+    // queried "@John_42" matches the stored "john_42" cleanly.
+    //
+    // Other guarantees:
+    //   - matchedValue is the empty string (NOT echoed back). Same
+    //     posture as phone + email — we never confirm a casing /
+    //     variant of the queried handle, only whether someone has
+    //     it linked.
+    //   - take: 1 (the SocialAccount table has @@unique([platform,
+    //     handle]) so at most one row matches anyway; explicit cap
+    //     guards against accidental future widening).
+    //   - Empty / too-short queries return [] without a DB call.
+    const normalisedHandle = normalizeHandle(term);
+    if (normalisedHandle.length < 2) return [];
+
     const accounts = await this.prisma.socialAccount.findMany({
       where: {
         platform: normType,
-        handle: { contains: term, mode: 'insensitive' },
+        handle: normalisedHandle,
         user: { deletedAt: null },
         userId: { not: viewerUserId, ...(excludedFilter ?? {}) },
       },
       select: {
         platform: true,
-        handle: true,
         user: { select: PUBLIC_PROJECTION },
       },
-      take: 20,
+      take: 1,
     });
     return accounts.map<SearchRow>((a) => ({
       ...a.user,
       matchedField: a.platform,
-      // Social handles are explicitly published by the user — safe to
-      // surface so the searcher can confirm they found the right person.
-      matchedValue: `@${a.handle}`,
+      // Never echo the handle back — the searcher already typed it.
+      // Echoing would let an attacker probe variants (e.g. test
+      // capitalisations) and learn which exact form is stored.
+      matchedValue: '',
     }));
   }
 

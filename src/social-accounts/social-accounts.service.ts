@@ -43,7 +43,13 @@ const PUBLIC_SELECT = {
   createdAt: true,
 } as const;
 
-function normalizeHandle(raw: string | undefined): string {
+// Exported so UsersService.searchUsers (and any future caller that
+// needs to look a handle up by its canonical form) applies the EXACT
+// same normalization used at write time. Without sharing this, a
+// stored handle and a queried handle could subtly disagree on
+// whitespace / case / @-prefix and the exact-match social search
+// would miss valid hits.
+export function normalizeHandle(raw: string | undefined): string {
   if (typeof raw !== 'string') return '';
   // Strip leading @ + whitespace; collapse internal whitespace.
   // Lowercase to match the @@unique([platform, handle]) constraint
