@@ -759,6 +759,14 @@ model Order {
   // Gift schema default.
   isSurprise       Boolean  @default(false)
   isAnonymous      Boolean  @default(false)
+  // Optional Phase 6.4 gifting-context tag. The sender may attach
+  // an occasion when sending — typically the recipient's upcoming
+  // birthday or a milestone — so the eventual Gift row inherits
+  // the link via PaymentsService → GiftsService.create. SetNull on
+  // the underlying Occasion soft-delete so a paid order with a
+  // tagged occasion isn't blocked from progressing if the occasion
+  // is later removed from the owner's list.
+  occasionId       String?
   status           String   @default("pending")
   createdAt        DateTime @default(now())
 

@@ -51,6 +51,13 @@ export type CreateOrderInput = {
   // is skipped so the demo paths keep working.
   productId?: string;
   storeId?: string;
+  // Optional Phase 6.4 gifting-context tag. The sender may attach
+  // an occasion (typically the recipient's upcoming birthday) on
+  // /send. Persisted on Order so the value survives the payment
+  // hop; PaymentsService forwards it into GiftsService.create when
+  // the Order confirms. Validation lives at the Gift boundary — we
+  // accept the string as-given here.
+  occasionId?: string;
 };
 
 const FORBIDDEN_MSG = 'غير مصرح لك';
@@ -262,6 +269,10 @@ export class OrdersService {
         // through to GiftsService.create when the payment confirms.
         productId: body.productId?.trim() || null,
         storeId: resolvedStoreId,
+        // Optional Phase 6.4 gifting-context tag. Persisted as-given;
+        // validation happens at the Gift boundary (does the sender
+        // actually have a valid attach context for this occasion?).
+        occasionId: body.occasionId?.trim() || null,
         productPrice,
         serviceFee,
         deliveryFee,

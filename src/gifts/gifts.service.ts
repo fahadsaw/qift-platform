@@ -63,6 +63,25 @@ export type CreateGiftInput = {
   // the Gift inherits the right FKs and the store dashboard can filter.
   productId?: string;
   storeId?: string;
+  // Optional Phase 6.4 gifting-context tag. The sender attached an
+  // occasion on /send (typically the recipient's upcoming birthday).
+  // Validated against:
+  //   1. occasion exists AND is not soft-deleted, AND
+  //   2. either: occasion.userId === senderId (the sender keeps a
+  //      private "remember Sarah's birthday" row), OR
+  //               occasion.userId === receiverId  (we trust the
+  //               picker UI's visibility filter — see note below).
+  // If invalid, we silently drop the tag rather than fail the gift —
+  // a stale UI shouldn't block a payment that already cleared.
+  //
+  // Note on the receiver-owned path: V1 doesn't re-run canSeeOccasion
+  // here. The frontend's gifting-context picker only fetches
+  // /users/:userId/occasions which is already privacy-filtered
+  // (RelationshipOccasion[] from Phase 6.2). A malicious client
+  // passing a random `occasionId` will simply attach a wrong tag —
+  // it doesn't leak any data because the value is sender-side
+  // bookkeeping only. Phase 7 hardens this if telemetry shows abuse.
+  occasionId?: string;
 };
 
 const PARTY_SELECT = {
@@ -314,6 +333,38 @@ export class GiftsService {
       );
     }
 
+    // Resolve the optional Phase 6.4 occasion-attach. Two valid
+    // shapes; everything else drops to null.
+    //
+    //   sender-owned: occasion.userId === senderId
+    //                  (the sender keeps a private "remember Sarah's
+    //                  birthday" entry on their own /occasions list)
+    //   receiver-owned: occasion.userId === receiverId
+    //                  (the recipient's own occasion; we trust the
+    //                  picker UI's privacy filter from Phase 6.2)
+    //
+    // Soft-deleted (deactivatedAt) rows are rejected so a stale tag
+    // doesn't resurrect an occasion the owner removed.
+    let resolvedOccasionId: string | null = null;
+    const requestedOccasionId = body.occasionId?.trim();
+    if (requestedOccasionId) {
+      const occ = await this.prisma.occasion.findFirst({
+        where: { id: requestedOccasionId, deactivatedAt: null },
+        select: { id: true, userId: true },
+      });
+      const matches =
+        occ && (occ.userId === senderId || occ.userId === receiver.id);
+      if (matches) {
+        resolvedOccasionId = occ.id;
+      } else if (process.env.ORDER_FLOW_DEBUG === '1') {
+        this.logger.log(
+          `[order-flow] gifts.create dropping invalid occasionId=` +
+            `${requestedOccasionId} sender=${senderId} ` +
+            `receiver=${receiver.id} ownerOnRow=${occ?.userId ?? 'null'}`,
+        );
+      }
+    }
+
     const created = await this.prisma.gift.create({
       data: {
         senderId,
@@ -325,6 +376,8 @@ export class GiftsService {
         // pass nothing and these stay null.
         storeId: resolvedStoreId,
         productId: body.productId?.trim() || null,
+        // Phase 6.4 gifting-context tag — resolved above.
+        occasionId: resolvedOccasionId,
         messageText,
         mediaUrl,
         mediaType,

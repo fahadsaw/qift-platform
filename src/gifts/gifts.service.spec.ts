@@ -34,6 +34,10 @@ type MockPrisma = {
   giftPost: { updateMany: jest.Mock };
   store: { findUnique: jest.Mock };
   product: { findUnique: jest.Mock };
+  // Phase 6.4 — occasion attach validation. The Gift.create path
+  // calls findFirst against this table only when the caller passes
+  // body.occasionId; legacy tests (no attach) leave the mock unset.
+  occasion: { findFirst: jest.Mock };
 };
 
 function createPrismaMock(): MockPrisma {
@@ -61,6 +65,10 @@ function createPrismaMock(): MockPrisma {
     },
     store: { findUnique: jest.fn() },
     product: { findUnique: jest.fn() },
+    // Phase 6.4. Defaults to "not found" — the legacy create-path
+    // tests pass nothing, so the lookup is never invoked; the
+    // occasion-attach tests below override per case.
+    occasion: { findFirst: jest.fn().mockResolvedValue(null) },
   };
 }
 
@@ -432,5 +440,172 @@ describe('GiftsService — wishlist purchase fulfillment hook', () => {
       // Cancel still succeeds end-to-end — the hook is best-effort.
       await expect(service.cancel('gift_1', SENDER_ID)).resolves.toBeDefined();
     });
+  });
+});
+
+// Phase 6.4 — gifting-context occasion attach. The Gift.create path
+// accepts an optional `occasionId` and validates it against the
+// (sender, receiver, owner) shape. These tests cover the three
+// terminal branches:
+//   - sender-owned occasion → persisted
+//   - receiver-owned occasion → persisted
+//   - any other owner OR soft-deleted → silently dropped (the gift
+//     is still created; we never fail a payment for a stale tag)
+
+describe('GiftsService — occasion attach (Phase 6.4)', () => {
+  let service: GiftsService;
+  let prisma: MockPrisma;
+
+  beforeEach(async () => {
+    prisma = createPrismaMock();
+    // Common happy-path fixtures shared across the attach tests.
+    prisma.user.findUnique.mockResolvedValue({
+      qiftUsername: 'sender_handle',
+    });
+    prisma.user.findFirst.mockResolvedValue({ id: RECEIVER_ID });
+    prisma.address.findFirst.mockResolvedValue({ id: 'addr_1' });
+    prisma.gift.create.mockImplementation(({ data }: { data: unknown }) =>
+      Promise.resolve({
+        id: 'gift_attach',
+        senderId: SENDER_ID,
+        receiverId: RECEIVER_ID,
+        productName: (data as { productName: string }).productName,
+        storeName: (data as { storeName: string }).storeName,
+        productId: null,
+        storeId: null,
+        // Pass through whatever occasionId the service decided to
+        // persist so the assertions can read it back.
+        occasionId: (data as { occasionId: string | null }).occasionId,
+        status: 'pending_address',
+        sender: {
+          id: SENDER_ID,
+          qiftUsername: 'sender_handle',
+          fullName: null,
+        },
+        receiver: {
+          id: RECEIVER_ID,
+          qiftUsername: 'receiver_handle',
+          fullName: null,
+        },
+        address: null,
+      }),
+    );
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        GiftsService,
+        { provide: PrismaService, useValue: prisma },
+        {
+          provide: NotificationsService,
+          useValue: { trigger: jest.fn().mockResolvedValue(undefined) },
+        },
+      ],
+    }).compile();
+    service = module.get<GiftsService>(GiftsService);
+  });
+
+  it('persists occasionId when the occasion is owned by the sender', async () => {
+    // Sender keeps "remember Sarah's birthday" on their own list.
+    // This is the relatedUserId path — the sender's own row tagged
+    // with receiver as the celebrated person.
+    prisma.occasion.findFirst.mockResolvedValue({
+      id: 'occ_sender_owned',
+      userId: SENDER_ID,
+    });
+
+    await service.create(
+      {
+        receiverUsername: 'receiver_handle',
+        productName: 'باقة جوري',
+        storeName: 'باقات الرياض',
+        occasionId: 'occ_sender_owned',
+      },
+      SENDER_ID,
+    );
+
+    const created = prisma.gift.create.mock.calls[0][0];
+    expect(created.data.occasionId).toBe('occ_sender_owned');
+  });
+
+  it('persists occasionId when the occasion is owned by the receiver', async () => {
+    // Receiver's own /occasions list. The picker UI fetched this via
+    // /users/:id/occasions (privacy-filtered server-side).
+    prisma.occasion.findFirst.mockResolvedValue({
+      id: 'occ_receiver_owned',
+      userId: RECEIVER_ID,
+    });
+
+    await service.create(
+      {
+        receiverUsername: 'receiver_handle',
+        productName: 'باقة جوري',
+        storeName: 'باقات الرياض',
+        occasionId: 'occ_receiver_owned',
+      },
+      SENDER_ID,
+    );
+
+    const created = prisma.gift.create.mock.calls[0][0];
+    expect(created.data.occasionId).toBe('occ_receiver_owned');
+  });
+
+  it('silently drops occasionId when the occasion is owned by a third party', async () => {
+    // A malicious client passes an arbitrary occasion id — we drop
+    // it. The gift still creates (we never fail a payment over a
+    // stale tag) but the Gift.occasionId column ends up null.
+    prisma.occasion.findFirst.mockResolvedValue({
+      id: 'occ_third_party',
+      userId: 'some_other_user',
+    });
+
+    await service.create(
+      {
+        receiverUsername: 'receiver_handle',
+        productName: 'باقة جوري',
+        storeName: 'باقات الرياض',
+        occasionId: 'occ_third_party',
+      },
+      SENDER_ID,
+    );
+
+    const created = prisma.gift.create.mock.calls[0][0];
+    expect(created.data.occasionId).toBeNull();
+  });
+
+  it('silently drops occasionId when the occasion is soft-deleted', async () => {
+    // The deactivatedAt: null clause in the lookup filters this out,
+    // so findFirst returns null — same drop path as the third-party
+    // case. (No separate "soft-deleted" branch in service code.)
+    prisma.occasion.findFirst.mockResolvedValue(null);
+
+    await service.create(
+      {
+        receiverUsername: 'receiver_handle',
+        productName: 'باقة جوري',
+        storeName: 'باقات الرياض',
+        occasionId: 'occ_was_soft_deleted',
+      },
+      SENDER_ID,
+    );
+
+    const created = prisma.gift.create.mock.calls[0][0];
+    expect(created.data.occasionId).toBeNull();
+  });
+
+  it('skips the occasion lookup entirely when no occasionId is supplied', async () => {
+    await service.create(
+      {
+        receiverUsername: 'receiver_handle',
+        productName: 'باقة جوري',
+        storeName: 'باقات الرياض',
+      },
+      SENDER_ID,
+    );
+
+    // Defence-in-depth: the legacy path must not pay a Prisma round-
+    // trip just to ignore an absent occasionId.
+    expect(prisma.occasion.findFirst).not.toHaveBeenCalled();
+    const created = prisma.gift.create.mock.calls[0][0];
+    expect(created.data.occasionId).toBeNull();
   });
 });

@@ -130,6 +130,10 @@ export class PaymentsService {
           // payment confirmation here.
           productId: order.productId ?? undefined,
           storeId: order.storeId ?? undefined,
+          // Forward the optional Phase 6.4 occasion-attach. GiftsService.
+          // create re-validates it against (senderId, receiverId, owner)
+          // so a stale Order.occasionId won't slip through.
+          occasionId: order.occasionId ?? undefined,
         },
         viewerUserId,
       );
