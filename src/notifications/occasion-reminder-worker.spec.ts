@@ -34,6 +34,13 @@ type MockPrisma = {
   reminderFiring: {
     create: jest.Mock;
     update: jest.Mock;
+    // Stale-claim observability — `count` is called on every
+    // runOnce(); cleanup-related methods are exercised only by
+    // the cleanupStaleClaims specs further down.
+    count: jest.Mock;
+    findMany: jest.Mock;
+    updateMany: jest.Mock;
+    deleteMany: jest.Mock;
   };
 };
 
@@ -43,6 +50,10 @@ function createPrismaMock(): MockPrisma {
     reminderFiring: {
       create: jest.fn(),
       update: jest.fn().mockResolvedValue({}),
+      count: jest.fn().mockResolvedValue(0),
+      findMany: jest.fn().mockResolvedValue([]),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
   };
 }
@@ -368,6 +379,218 @@ describe('OccasionReminderWorker', () => {
       const call = orchestrator.enqueue.mock.calls[0][0];
       // No identity leak — uses the generic "a birthday" phrase.
       expect(call.body).toContain('a birthday');
+    });
+  });
+
+  describe('stale-claim observability (runOnce telemetry)', () => {
+    beforeEach(enableFiring);
+
+    it('reports staleClaims=0 when no stale rows exist (steady state)', async () => {
+      prisma.reminderFiring.count.mockResolvedValueOnce(0);
+      const out = await worker.runOnce({ now: new Date(Date.UTC(2026, 5, 8)) });
+      expect(out.staleClaims).toBe(0);
+    });
+
+    it('surfaces a non-zero staleClaims count in the run stats', async () => {
+      // Three rows have been stuck in 'claimed' state for >24h.
+      // Should appear as an early-warning signal in the worker's
+      // return value + log line WITHOUT mutating anything (the
+      // cleanup endpoint is the only path that writes).
+      prisma.reminderFiring.count.mockResolvedValueOnce(3);
+      const out = await worker.runOnce({ now: new Date(Date.UTC(2026, 5, 8)) });
+      expect(out.staleClaims).toBe(3);
+      // CRITICAL: the count must not have triggered any mutation.
+      expect(prisma.reminderFiring.updateMany).not.toHaveBeenCalled();
+      expect(prisma.reminderFiring.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('passes a 24h-old threshold to the count query', async () => {
+      const now = new Date(Date.UTC(2026, 5, 8, 12, 0, 0));
+      prisma.reminderFiring.count.mockResolvedValueOnce(0);
+      await worker.runOnce({ now });
+      const call = prisma.reminderFiring.count.mock.calls[0][0];
+      expect(call.where.status).toBe('claimed');
+      // firedAt threshold must be exactly 24h before now.
+      const expected = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      expect(call.where.firedAt.lt).toEqual(expected);
+    });
+
+    it('continues the run if the count query throws', async () => {
+      prisma.reminderFiring.count.mockRejectedValueOnce(
+        new Error('telemetry db blip'),
+      );
+      const out = await worker.runOnce({ now: new Date(Date.UTC(2026, 5, 8)) });
+      // Run still completed; stale count defaults to 0 on failure.
+      expect(out.ran).toBe(true);
+      expect(out.staleClaims).toBe(0);
+    });
+  });
+
+  describe('cleanupStaleClaims — recovery for stuck "claimed" rows', () => {
+    // The cleanup is the operator recovery path. The activation
+    // flag does NOT gate it (it's a recovery action, not a fire),
+    // but the dry-run default and forceClear opt-in safeguards
+    // are in place to keep the surface safe.
+
+    describe('safe default (mark-failed) mode', () => {
+      it('defaults to dryRun=true and does NOT write', async () => {
+        prisma.reminderFiring.findMany.mockResolvedValueOnce([
+          { id: 'rf_stale_1' },
+          { id: 'rf_stale_2' },
+        ]);
+        const out = await worker.cleanupStaleClaims({});
+        expect(out.dryRun).toBe(true);
+        expect(out.considered).toBe(2);
+        expect(out.recovered).toBe(0);
+        expect(out.cleared).toBe(0);
+        // CRITICAL: no mutation in dry-run mode.
+        expect(prisma.reminderFiring.updateMany).not.toHaveBeenCalled();
+        expect(prisma.reminderFiring.deleteMany).not.toHaveBeenCalled();
+      });
+
+      it('transitions claimed → failed when dryRun=false', async () => {
+        prisma.reminderFiring.findMany.mockResolvedValueOnce([
+          { id: 'rf_stale_1' },
+          { id: 'rf_stale_2' },
+        ]);
+        prisma.reminderFiring.updateMany.mockResolvedValueOnce({ count: 2 });
+        const out = await worker.cleanupStaleClaims({ dryRun: false });
+        expect(out.dryRun).toBe(false);
+        expect(out.forceClear).toBe(false);
+        expect(out.recovered).toBe(2);
+        expect(out.cleared).toBe(0);
+        // The update must:
+        //   - target ONLY the discovered ids
+        //   - re-assert `status: 'claimed'` for race safety (a
+        //     concurrent legitimate update to 'sent' won't be
+        //     clobbered)
+        //   - set status='failed' + reason='stale_claim_recovered'
+        const call = prisma.reminderFiring.updateMany.mock.calls[0][0];
+        expect(call.where.id.in).toEqual(['rf_stale_1', 'rf_stale_2']);
+        expect(call.where.status).toBe('claimed');
+        expect(call.data).toEqual({
+          status: 'failed',
+          reason: 'stale_claim_recovered',
+        });
+      });
+
+      it('preserves the idempotency anchor — no delete, key still held', async () => {
+        // The PURPOSE of mark-failed (vs force-clear) is to keep
+        // the unique constraint engaged. We assert deleteMany is
+        // never called in the safe path.
+        prisma.reminderFiring.findMany.mockResolvedValueOnce([
+          { id: 'rf_stale_1' },
+        ]);
+        prisma.reminderFiring.updateMany.mockResolvedValueOnce({ count: 1 });
+        await worker.cleanupStaleClaims({ dryRun: false });
+        expect(prisma.reminderFiring.deleteMany).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('destructive opt-in (force-clear) mode', () => {
+      it('requires BOTH dryRun=false AND forceClear=true to delete', async () => {
+        prisma.reminderFiring.findMany.mockResolvedValueOnce([
+          { id: 'rf_stale_1' },
+        ]);
+        // forceClear=true but dryRun still default true → no write.
+        const out = await worker.cleanupStaleClaims({ forceClear: true });
+        expect(out.dryRun).toBe(true);
+        expect(out.forceClear).toBe(true);
+        expect(out.cleared).toBe(0);
+        expect(prisma.reminderFiring.deleteMany).not.toHaveBeenCalled();
+      });
+
+      it('deletes when dryRun=false AND forceClear=true', async () => {
+        prisma.reminderFiring.findMany.mockResolvedValueOnce([
+          { id: 'rf_stale_1' },
+          { id: 'rf_stale_2' },
+        ]);
+        prisma.reminderFiring.deleteMany.mockResolvedValueOnce({ count: 2 });
+        const out = await worker.cleanupStaleClaims({
+          dryRun: false,
+          forceClear: true,
+        });
+        expect(out.cleared).toBe(2);
+        expect(out.recovered).toBe(0);
+        // updateMany must NOT be called in force-clear mode.
+        expect(prisma.reminderFiring.updateMany).not.toHaveBeenCalled();
+        const call = prisma.reminderFiring.deleteMany.mock.calls[0][0];
+        // Same race-safe predicate as mark-failed.
+        expect(call.where.id.in).toEqual(['rf_stale_1', 'rf_stale_2']);
+        expect(call.where.status).toBe('claimed');
+      });
+    });
+
+    describe('scan window + safety rails', () => {
+      it('clamps staleHoursOld to [1, 720]', async () => {
+        prisma.reminderFiring.findMany.mockResolvedValue([]);
+
+        await worker.cleanupStaleClaims({
+          staleHoursOld: -5,
+          now: new Date(Date.UTC(2026, 5, 8, 0, 0, 0)),
+        });
+        const lowerCall = prisma.reminderFiring.findMany.mock.calls[0][0];
+        // Lower bound clamp = 1 hour.
+        expect(lowerCall.where.firedAt.lt).toEqual(
+          new Date(Date.UTC(2026, 5, 7, 23, 0, 0)),
+        );
+
+        await worker.cleanupStaleClaims({
+          staleHoursOld: 99999,
+          now: new Date(Date.UTC(2026, 5, 8, 0, 0, 0)),
+        });
+        const upperCall = prisma.reminderFiring.findMany.mock.calls[1][0];
+        // Upper bound clamp = 720 hours (30 days).
+        expect(upperCall.where.firedAt.lt).toEqual(
+          new Date(Date.UTC(2026, 4, 9, 0, 0, 0)),
+        );
+      });
+
+      it('returns considered=0 + zero counts when no stale rows exist', async () => {
+        prisma.reminderFiring.findMany.mockResolvedValueOnce([]);
+        const out = await worker.cleanupStaleClaims({ dryRun: false });
+        expect(out.considered).toBe(0);
+        expect(out.recovered).toBe(0);
+        expect(out.cleared).toBe(0);
+        expect(out.errors).toBe(0);
+        expect(out.sampleIds).toEqual([]);
+        // Must NOT call updateMany/deleteMany when there's nothing
+        // to do.
+        expect(prisma.reminderFiring.updateMany).not.toHaveBeenCalled();
+        expect(prisma.reminderFiring.deleteMany).not.toHaveBeenCalled();
+      });
+
+      it('surfaces up to 10 row ids as sampleIds for operator inspection', async () => {
+        const fifteenIds = Array.from({ length: 15 }, (_, i) => ({
+          id: `rf_${i}`,
+        }));
+        prisma.reminderFiring.findMany.mockResolvedValueOnce(fifteenIds);
+        const out = await worker.cleanupStaleClaims({});
+        expect(out.considered).toBe(15);
+        expect(out.sampleIds).toHaveLength(10);
+        expect(out.sampleIds[0]).toBe('rf_0');
+      });
+
+      it('counts errors when the update fails', async () => {
+        prisma.reminderFiring.findMany.mockResolvedValueOnce([
+          { id: 'rf_stale_1' },
+        ]);
+        prisma.reminderFiring.updateMany.mockRejectedValueOnce(
+          new Error('db down'),
+        );
+        const out = await worker.cleanupStaleClaims({ dryRun: false });
+        expect(out.errors).toBe(1);
+        expect(out.recovered).toBe(0);
+      });
+
+      it('counts errors when the scan fails', async () => {
+        prisma.reminderFiring.findMany.mockRejectedValueOnce(
+          new Error('scan blew up'),
+        );
+        const out = await worker.cleanupStaleClaims({ dryRun: false });
+        expect(out.errors).toBe(1);
+        expect(out.considered).toBe(0);
+      });
     });
   });
 });

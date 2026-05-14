@@ -12,6 +12,7 @@ import {
   NotificationsService,
   NotificationType,
 } from '../notifications/notifications.service';
+import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
 import { assertTransition, type GiftStatus } from './gift-status';
 import {
   applyGiftVisibility,
@@ -924,11 +925,21 @@ export class GiftsService {
 
     // Notify the receiver. We don't notify the sender — they just
     // performed the action and don't need a self-notification.
+    //
+    // Body uses the surprise-aware helper. A cancelled surprise
+    // gift NEVER resolves the surprise — the receiver doesn't get
+    // to see the product, so the cancellation notification must
+    // not be the place where the productName finally leaks. The
+    // helper passes `status: 'cancelled'` through the mask
+    // (surprise + not delivered → mask).
     void this.notifications.trigger({
       userId: gift.receiverId,
       type: NotificationType.GiftCancelled,
       title: 'تم إلغاء الهدية',
-      body: gift.productName,
+      body: bodyForReceiverGiftUpdate(
+        { isSurprise: gift.isSurprise, status: 'cancelled' },
+        gift.productName,
+      ),
       // Deep-link to the gift detail when possible — receiver lands
       // on the cancelled-state card directly instead of bouncing to
       // a list and hunting for it.

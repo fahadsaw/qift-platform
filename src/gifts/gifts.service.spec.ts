@@ -440,6 +440,79 @@ describe('GiftsService — wishlist purchase fulfillment hook', () => {
       // Cancel still succeeds end-to-end — the hook is best-effort.
       await expect(service.cancel('gift_1', SENDER_ID)).resolves.toBeDefined();
     });
+
+    describe('surprise-mode privacy on cancellation notification', () => {
+      // A cancelled surprise gift NEVER resolves the surprise — the
+      // receiver doesn't get to see the product. The cancellation
+      // notification body must therefore NOT leak productName via
+      // the push pipeline. The title stays generic (ar: "تم إلغاء
+      // الهدية" — "Your gift was cancelled") so the receiver still
+      // knows what happened without learning what it was.
+
+      function surpriseCancellableGift(isSurprise: boolean) {
+        // Both findUnique calls in cancel() return the same shape;
+        // the helper composes the notification body from the FIRST
+        // (pre-update) read, so status='pending_address' is what
+        // matters for routing. Mirror the same shape on the default
+        // and the post-update read to avoid a stale-state surprise
+        // inside the test setup.
+        const giftRow = {
+          id: 'gift_surprise',
+          senderId: SENDER_ID,
+          receiverId: RECEIVER_ID,
+          productName: 'باقة جوري',
+          storeName: 'باقات الرياض',
+          productId: PRODUCT_ID,
+          storeId: STORE_ID,
+          status: 'pending_address',
+          isSurprise,
+          sender: {
+            id: SENDER_ID,
+            qiftUsername: 'sender_handle',
+            fullName: null,
+          },
+          receiver: {
+            id: RECEIVER_ID,
+            qiftUsername: 'receiver_handle',
+            fullName: null,
+          },
+          address: null,
+        };
+        prisma.gift.findUnique.mockResolvedValue(giftRow);
+        prisma.gift.updateMany.mockResolvedValue({ count: 1 });
+      }
+
+      it('masks productName in the receiver cancellation body when isSurprise=true', async () => {
+        surpriseCancellableGift(true);
+        await service.cancel('gift_surprise', SENDER_ID);
+
+        // The receiver gets exactly one notification (cancellation).
+        // The sender does NOT get one — they performed the action.
+        expect(notifications.trigger).toHaveBeenCalledTimes(1);
+        const call = notifications.trigger.mock.calls[0][0];
+        expect(call.userId).toBe(RECEIVER_ID);
+        expect(call.type).toBe('gift.cancelled');
+        // Title is generic — no product leak.
+        expect(call.title).not.toContain('باقة جوري');
+        // CRITICAL: body must be null on surprise cancellation.
+        // This is the surprise-privacy invariant — a surprise that
+        // never resolved (because it was cancelled) must not leak
+        // the product via the cancellation push.
+        expect(call.body).toBeNull();
+      });
+
+      it('reveals productName in the receiver cancellation body when isSurprise=false', async () => {
+        // Baseline: non-surprise gifts continue to render productName
+        // in the cancellation body (the receiver already saw it on
+        // the initial GiftReceived notification — no new leak).
+        surpriseCancellableGift(false);
+        await service.cancel('gift_surprise', SENDER_ID);
+
+        const call = notifications.trigger.mock.calls[0][0];
+        expect(call.userId).toBe(RECEIVER_ID);
+        expect(call.body).toBe('باقة جوري');
+      });
+    });
   });
 });
 

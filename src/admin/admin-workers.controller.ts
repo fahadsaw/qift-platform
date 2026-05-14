@@ -76,4 +76,72 @@ export class AdminWorkersController {
           : undefined;
     return this.digestWorker.runOnce({ forceDryRun, cadenceOverride });
   }
+
+  // POST /admin/workers/cleanup-stale-reminder-claims
+  //
+  // Operator recovery for stuck ReminderFiring rows. A 'claimed'
+  // row means the worker inserted the idempotency anchor but the
+  // orchestrator call never completed (crash / unexpected throw).
+  // The (reminderId, occurrenceAt) pair is then permanently
+  // blocked by the unique constraint until this endpoint runs.
+  //
+  // Query params:
+  //   - dryRun       (default 'true')  — SAFE DEFAULT. Preview the
+  //                                       affected rows without
+  //                                       mutating. Pass 'false' to
+  //                                       actually write.
+  //   - staleHoursOld (default 24)     — Only consider rows whose
+  //                                       firedAt is older than
+  //                                       this. Clamped to [1, 720].
+  //   - forceClear   (default 'false') — DESTRUCTIVE. When 'true'
+  //                                       AND dryRun='false', the
+  //                                       rows are DELETED so the
+  //                                       (reminderId,
+  //                                       occurrenceAt) unique key
+  //                                       releases and re-fire is
+  //                                       possible. Risks duplicate
+  //                                       push if the original
+  //                                       orchestrator call had
+  //                                       already partly run. Use
+  //                                       only with operator
+  //                                       evidence the orchestrator
+  //                                       never ran.
+  //
+  // Default (no forceClear): rows transition to status='failed'
+  // with reason='stale_claim_recovered'. The user misses this one
+  // reminder occurrence; idempotency stays intact; no duplicate
+  // risk. This is the recommended cleanup.
+  //
+  // Returns a structured report:
+  //   { dryRun, forceClear, staleHoursOld, considered, recovered,
+  //     cleared, errors, sampleIds }
+  // — operator cross-references `sampleIds` with the worker logs
+  // to investigate root cause.
+  @Post('cleanup-stale-reminder-claims')
+  async cleanupStaleReminderClaims(
+    @Query('dryRun') dryRun?: string,
+    @Query('staleHoursOld') staleHoursOld?: string,
+    @Query('forceClear') forceClear?: string,
+  ) {
+    // dryRun default = true. Explicit 'false' string is the only
+    // way to opt out. Anything else (including unset, 'TRUE',
+    // garbage) keeps dryRun=true — protects against typo'd
+    // operator commands actually writing.
+    const dryRunValue = dryRun !== 'false';
+    // forceClear default = false. Requires explicit 'true' to
+    // engage destructive mode. Combined with dryRun's opt-out
+    // default, the destructive path requires BOTH explicit
+    // overrides: `?dryRun=false&forceClear=true`.
+    const forceClearValue = forceClear === 'true';
+    let staleHoursOldValue: number | undefined;
+    if (staleHoursOld !== undefined) {
+      const parsed = Number.parseInt(staleHoursOld, 10);
+      if (Number.isFinite(parsed)) staleHoursOldValue = parsed;
+    }
+    return this.reminderWorker.cleanupStaleClaims({
+      dryRun: dryRunValue,
+      forceClear: forceClearValue,
+      staleHoursOld: staleHoursOldValue,
+    });
+  }
 }

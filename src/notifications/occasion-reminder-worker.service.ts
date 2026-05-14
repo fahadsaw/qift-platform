@@ -88,6 +88,16 @@ export type ReminderRunResult = {
   filteredAllowlist: number;
   filteredSamplePercent: number;
   filteredDryRun: number;
+  // Stale-claim early-warning. Count of ReminderFiring rows still
+  // stuck in 'claimed' status more than STALE_CLAIM_WARN_HOURS
+  // hours after their firedAt. In steady state this should be
+  // near zero; a non-zero reading flags that the orchestrator
+  // crashed mid-fire and the (reminderId, occurrenceAt) pair is
+  // permanently blocked by the unique constraint until an
+  // operator runs the cleanup endpoint. Pure metric — does NOT
+  // mutate or recover; recovery is opt-in via the dedicated
+  // admin endpoint (see cleanupStaleClaims below).
+  staleClaims: number;
 };
 
 export type ReminderRunOptions = {
@@ -98,6 +108,83 @@ export type ReminderRunOptions = {
   // regardless of QIFT_REMINDER_DRY_RUN. Lets admins safely
   // preview "what would fire right now" without changing env.
   forceDryRun?: boolean;
+};
+
+// ── Stale-claim cleanup ────────────────────────────────────────
+//
+// A ReminderFiring row in 'claimed' status represents an in-flight
+// fire that never completed: the worker inserted the row (which
+// reserved the unique key against duplicate fires), called the
+// orchestrator, and then crashed before transitioning the row to
+// its terminal status ('sent' / 'suppressed' / 'failed').
+//
+// The unique constraint on (reminderId, occurrenceAt) is the
+// idempotency anchor — it's WHY we insert the claim before the
+// orchestrator call. The downside is that a crashed fire leaves
+// the (reminderId, occurrenceAt) pair permanently blocked. For a
+// yearly birthday, that means the user misses this year's
+// reminder. For a once-only occasion, they miss it entirely.
+//
+// Two recovery modes are offered, BOTH explicitly opt-in:
+//
+//   1. SAFE DEFAULT (forceClear = false): transition the stale
+//      'claimed' row to status='failed' with
+//      reason='stale_claim_recovered'. The unique key STILL holds
+//      — no retry possible — so no duplicate fire risk. The user
+//      misses this reminder occurrence; recovery happens
+//      automatically at the next occurrence (next year for yearly,
+//      never for once-only). This is the cautious posture: better
+//      to lose ONE reminder than to risk a duplicate after a
+//      partial fire (we cannot tell from the row alone whether
+//      the orchestrator wrote a Notification + fired push, or
+//      crashed before the orchestrator ran at all).
+//
+//   2. DESTRUCTIVE OPT-IN (forceClear = true): DELETE the stale
+//      'claimed' rows entirely, releasing the unique constraint.
+//      The next worker run can then re-fire. USE WITH CARE — if
+//      the orchestrator actually wrote a Notification + sent push
+//      before crashing, the re-fire will duplicate. Operator
+//      should only use this when they have evidence the
+//      orchestrator never ran (e.g. logs show "claim inserted"
+//      but no "orchestrator returned").
+//
+// Dry-run is the default for both modes — the cleanup writes
+// nothing unless `dryRun: false` is explicitly passed.
+
+const STALE_CLAIM_WARN_HOURS = 24;
+const STALE_CLAIM_BATCH_LIMIT = 1000;
+const STALE_CLAIM_SAMPLE_LIMIT = 10;
+
+export type StaleClaimCleanupOptions = {
+  // Test seam.
+  now?: Date;
+  // Rows with firedAt older than this are eligible. Default 24.
+  // Clamped to [1, 720] (1 hour to 30 days) at the boundary.
+  staleHoursOld?: number;
+  // Default true — even the SAFE mode requires explicit opt-out
+  // (`dryRun: false`) to actually write. Operators should always
+  // dry-run first to see what would be touched.
+  dryRun?: boolean;
+  // Default false — the DESTRUCTIVE mode requires explicit
+  // `forceClear: true`. Even then, dry-run still wins; both flags
+  // must be set explicitly to delete.
+  forceClear?: boolean;
+};
+
+export type StaleClaimCleanupResult = {
+  dryRun: boolean;
+  forceClear: boolean;
+  staleHoursOld: number;
+  // Count of stale 'claimed' rows discovered.
+  considered: number;
+  // Rows transitioned 'claimed' → 'failed' (safe mode, dryRun=false).
+  recovered: number;
+  // Rows deleted (destructive mode, dryRun=false + forceClear=true).
+  cleared: number;
+  errors: number;
+  // Up to STALE_CLAIM_SAMPLE_LIMIT row ids for operator inspection.
+  // Helps cross-reference with logs / notification audit.
+  sampleIds: string[];
 };
 
 // ── Service ────────────────────────────────────────────────────
@@ -126,7 +213,33 @@ export class OccasionReminderWorker {
       filteredAllowlist: 0,
       filteredSamplePercent: 0,
       filteredDryRun: 0,
+      staleClaims: 0,
     };
+
+    // Early-warning telemetry: count stale 'claimed' rows that the
+    // orchestrator never completed. Cheap (indexed by status +
+    // firedAt range), runs on every invocation, surfaces in the
+    // log line. Operators should monitor: if this number trends
+    // up, run the cleanup endpoint. We DO NOT mutate stale rows
+    // here — recovery is a deliberate operator action via
+    // `cleanupStaleClaims()`.
+    try {
+      stats.staleClaims = await this.prisma.reminderFiring.count({
+        where: {
+          status: 'claimed',
+          firedAt: {
+            lt: new Date(
+              now.getTime() - STALE_CLAIM_WARN_HOURS * 60 * 60 * 1000,
+            ),
+          },
+        },
+      });
+    } catch (err) {
+      // Count failure must not block the run — log + continue.
+      this.logger.warn(
+        `[reminder-worker] stale-claim count failed: ${(err as Error).message}`,
+      );
+    }
 
     // Activation flag. Even an admin manual trigger respects this
     // — the flag is what holds the door closed until rollout
@@ -321,9 +434,152 @@ export class OccasionReminderWorker {
     }
 
     this.logger.log(
-      `[reminder-worker] run complete dryRun=${dryRun} considered=${stats.considered} inWindow=${stats.inWindow} fired=${stats.fired} digested=${stats.digested} suppressed=${stats.suppressed} filteredAllowlist=${stats.filteredAllowlist} filteredSamplePercent=${stats.filteredSamplePercent} filteredDryRun=${stats.filteredDryRun} errors=${stats.errors}`,
+      `[reminder-worker] run complete dryRun=${dryRun} considered=${stats.considered} inWindow=${stats.inWindow} fired=${stats.fired} digested=${stats.digested} suppressed=${stats.suppressed} filteredAllowlist=${stats.filteredAllowlist} filteredSamplePercent=${stats.filteredSamplePercent} filteredDryRun=${stats.filteredDryRun} errors=${stats.errors} staleClaims=${stats.staleClaims}`,
     );
     return stats;
+  }
+
+  // Operator recovery for stuck 'claimed' ReminderFiring rows.
+  //
+  // Default mode (safe): transitions stale rows to status='failed'
+  // with reason='stale_claim_recovered'. The unique constraint
+  // continues to hold — the (reminderId, occurrenceAt) pair stays
+  // single-fire forever, so no duplicate push is possible. The
+  // user simply misses this particular reminder occurrence.
+  //
+  // Force-clear mode (destructive): deletes stale rows entirely,
+  // releasing the unique key so the next worker run can re-fire.
+  // Useful when the operator KNOWS the orchestrator never ran
+  // (e.g. claim insert succeeded but the next log line is the
+  // crash). Risks duplicate fire if the orchestrator partially
+  // ran. ALWAYS dry-run first.
+  //
+  // Both modes are race-safe: the update / delete uses a
+  // `status: 'claimed'` predicate so a concurrent legitimate
+  // transition (status flipped to 'sent' between scan and write)
+  // is detected and skipped.
+  async cleanupStaleClaims(
+    opts: StaleClaimCleanupOptions = {},
+  ): Promise<StaleClaimCleanupResult> {
+    const now = opts.now ?? new Date();
+    // Default 24h. Clamp to [1, 720] (1h to 30d) — the lower bound
+    // prevents an operator from accidentally clearing in-flight
+    // fires; the upper bound is the audit window we care about.
+    const requestedHours = opts.staleHoursOld ?? 24;
+    const staleHoursOld = Math.min(
+      720,
+      Math.max(
+        1,
+        Math.floor(Number.isFinite(requestedHours) ? requestedHours : 24),
+      ),
+    );
+    // SAFE-DEFAULT: dryRun defaults to true. Operators must
+    // explicitly pass `dryRun: false` to actually write. Even the
+    // non-destructive 'failed' transition requires this opt-in.
+    const dryRun = opts.dryRun !== false;
+    const forceClear = opts.forceClear === true;
+
+    const threshold = new Date(now.getTime() - staleHoursOld * 60 * 60 * 1000);
+
+    let stale: Array<{ id: string }> = [];
+    try {
+      stale = await this.prisma.reminderFiring.findMany({
+        where: { status: 'claimed', firedAt: { lt: threshold } },
+        select: { id: true },
+        // Batch limit — first invocation against a bad backlog
+        // shouldn't blow up. Operator can re-run to clear more.
+        take: STALE_CLAIM_BATCH_LIMIT,
+        orderBy: { firedAt: 'asc' },
+      });
+    } catch (err) {
+      // Scan failure short-circuits with a clean error count.
+      this.logger.warn(
+        `[stale-claim-cleanup] scan failed: ${(err as Error).message}`,
+      );
+      return {
+        dryRun,
+        forceClear,
+        staleHoursOld,
+        considered: 0,
+        recovered: 0,
+        cleared: 0,
+        errors: 1,
+        sampleIds: [],
+      };
+    }
+
+    const considered = stale.length;
+    const sampleIds = stale.slice(0, STALE_CLAIM_SAMPLE_LIMIT).map((r) => r.id);
+    let recovered = 0;
+    let cleared = 0;
+    let errors = 0;
+
+    if (dryRun || considered === 0) {
+      // Report only. No DB writes. The log line + return value
+      // give the operator everything they need to decide.
+      this.logger.log(
+        `[stale-claim-cleanup] dryRun=${String(dryRun)} forceClear=${String(forceClear)} staleHoursOld=${staleHoursOld} considered=${considered} (no writes — preview only)`,
+      );
+      return {
+        dryRun,
+        forceClear,
+        staleHoursOld,
+        considered,
+        recovered: 0,
+        cleared: 0,
+        errors: 0,
+        sampleIds,
+      };
+    }
+
+    const ids = stale.map((r) => r.id);
+
+    if (forceClear) {
+      // DESTRUCTIVE — releases the unique constraint, allows
+      // re-fire on next worker run. Race-safe via the status
+      // predicate (a concurrent legitimate update to 'sent' won't
+      // be deleted).
+      try {
+        const result = await this.prisma.reminderFiring.deleteMany({
+          where: { id: { in: ids }, status: 'claimed' },
+        });
+        cleared = result.count;
+      } catch (err) {
+        errors += 1;
+        this.logger.warn(
+          `[stale-claim-cleanup] forceClear deleteMany failed: ${(err as Error).message}`,
+        );
+      }
+    } else {
+      // SAFE DEFAULT — transition to 'failed' with structured
+      // reason. The unique key stays held; no retry, no duplicate.
+      try {
+        const result = await this.prisma.reminderFiring.updateMany({
+          where: { id: { in: ids }, status: 'claimed' },
+          data: { status: 'failed', reason: 'stale_claim_recovered' },
+        });
+        recovered = result.count;
+      } catch (err) {
+        errors += 1;
+        this.logger.warn(
+          `[stale-claim-cleanup] updateMany failed: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `[stale-claim-cleanup] dryRun=false forceClear=${String(forceClear)} staleHoursOld=${staleHoursOld} considered=${considered} recovered=${recovered} cleared=${cleared} errors=${errors}`,
+    );
+    return {
+      dryRun,
+      forceClear,
+      staleHoursOld,
+      considered,
+      recovered,
+      cleared,
+      errors,
+      sampleIds,
+    };
   }
 }
 

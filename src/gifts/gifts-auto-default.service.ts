@@ -9,6 +9,7 @@ import {
   NotificationsService,
   NotificationType,
 } from '../notifications/notifications.service';
+import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
 import type { GiftStatus } from './gift-status';
 import { matchAddressToStoreZones } from '../stores/delivery-zones';
 
@@ -94,6 +95,11 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
         productName: true,
         storeId: true,
         productId: true,
+        // Surprise-aware notification bodies need this. Without it
+        // the bodyForReceiverGiftUpdate helper can't honour the
+        // surprise mask and would leak productName via the
+        // GiftAutoFallbackBlocked / GiftDefaultAddressUsed pushes.
+        isSurprise: true,
       },
     });
 
@@ -192,15 +198,20 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
           //     through, no action needed but they shouldn't be
           //     surprised when the gift sits longer.
           // Privacy: neither notification mentions WHICH address
-          // failed or any city/district — body is just productName.
-          // Sender's message stays addressless by design.
+          // failed or any city/district. Receiver body respects
+          // the surprise mask (gift is still pending_address,
+          // pre-delivery); sender body always shows the product
+          // they themselves chose.
           blocked += 1;
           const giftLink = `/gifts/${gift.id}`;
           void this.notifications.trigger({
             userId: gift.receiverId,
             type: NotificationType.GiftAutoFallbackBlocked,
             title: 'لم نتمكن من تأكيد العنوان تلقائياً',
-            body: gift.productName,
+            body: bodyForReceiverGiftUpdate(
+              { isSurprise: gift.isSurprise, status: 'pending_address' },
+              gift.productName,
+            ),
             link: giftLink,
           });
           void this.notifications.trigger({
@@ -232,12 +243,18 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
         // Notify both sides. The receiver's message is more apologetic
         // ("we used a saved address") because they're the one who
         // could have confirmed; the sender's is informational.
+        // Receiver body respects the surprise mask — after the
+        // sweep, status is `default_address_used` (pre-delivery)
+        // so a surprise gift still keeps its product hidden.
         const giftLink = `/gifts/${gift.id}`;
         void this.notifications.trigger({
           userId: gift.receiverId,
           type: NotificationType.GiftDefaultAddressUsed,
           title: 'تم استخدام عنوانك المحفوظ لإرسال الهدية',
-          body: gift.productName,
+          body: bodyForReceiverGiftUpdate(
+            { isSurprise: gift.isSurprise, status: 'default_address_used' },
+            gift.productName,
+          ),
           link: giftLink,
         });
         void this.notifications.trigger({

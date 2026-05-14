@@ -8,6 +8,7 @@ import {
   NotificationsService,
   NotificationType,
 } from '../notifications/notifications.service';
+import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
 import { assertTransition, type GiftStatus } from '../gifts/gift-status';
 import { StoresService } from '../stores/stores.service';
 import {
@@ -242,11 +243,16 @@ export class StoreService {
       data: { status: 'preparing' satisfies GiftStatus },
     });
 
+    // Receiver-side body respects the surprise mask — `productName`
+    // is privacy-sensitive until the gift reaches `delivered`. The
+    // title stays generic either way ("Your gift is being prepared.")
+    // so push-preview text never reveals product identity.
+    // Sender-side body is untouched: the sender chose the product.
     void this.notifications.trigger({
       userId: gift.receiverId,
       type: NotificationType.GiftPreparing,
       title: 'هديتك قيد التجهيز',
-      body: updated.productName,
+      body: bodyForReceiverGiftUpdate(updated, updated.productName),
       link: `/gifts/${gift.id}`,
     });
     void this.notifications.trigger({
@@ -339,12 +345,15 @@ export class StoreService {
 
     // Deep-link both notifications to the specific gift so receiver
     // and sender land directly on the timeline / tracking row.
+    // Receiver body respects the surprise mask (status is `shipped`,
+    // not yet `delivered`); sender body always includes productName
+    // because the sender chose it.
     const shippedLink = `/gifts/${gift.id}`;
     void this.notifications.trigger({
       userId: gift.receiverId,
       type: NotificationType.GiftShipped,
       title: 'تم شحن هديتك 🚚',
-      body: updated.productName,
+      body: bodyForReceiverGiftUpdate(updated, updated.productName),
       link: shippedLink,
     });
     void this.notifications.trigger({
