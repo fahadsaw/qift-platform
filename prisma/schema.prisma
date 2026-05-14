@@ -1610,10 +1610,68 @@ model OccasionReminder {
 
   user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   occasion      Occasion  @relation(fields: [occasionId], references: [id], onDelete: Cascade)
+  // Phase 7.2 — firing audit log. One row per (reminder,
+  // occurrenceDate) so a yearly birthday produces ONE
+  // ReminderFiring per year. The composite unique constraint
+  // there is what enforces "fire each reminder once per
+  // occurrence" idempotency.
+  firings       ReminderFiring[]
 
   // One reminder per (user, occasion, daysBefore) — re-creating
   // the same shape is an idempotent no-op via upsert.
   @@unique([userId, occasionId, daysBefore])
   // Per-user enabled-reminder query for the future sweep.
   @@index([userId, enabled])
+}
+
+// Phase 7.2 — occasion-reminder firing audit table.
+//
+// Append-only log of every reminder firing attempt. The unique
+// constraint on (reminderId, occurrenceAt) is the load-bearing
+// idempotency guarantee:
+//
+//   - "occurrenceAt" is the UTC midnight of the day the parent
+//     occasion fires (NOT the day the reminder dispatches). A
+//     yearly birthday on May 15 produces:
+//       occurrenceAt = 2026-05-15  → one ReminderFiring per
+//                                     reminder that year
+//       occurrenceAt = 2027-05-15  → a fresh row next year
+//   - Re-running the worker for the same (reminderId,
+//     occurrenceAt) hits the unique constraint and is a no-op.
+//   - The worker INSERTS this row BEFORE calling the orchestrator.
+//     If the orchestrator write fails, the row stays as a "claim"
+//     with status='claimed', preventing duplicate retry. A
+//     follow-up audit pass can clean stale claims; see Section 8
+//     of the worker doc-comment for the operational story.
+//
+// status values:
+//   claimed    — row inserted, orchestrator call pending
+//   sent       — orchestrator wrote a Notification + (maybe) push
+//   suppressed — orchestrator decided not to send (opt-out / budget)
+//   failed     — orchestrator threw an unexpected error
+//
+// reason: copied verbatim from the orchestrator's EnqueueResult
+//   when status is 'suppressed' / 'failed'. Telemetry-friendly.
+model ReminderFiring {
+  id           String   @id @default(cuid())
+  reminderId   String
+  // UTC-midnight Date of the occasion's occurrence this firing
+  // covers. Computed by the worker from the parent occasion's
+  // recurrence + the reminder's daysBefore.
+  occurrenceAt DateTime
+  firedAt      DateTime @default(now())
+  // 'claimed' | 'sent' | 'suppressed' | 'failed'
+  status       String   @default("claimed")
+  // Free-form telemetry. 'daily_cap_exceeded', 'user_opted_out',
+  // 'quiet_hours', etc. — mirrors orchestrator EnqueueResult.
+  reason       String?
+
+  reminder OccasionReminder @relation(fields: [reminderId], references: [id], onDelete: Cascade)
+
+  // The idempotency anchor. Two workers racing on the same
+  // (reminder, occurrence) collide here — exactly one wins.
+  @@unique([reminderId, occurrenceAt])
+  // Operator queries: "show me every firing for today" / "what's
+  // pending follow-up". One index covers both.
+  @@index([occurrenceAt, status])
 }

@@ -7,40 +7,34 @@ import {
   NotificationCategoriesController,
   NotificationPreferencesController,
 } from './notification-preferences.controller';
+import { OccasionReminderWorker } from './occasion-reminder-worker.service';
+import { DigestWorker } from './digest-worker.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PushModule } from '../push/push.module';
 
-// Phase 7.1 expanded the module:
+// Phase 7.2 added the two workers:
 //
-//   NotificationsService        — public surface used by gift /
-//                                 store / payment / etc. flows.
-//                                 Wire shape unchanged; internally
-//                                 routes through the orchestrator.
-//   NotificationOrchestrator    — composes category registry +
-//                                 budget engine + quiet hours +
-//                                 preferences to produce a final
-//                                 delivery decision.
-//   NotificationPreferencesService — owns the per-user
-//                                 NotificationPreferences row
-//                                 lifecycle.
-//   *Controllers                — REST surface for the bell list +
-//                                 preferences PATCH +
-//                                 categories catalogue.
+//   OccasionReminderWorker — reads OccasionReminder rows, fires
+//                            via the orchestrator at the right
+//                            UTC-day, idempotency anchored on
+//                            ReminderFiring(reminderId,
+//                            occurrenceAt).
+//   DigestWorker           — picks up Notification rows with
+//                            pushDeliveredAt=null, bundles per-
+//                            user, stamps pushDeliveredAt.
 //
-// What is intentionally NOT registered:
-//   - An occasion-reminder firing worker (gated off in Phase 7.1
-//     behind a feature flag; the worker module lands in 7.2 once
-//     this foundation is observed in production).
-//   - Real SMS / email channel providers (architecturally seam'd
-//     for in project_external_integrations_architecture.md;
-//     adapters land per-domain as commercial onboarding completes).
-//   - A digest batch worker (Phase 7.2 — reads the
-//     pushDeliveredAt-null tail and bundles per-user).
+// Both workers are EXPORTED so AdminController can trigger them
+// manually via the /admin/workers/* endpoints. Activation stays
+// gated by per-worker feature flags (default OFF).
 //
-// NotificationsService is exported so GiftsService (and any other
-// producer) can keep injecting it for trigger() calls. The
-// orchestrator + preferences service stay internal to the module
-// (nothing outside notifications/ should know about them).
+// What is STILL not registered:
+//   - Real SMS / email channel providers — adapters land per
+//     project_external_integrations_architecture.md as commercial
+//     onboarding completes.
+//   - A scheduler (cron / @nestjs/schedule). Phase 7.2 ships the
+//     manual-trigger pattern — admins invoke the endpoint when
+//     ready. Adding a cron is a one-line change once telemetry
+//     from manual runs is observed.
 @Module({
   imports: [PushModule],
   controllers: [
@@ -52,8 +46,13 @@ import { PushModule } from '../push/push.module';
     NotificationsService,
     NotificationOrchestrator,
     NotificationPreferencesService,
+    OccasionReminderWorker,
+    DigestWorker,
     PrismaService,
   ],
-  exports: [NotificationsService],
+  // Workers exported so AdminModule can inject them for the
+  // manual-trigger endpoints. NotificationsService stays exported
+  // for the existing gift / order / payment producers.
+  exports: [NotificationsService, OccasionReminderWorker, DigestWorker],
 })
 export class NotificationsModule {}

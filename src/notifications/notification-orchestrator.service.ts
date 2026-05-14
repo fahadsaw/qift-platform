@@ -46,6 +46,7 @@ import {
   isMandatory,
 } from './notification-categories';
 import { evaluateBudget, type BudgetDecision } from './notification-budget';
+import { isPushDeliveryEnabled } from './notification-feature-flags';
 import { inQuietHours } from './notification-quiet-hours';
 
 // ── Inputs ──────────────────────────────────────────────────────
@@ -226,6 +227,12 @@ export class NotificationOrchestrator {
   }
 
   private firePush(input: EnqueueInput): void {
+    // Global push kill switch — emergency stop independent of
+    // per-user preferences or category eligibility. When false
+    // (Phase 7.2 default), the in-app Notification row still
+    // writes (the always-on inbox) but no push fires. Used to
+    // disable push during incidents without changing app code.
+    if (!isPushDeliveryEnabled()) return;
     void this.push.sendToUser(input.userId, {
       title: input.title,
       body: input.body ?? null,
