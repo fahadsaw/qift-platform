@@ -29,7 +29,7 @@
 // changing the env, useful for one-off "what's pending right
 // now" checks.
 
-import { Controller, Post, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { AdminGuard } from './admin.guard';
 import { OccasionReminderWorker } from '../notifications/occasion-reminder-worker.service';
@@ -75,6 +75,30 @@ export class AdminWorkersController {
           ? 'force_weekly'
           : undefined;
     return this.digestWorker.runOnce({ forceDryRun, cadenceOverride });
+  }
+
+  // GET /admin/workers/status
+  //
+  // READ-ONLY operational health snapshot for the Phase 7 canary.
+  // Single call, structured response: activation-flag state,
+  // queue health (stale claims + pending digest count), 24h
+  // firing breakdown by status, most-recent worker-write
+  // timestamp.
+  //
+  // The operator hits this between dry-runs to decide whether to
+  // proceed with the next step. NEVER mutates state; safe to
+  // poll. Aggregate counts only — no user ids, no notification
+  // content, no occasion content. Per-row inspection lives on
+  // the cleanup endpoint (which is also read-only by default).
+  //
+  // This is the canary's centerpiece observability surface. Once
+  // it stops showing surprises, the rollout proceeds. When it
+  // shows non-zero stale claims, the operator runs cleanup. When
+  // it shows mostRecentFiring=null, the operator runs the
+  // worker.
+  @Get('status')
+  async status() {
+    return this.reminderWorker.snapshot();
   }
 
   // POST /admin/workers/cleanup-stale-reminder-claims

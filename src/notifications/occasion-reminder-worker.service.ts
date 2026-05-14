@@ -58,9 +58,15 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationOrchestrator } from './notification-orchestrator.service';
 import { NotificationCategory } from './notification-categories';
 import {
+  isDigestWorkerEnabled,
+  isEmailDeliveryEnabled,
   isOccasionReminderFiringEnabled,
+  isPushDeliveryEnabled,
   isReminderDryRun,
+  isSmsDeliveryEnabled,
+  reminderAllowlist,
   reminderProcessDecision,
+  reminderUserSamplePercent,
 } from './notification-feature-flags';
 import { nextOccurrence } from '../occasions/occasion-recurrence';
 import type { Calendar } from '../lib/hijri';
@@ -185,6 +191,80 @@ export type StaleClaimCleanupResult = {
   // Up to STALE_CLAIM_SAMPLE_LIMIT row ids for operator inspection.
   // Helps cross-reference with logs / notification audit.
   sampleIds: string[];
+};
+
+// ── Worker status snapshot ─────────────────────────────────────
+//
+// Single-call operational health snapshot for the Phase 7 canary.
+// Lets the operator answer the canary questions WITHOUT piecing
+// together log lines + ad-hoc DB queries:
+//
+//   - Are the activation flags set the way I expect?
+//   - Is dry-run on? Is anyone in the allowlist? What sample-pct?
+//   - How many stale 'claimed' rows are stuck right now?
+//   - How many pending-digest rows are sitting in the queue?
+//   - When did the worker most recently write a ReminderFiring?
+//     (If "never in the last 7 days", the worker probably isn't
+//     running.)
+//   - What's the 24h firing breakdown by status?
+//
+// 100% READ-ONLY. The snapshot must NEVER mutate state — it's the
+// thing the operator hits between dry-runs to decide whether to
+// proceed. A snapshot that wrote rows would defeat its purpose.
+//
+// Privacy: the snapshot reports AGGREGATE counts only — no user
+// ids, no notification bodies, no occasion content. Stale-claim
+// inspection (with row ids) lives on the dedicated cleanup
+// endpoint, which is also read-only by default (dryRun=true).
+const STATUS_RECENT_FIRING_WINDOW_HOURS = 24;
+const STATUS_MOST_RECENT_LOOKBACK_DAYS = 7;
+
+export type WorkerStatusSnapshot = {
+  // Server-side timestamp the snapshot was computed at.
+  asOf: string;
+
+  // Activation-flag + rollout-shape state. The operator reads
+  // this BEFORE every manual trigger to confirm the worker is
+  // gated the way they expect.
+  flags: {
+    occasionReminderFiringEnabled: boolean;
+    digestWorkerEnabled: boolean;
+    pushDeliveryEnabled: boolean;
+    emailDeliveryEnabled: boolean;
+    smsDeliveryEnabled: boolean;
+    reminderDryRun: boolean;
+    reminderAllowlist: readonly string[];
+    reminderUserSamplePercent: number;
+  };
+
+  // Queue state. Both numbers should be near zero in steady-state
+  // canary operation; non-zero readings flag operator attention.
+  queue: {
+    // ReminderFiring rows stuck in 'claimed' status more than 24h
+    // after their firedAt. Mid-fire crashes pile up here; non-
+    // zero → operator runs the cleanup endpoint.
+    staleClaims: number;
+    // Notification rows with pushDeliveredAt=null awaiting the
+    // digest worker. EXCLUDES type='digest.summary' (the
+    // recursion guard's predicate).
+    pendingDigest: number;
+  };
+
+  // ReminderFiring counts in the last 24h, grouped by status.
+  // Operator uses this to confirm "the worker ran and fired N
+  // things since yesterday".
+  last24h: {
+    firingsByStatus: Record<string, number>;
+  };
+
+  // Most recent ReminderFiring write, if one happened in the
+  // last STATUS_MOST_RECENT_LOOKBACK_DAYS days. Null when the
+  // worker hasn't written anything in that window — the
+  // operator's early-warning that the worker isn't running.
+  mostRecentFiring: {
+    firedAt: string;
+    status: string;
+  } | null;
 };
 
 // ── Service ────────────────────────────────────────────────────
@@ -579,6 +659,109 @@ export class OccasionReminderWorker {
       cleared,
       errors,
       sampleIds,
+    };
+  }
+
+  // Operator status snapshot. READ-ONLY. The endpoint backed by
+  // this is the canary's single source of truth for "where are
+  // we right now?". Returned shape is stable across phases —
+  // additions are additive, removals require a doc note.
+  //
+  // Per-query error handling: a count() that throws should NOT
+  // bring down the whole snapshot. We surface a partial reading
+  // (the failed metric becomes 0 / null) so the operator still
+  // gets the rest. A blanket try/catch around the whole method
+  // would hide which metric was unavailable.
+  async snapshot(opts: { now?: Date } = {}): Promise<WorkerStatusSnapshot> {
+    const now = opts.now ?? new Date();
+    const dayAgo = new Date(
+      now.getTime() - STATUS_RECENT_FIRING_WINDOW_HOURS * 60 * 60 * 1000,
+    );
+    const lookbackCutoff = new Date(
+      now.getTime() - STATUS_MOST_RECENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+    );
+
+    // Activation flag state. Pure env reads — no DB.
+    const flags = {
+      occasionReminderFiringEnabled: isOccasionReminderFiringEnabled(),
+      digestWorkerEnabled: isDigestWorkerEnabled(),
+      pushDeliveryEnabled: isPushDeliveryEnabled(),
+      emailDeliveryEnabled: isEmailDeliveryEnabled(),
+      smsDeliveryEnabled: isSmsDeliveryEnabled(),
+      reminderDryRun: isReminderDryRun(),
+      reminderAllowlist: reminderAllowlist(),
+      reminderUserSamplePercent: reminderUserSamplePercent(),
+    };
+
+    let staleClaims = 0;
+    try {
+      staleClaims = await this.prisma.reminderFiring.count({
+        where: { status: 'claimed', firedAt: { lt: dayAgo } },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[worker-status] staleClaims query failed: ${(err as Error).message}`,
+      );
+    }
+
+    let pendingDigest = 0;
+    try {
+      pendingDigest = await this.prisma.notification.count({
+        where: {
+          pushDeliveredAt: null,
+          // Same recursion-guard predicate as the digest worker
+          // itself — digest summaries that hit the system cap and
+          // got queued shouldn't inflate the "pending" reading.
+          type: { not: 'digest.summary' },
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[worker-status] pendingDigest query failed: ${(err as Error).message}`,
+      );
+    }
+
+    let firingsByStatus: Record<string, number> = {};
+    try {
+      const grouped = await this.prisma.reminderFiring.groupBy({
+        by: ['status'],
+        where: { firedAt: { gte: dayAgo } },
+        _count: { _all: true },
+      });
+      firingsByStatus = Object.fromEntries(
+        grouped.map((g) => [g.status, g._count._all]),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[worker-status] firingsByStatus query failed: ${(err as Error).message}`,
+      );
+    }
+
+    let mostRecentFiring: WorkerStatusSnapshot['mostRecentFiring'] = null;
+    try {
+      const row = await this.prisma.reminderFiring.findFirst({
+        where: { firedAt: { gte: lookbackCutoff } },
+        orderBy: { firedAt: 'desc' },
+        select: { firedAt: true, status: true },
+      });
+      if (row) {
+        mostRecentFiring = {
+          firedAt: row.firedAt.toISOString(),
+          status: row.status,
+        };
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[worker-status] mostRecentFiring query failed: ${(err as Error).message}`,
+      );
+    }
+
+    return {
+      asOf: now.toISOString(),
+      flags,
+      queue: { staleClaims, pendingDigest },
+      last24h: { firingsByStatus },
+      mostRecentFiring,
     };
   }
 }

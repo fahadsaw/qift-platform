@@ -41,7 +41,16 @@ type MockPrisma = {
     findMany: jest.Mock;
     updateMany: jest.Mock;
     deleteMany: jest.Mock;
+    // Snapshot endpoint reads. groupBy aggregates last-24h
+    // status counts; findFirst returns the latest written row.
+    groupBy: jest.Mock;
+    findFirst: jest.Mock;
   };
+  // Snapshot also reads pendingDigest from the notification
+  // table (count of pushDeliveredAt=null rows excluding
+  // digest.summary). Other workers don't touch this mock; only
+  // the snapshot specs below do.
+  notification: { count: jest.Mock };
 };
 
 function createPrismaMock(): MockPrisma {
@@ -54,7 +63,10 @@ function createPrismaMock(): MockPrisma {
       findMany: jest.fn().mockResolvedValue([]),
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      groupBy: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue(null),
     },
+    notification: { count: jest.fn().mockResolvedValue(0) },
   };
 }
 
@@ -591,6 +603,144 @@ describe('OccasionReminderWorker', () => {
         expect(out.errors).toBe(1);
         expect(out.considered).toBe(0);
       });
+    });
+  });
+
+  describe('snapshot() — operator health view (read-only)', () => {
+    // The snapshot is the canary's centerpiece observability
+    // surface. These specs lock down the WRITE-FREE invariant +
+    // the structured-response contract that the runbook depends
+    // on.
+
+    it('is read-only — never mutates any worker-owned table', async () => {
+      const now = new Date(Date.UTC(2026, 5, 14, 12, 0, 0));
+      await worker.snapshot({ now });
+      // Hard assertion: no mutation method on any worker-touched
+      // model has been called. If a future change adds a write
+      // path to the snapshot, this fails loudly.
+      expect(prisma.reminderFiring.create).not.toHaveBeenCalled();
+      expect(prisma.reminderFiring.update).not.toHaveBeenCalled();
+      expect(prisma.reminderFiring.updateMany).not.toHaveBeenCalled();
+      expect(prisma.reminderFiring.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('returns the activation-flag state verbatim', async () => {
+      // Snapshot is the operator's pre-trigger confirmation:
+      // "are the flags set the way I think?"
+      process.env.QIFT_OCCASION_REMINDER_FIRING_ENABLED = 'true';
+      process.env.QIFT_DIGEST_WORKER_ENABLED = 'true';
+      process.env.QIFT_REMINDER_DRY_RUN = 'true';
+      process.env.QIFT_REMINDER_ALLOWLIST = 'user_a, user_b';
+      process.env.QIFT_REMINDER_USER_SAMPLE_PERCENT = '25';
+
+      const snap = await worker.snapshot({
+        now: new Date(Date.UTC(2026, 5, 14, 0, 0, 0)),
+      });
+
+      expect(snap.flags.occasionReminderFiringEnabled).toBe(true);
+      expect(snap.flags.digestWorkerEnabled).toBe(true);
+      expect(snap.flags.reminderDryRun).toBe(true);
+      expect(snap.flags.reminderAllowlist).toEqual(['user_a', 'user_b']);
+      expect(snap.flags.reminderUserSamplePercent).toBe(25);
+      // Push is the only inverted flag — default ON, explicit
+      // 'false' to disable. Snapshot reads it verbatim.
+      expect(snap.flags.pushDeliveryEnabled).toBe(true);
+    });
+
+    it('reports staleClaims + pendingDigest counts from the queue', async () => {
+      prisma.reminderFiring.count.mockResolvedValueOnce(3);
+      prisma.notification.count.mockResolvedValueOnce(12);
+      const snap = await worker.snapshot({
+        now: new Date(Date.UTC(2026, 5, 14, 12, 0, 0)),
+      });
+      expect(snap.queue.staleClaims).toBe(3);
+      expect(snap.queue.pendingDigest).toBe(12);
+    });
+
+    it('excludes digest.summary from the pendingDigest count', async () => {
+      // The recursion-guard predicate must show up in the
+      // snapshot's pendingDigest query — otherwise a queued
+      // digest summary would inflate the operator-visible
+      // pending count and trigger a false alarm.
+      await worker.snapshot({
+        now: new Date(Date.UTC(2026, 5, 14, 12, 0, 0)),
+      });
+      const call = prisma.notification.count.mock.calls[0][0];
+      expect(call.where).toMatchObject({
+        pushDeliveredAt: null,
+        type: { not: 'digest.summary' },
+      });
+    });
+
+    it('groups last-24h firings by status', async () => {
+      prisma.reminderFiring.groupBy.mockResolvedValueOnce([
+        { status: 'sent', _count: { _all: 7 } },
+        { status: 'suppressed', _count: { _all: 2 } },
+        { status: 'failed', _count: { _all: 1 } },
+      ]);
+      const snap = await worker.snapshot({
+        now: new Date(Date.UTC(2026, 5, 14, 12, 0, 0)),
+      });
+      expect(snap.last24h.firingsByStatus).toEqual({
+        sent: 7,
+        suppressed: 2,
+        failed: 1,
+      });
+    });
+
+    it('passes a 24h cutoff to the groupBy + count queries', async () => {
+      const now = new Date(Date.UTC(2026, 5, 14, 12, 0, 0));
+      await worker.snapshot({ now });
+      const expected24hAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      // staleClaims uses firedAt < 24h-ago.
+      const staleCall = prisma.reminderFiring.count.mock.calls[0][0];
+      expect(staleCall.where.firedAt.lt).toEqual(expected24hAgo);
+      // firingsByStatus uses firedAt >= 24h-ago.
+      const groupCall = prisma.reminderFiring.groupBy.mock.calls[0][0];
+      expect(groupCall.where.firedAt.gte).toEqual(expected24hAgo);
+    });
+
+    it('surfaces the most recent firing within the 7-day lookback', async () => {
+      const recent = new Date(Date.UTC(2026, 5, 13, 18, 0, 0));
+      prisma.reminderFiring.findFirst.mockResolvedValueOnce({
+        firedAt: recent,
+        status: 'sent',
+      });
+      const snap = await worker.snapshot({
+        now: new Date(Date.UTC(2026, 5, 14, 12, 0, 0)),
+      });
+      expect(snap.mostRecentFiring).toEqual({
+        firedAt: recent.toISOString(),
+        status: 'sent',
+      });
+    });
+
+    it('returns mostRecentFiring=null when no firing in the last 7 days', async () => {
+      // The operator's early-warning signal: "the worker hasn't
+      // written anything in a week — did we forget to trigger it?"
+      prisma.reminderFiring.findFirst.mockResolvedValueOnce(null);
+      const snap = await worker.snapshot({
+        now: new Date(Date.UTC(2026, 5, 14, 12, 0, 0)),
+      });
+      expect(snap.mostRecentFiring).toBeNull();
+    });
+
+    it('returns partial readings when one query fails', async () => {
+      // A staleClaims count failure must not nuke the rest of
+      // the snapshot — the operator still gets the other metrics.
+      prisma.reminderFiring.count.mockRejectedValueOnce(new Error('db blip'));
+      prisma.notification.count.mockResolvedValueOnce(5);
+      const snap = await worker.snapshot({
+        now: new Date(Date.UTC(2026, 5, 14, 12, 0, 0)),
+      });
+      expect(snap.queue.staleClaims).toBe(0); // failed query → 0
+      expect(snap.queue.pendingDigest).toBe(5); // unaffected
+    });
+
+    it('includes a server-side asOf timestamp', async () => {
+      const now = new Date(Date.UTC(2026, 5, 14, 9, 30, 0));
+      const snap = await worker.snapshot({ now });
+      expect(snap.asOf).toBe(now.toISOString());
     });
   });
 });
