@@ -106,21 +106,15 @@ export class NotificationsService {
     });
   }
 
-  // Public-via-controller create. Same as trigger() but lets exceptions
-  // propagate so the caller sees real validation errors, and pins the
-  // userId to the authenticated viewer so a client can't queue a
-  // notification into someone else's inbox.
-  create(viewerUserId: string, body: Omit<CreateNotificationInput, 'userId'>) {
-    return this.prisma.notification.create({
-      data: {
-        userId: viewerUserId,
-        type: body.type,
-        title: body.title,
-        body: body.body ?? null,
-        link: body.link ?? null,
-      },
-    });
-  }
+  // (A `create()` method used to live here, backing a public
+  // POST /notifications endpoint that bypassed the orchestrator
+  // entirely. It was removed before Phase 7 broader rollout —
+  // see notifications.controller.ts for the rationale. All real
+  // notifications now route through `trigger()` (orchestrator-
+  // aware) only. If a future surface needs to write directly,
+  // it must still go through the orchestrator — never reach
+  // for a private `create()` to skip budget / quiet-hours /
+  // category / privacy gates.)
 
   // Latest-first feed for the bell + /notifications page. Capped at 100 so
   // a runaway producer can't ship megabytes of payload to a phone.

@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
-import { AppService } from './app.service';
 import { PrismaService } from './prisma/prisma.service';
 import { UsersModule } from './users/users.module';
 import { SocialAccountsModule } from './social-accounts/social-accounts.module';
@@ -63,6 +62,11 @@ import { MailModule } from './mail/mail.module';
   // (the / and /health routes) stays here because there's no
   // dedicated module for it.
   controllers: [AppController],
-  providers: [AppService, PrismaService],
+  // PrismaService is registered here as the platform-wide DB
+  // singleton; every feature module imports it. The previous
+  // `AppService` (Nest CLI "Hello World" scaffold) was removed —
+  // AppController serves only the root + /health routes and
+  // doesn't need a service.
+  providers: [PrismaService],
 })
 export class AppModule {}

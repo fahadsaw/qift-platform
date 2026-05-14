@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -37,6 +38,8 @@ const ALLOWED_REPORT_STATUSES = new Set([
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     private prisma: PrismaService,
     // Reused for the v2 review endpoints (approve/reject/request_changes
@@ -1191,11 +1194,10 @@ export class AdminService {
       storeIds.push(f.storeId);
     }
 
-    // Ops audit line — admin who triggered the seed. Goes to the
-    // Nest logger so Railway captures it without us writing a
+    // Ops audit line — admin who triggered the seed. Goes through
+    // the Nest Logger so Railway captures it without us writing a
     // dedicated audit table.
-
-    console.log(
+    this.logger.log(
       `[seed-merchants] adminUserId=${adminUserId} seeded ${seededUsernames.length} merchants, ${productCount} products`,
     );
 
