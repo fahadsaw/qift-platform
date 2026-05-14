@@ -305,8 +305,30 @@ describe('OccasionReminderWorker', () => {
       const out = await worker.runOnce({
         now: new Date(Date.UTC(2026, 5, 8)),
       });
-      expect(out.filteredAllowlist).toBe(1); // shared counter
+      // Telemetry honesty: sample-percent rejection counts on its
+      // own counter, NOT on the allowlist counter. Operators
+      // monitoring rollout need to distinguish "the allowlist
+      // excluded them" from "the percent bucket excluded them".
+      expect(out.filteredSamplePercent).toBe(1);
+      expect(out.filteredAllowlist).toBe(0);
       expect(out.fired).toBe(0);
+    });
+
+    it('reports filteredAllowlist (not sample) when an allowlist is configured', async () => {
+      // With an allowlist set, rejection is allowlist-mode, even
+      // if the sample percent would also exclude. The decision
+      // resolver short-circuits on the allowlist before checking
+      // the percent bucket.
+      process.env.QIFT_REMINDER_ALLOWLIST = 'user_other';
+      process.env.QIFT_REMINDER_USER_SAMPLE_PERCENT = '0';
+      prisma.occasionReminder.findMany.mockResolvedValueOnce([
+        candidate({ userId: 'user_anything' }),
+      ]);
+      const out = await worker.runOnce({
+        now: new Date(Date.UTC(2026, 5, 8)),
+      });
+      expect(out.filteredAllowlist).toBe(1);
+      expect(out.filteredSamplePercent).toBe(0);
     });
   });
 

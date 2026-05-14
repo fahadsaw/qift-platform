@@ -1231,10 +1231,25 @@ model NotificationPreferences {
   // The Orchestrator filters this through MANDATORY_CATEGORIES so
   // security / OTP / legal cannot be silenced.
   categoryOptOuts    Json     @default("{}")
-  // Master digest toggle. When false, the user receives all
-  // notifications real-time (no batching) regardless of quiet
-  // hours / budget. Useful for power users who want every event
-  // immediately and accept the trade-off.
+  // Master digest toggle.
+  //
+  // When TRUE (default): the digest worker bundles the user's
+  // queued (pushDeliveredAt=null) rows into a calm summary push
+  // on their digestFrequency cadence.
+  //
+  // When FALSE: the digest worker does NOT send a summary push
+  // for this user. Their queued rows are stamped delivered so
+  // the inbox count reconciles, but no fanout fires — the user
+  // discovers the rows when they open the bell themselves.
+  //
+  // Note: this flag controls the SUMMARY behaviour only. It does
+  // not bypass quiet hours or budget caps in the orchestrator —
+  // those gates still queue individual rows for digest. The flag
+  // is the "I don't want a digest push at all" preference, not a
+  // "skip the queueing logic" preference. The two preferences
+  // happen to be a useful pair: a user who wants ZERO push
+  // notifications can set quiet hours to 00:00→00:00 (always
+  // quiet) and digestEnabled=false (no summary push either).
   digestEnabled      Boolean  @default(true)
   // "daily" | "weekly". The future digest worker batches non-
   // critical notifications into this cadence.

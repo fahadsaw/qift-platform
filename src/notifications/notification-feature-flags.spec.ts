@@ -11,6 +11,7 @@ import {
   isReminderDryRun,
   isSmsDeliveryEnabled,
   reminderAllowlist,
+  reminderProcessDecision,
   reminderUserSamplePercent,
   shouldProcessUserForReminders,
 } from './notification-feature-flags';
@@ -189,6 +190,47 @@ describe('notification feature flags', () => {
         }
         expect(trues).toBeGreaterThan(0);
         expect(falses).toBeGreaterThan(0);
+      });
+    });
+  });
+
+  describe('reminderProcessDecision (telemetry-honest variant)', () => {
+    // The richer return shape lets the reminder worker keep
+    // separate counters for allowlist-rejection vs sample-percent-
+    // rejection. The boolean wrapper above stays the convenient
+    // form; this is the cause-tagged form.
+
+    it('returns kind=process when no gates exclude the user', () => {
+      expect(reminderProcessDecision('user_1')).toEqual({ kind: 'process' });
+    });
+
+    it('returns kind=reject_allowlist when allowlist excludes', () => {
+      process.env.QIFT_REMINDER_ALLOWLIST = 'user_other';
+      expect(reminderProcessDecision('user_anything')).toEqual({
+        kind: 'reject_allowlist',
+      });
+    });
+
+    it('returns kind=process for allowlisted users', () => {
+      process.env.QIFT_REMINDER_ALLOWLIST = 'user_1';
+      expect(reminderProcessDecision('user_1')).toEqual({ kind: 'process' });
+    });
+
+    it('returns kind=reject_sample_percent when no allowlist + 0%', () => {
+      process.env.QIFT_REMINDER_USER_SAMPLE_PERCENT = '0';
+      expect(reminderProcessDecision('user_anything')).toEqual({
+        kind: 'reject_sample_percent',
+      });
+    });
+
+    it('allowlist short-circuits BEFORE sample-percent', () => {
+      // If both are set, the allowlist is the authoritative gate
+      // and the rejection cause is allowlist (even though the
+      // sample percent would also reject).
+      process.env.QIFT_REMINDER_ALLOWLIST = 'user_other';
+      process.env.QIFT_REMINDER_USER_SAMPLE_PERCENT = '0';
+      expect(reminderProcessDecision('user_anything')).toEqual({
+        kind: 'reject_allowlist',
       });
     });
   });

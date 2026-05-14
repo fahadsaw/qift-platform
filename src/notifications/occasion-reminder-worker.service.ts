@@ -60,7 +60,7 @@ import { NotificationCategory } from './notification-categories';
 import {
   isOccasionReminderFiringEnabled,
   isReminderDryRun,
-  shouldProcessUserForReminders,
+  reminderProcessDecision,
 } from './notification-feature-flags';
 import { nextOccurrence } from '../occasions/occasion-recurrence';
 import type { Calendar } from '../lib/hijri';
@@ -213,16 +213,19 @@ export class OccasionReminderWorker {
         // Per-user rollout gates. Applied AFTER the firing-window
         // check so the stats above reflect "real candidates" and
         // these stats reflect "filtered by rollout shape".
-        if (!shouldProcessUserForReminders(c.userId)) {
-          // Distinguish allowlist vs sample-percent based on
-          // whether an allowlist is set (cheap; the helper
-          // re-reads but it's a small parse).
-          //
-          // For telemetry honesty we'd ideally break this down
-          // precisely — but the operator already knows which
-          // mode they're in via the env config. Lump for
-          // simplicity.
+        //
+        // We use the decision-returning variant so the counter
+        // can distinguish allowlist rejection from sample-percent
+        // rejection — operators rolling out gradually need to see
+        // which gate is doing the filtering. Lumping them was the
+        // initial cut; the split is the honest telemetry.
+        const dec = reminderProcessDecision(c.userId);
+        if (dec.kind === 'reject_allowlist') {
           stats.filteredAllowlist += 1;
+          continue;
+        }
+        if (dec.kind === 'reject_sample_percent') {
+          stats.filteredSamplePercent += 1;
           continue;
         }
 
@@ -318,7 +321,7 @@ export class OccasionReminderWorker {
     }
 
     this.logger.log(
-      `[reminder-worker] run complete dryRun=${dryRun} considered=${stats.considered} inWindow=${stats.inWindow} fired=${stats.fired} digested=${stats.digested} suppressed=${stats.suppressed} filteredAllowlist=${stats.filteredAllowlist} filteredDryRun=${stats.filteredDryRun} errors=${stats.errors}`,
+      `[reminder-worker] run complete dryRun=${dryRun} considered=${stats.considered} inWindow=${stats.inWindow} fired=${stats.fired} digested=${stats.digested} suppressed=${stats.suppressed} filteredAllowlist=${stats.filteredAllowlist} filteredSamplePercent=${stats.filteredSamplePercent} filteredDryRun=${stats.filteredDryRun} errors=${stats.errors}`,
     );
     return stats;
   }

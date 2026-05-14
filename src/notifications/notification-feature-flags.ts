@@ -174,15 +174,35 @@ function userPercentile(userId: string): number {
 // Combines the allowlist + sample-percent gates. The activation
 // flag is checked separately (one-shot at the top of the worker).
 export function shouldProcessUserForReminders(userId: string): boolean {
+  return reminderProcessDecision(userId).kind === 'process';
+}
+
+// Telemetry-friendly variant. Returns the same accept/reject
+// decision as shouldProcessUserForReminders, but distinguishes
+// allowlist-rejection from sample-percent-rejection so the worker
+// can keep honest counters per rollout gate. Callers that just
+// need the boolean keep using shouldProcessUserForReminders.
+export type ReminderProcessDecision =
+  | { kind: 'process' }
+  | { kind: 'reject_allowlist' }
+  | { kind: 'reject_sample_percent' };
+
+export function reminderProcessDecision(
+  userId: string,
+): ReminderProcessDecision {
   const allow = reminderAllowlist();
   if (allow.length > 0) {
     // Allowlist mode: only listed users; sample-percent ignored.
-    return allow.includes(userId);
+    return allow.includes(userId)
+      ? { kind: 'process' }
+      : { kind: 'reject_allowlist' };
   }
   // No allowlist → sample-percent applies. 100% = everyone (the
   // default); 0% = no one; 10% = stable 10% bucket.
   const pct = reminderUserSamplePercent();
-  if (pct >= 100) return true;
-  if (pct <= 0) return false;
-  return userPercentile(userId) < pct;
+  if (pct >= 100) return { kind: 'process' };
+  if (pct <= 0) return { kind: 'reject_sample_percent' };
+  return userPercentile(userId) < pct
+    ? { kind: 'process' }
+    : { kind: 'reject_sample_percent' };
 }

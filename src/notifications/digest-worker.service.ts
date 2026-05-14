@@ -122,8 +122,20 @@ export class DigestWorker {
     // When the queue grows past ~100k pending rows, this becomes
     // a paginated scan with a date window — for Phase 7.2's
     // controlled rollout, the cheap version is correct.
+    //
+    // RECURSION GUARD: we explicitly exclude rows of type
+    // 'digest.summary'. The digest worker writes a summary row
+    // via the orchestrator; if the user has hit the System
+    // category's daily/weekly cap (3/10) — possible during burst
+    // testing or when multiple system rows queue in a 24h window
+    // — the orchestrator queues the summary itself
+    // (pushDeliveredAt=null). Without this filter, the next
+    // digest run would pick that queued summary up as a pending
+    // row and bundle it into ANOTHER digest summary, which itself
+    // could queue, and so on. The filter breaks the recursion
+    // before it starts.
     const pending = await this.prisma.notification.findMany({
-      where: { pushDeliveredAt: null },
+      where: { pushDeliveredAt: null, type: { not: 'digest.summary' } },
       select: { id: true, userId: true, category: true },
     });
 

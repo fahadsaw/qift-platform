@@ -6,7 +6,27 @@ import { PrismaService } from '../prisma/prisma.service';
 // service worker also re-checks this client-side, but we additionally
 // validate at send-time so a malicious caller can't get the OS to deep-
 // link to a third party. New routes need to be added here explicitly.
-const SAFE_URL_PREFIXES = ['/notifications', '/gifts', '/store-dashboard'];
+//
+// Members:
+//   /notifications    — bell / digest landing
+//   /gifts            — gift detail timeline (all gift-flow pushes)
+//   /store-dashboard  — merchant-side order notifications
+//   /occasions        — Phase 7.2 reminder worker deep-link
+//   /profile          — GiftAttemptedNoAddress recipient prompt
+//   /send             — GiftAddressReadyForRetry sender retry prompt
+//
+// Adding to this list must be deliberate. A prefix not on the list
+// gets silently rewritten to /notifications by sanitisePayload(),
+// which is safe (no XSS / open-redirect risk) but produces a
+// confusing UX — the push lands on the wrong page.
+const SAFE_URL_PREFIXES = [
+  '/notifications',
+  '/gifts',
+  '/store-dashboard',
+  '/occasions',
+  '/profile',
+  '/send',
+];
 
 export type PushPayload = {
   title: string;

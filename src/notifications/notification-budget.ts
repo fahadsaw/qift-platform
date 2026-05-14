@@ -105,14 +105,19 @@ export function evaluateBudget(input: BudgetInputs): BudgetDecision {
     return { kind: 'queue_digest', reason: 'quiet_hours' };
   }
 
-  // Digest-only user preference. They asked for the calm cadence
-  // regardless of the per-notification urgency. The future digest
-  // worker fires the queue on the user's chosen cadence.
-  if (!digestEnabled) {
-    // Wait — `digestEnabled = false` means "I want real-time".
-    // Don't queue. Send now.
-    return { kind: 'send_realtime' };
-  }
+  // `digestEnabled` is intentionally NOT a gate here. It governs
+  // the digest WORKER's summary-push behaviour (see digest-
+  // worker.service.ts), not the orchestrator's queue/send
+  // decision. Quiet hours + budget caps still queue rows for a
+  // `digestEnabled=false` user; the digest worker then marks
+  // those rows delivered without firing a summary push. Keeping
+  // this comment so a future reader doesn't add a redundant
+  // `if (!digestEnabled)` branch here.
+  //
+  // The function argument is still surfaced (rather than dropped)
+  // because callers serialise the full BudgetInputs into audit
+  // logs — removing it would lose telemetry context.
+  void digestEnabled;
 
   // All gates passed — alert channels fire now.
   return { kind: 'send_realtime' };

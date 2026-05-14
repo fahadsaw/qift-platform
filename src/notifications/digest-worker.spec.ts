@@ -241,6 +241,32 @@ describe('DigestWorker', () => {
     });
   });
 
+  describe('recursion guard — digest.summary rows do not feed the next run', () => {
+    beforeEach(enableDigest);
+
+    it('excludes type=digest.summary from the pending query (predicate level)', async () => {
+      // The recursion concern: the digest worker's own summary
+      // is written via the orchestrator with type='digest.summary'
+      // and category='system'. If the user has hit the System
+      // category daily cap, the orchestrator queues the summary
+      // itself (pushDeliveredAt=null). Without a filter at the
+      // worker's findMany, that queued summary would be picked up
+      // on the next run and bundled into ANOTHER summary, which
+      // could itself queue, and so on. The filter breaks the
+      // loop.
+      prisma.notification.findMany.mockResolvedValueOnce([]);
+      await worker.runOnce({ now: TUESDAY_NOON_UTC });
+      const call = prisma.notification.findMany.mock.calls[0][0];
+      // The where predicate must include the type exclusion.
+      // We intentionally assert on the exact shape so a future
+      // refactor that drops the filter is caught by this spec.
+      expect(call.where).toMatchObject({
+        pushDeliveredAt: null,
+        type: { not: 'digest.summary' },
+      });
+    });
+  });
+
   describe('orchestrator call shape', () => {
     beforeEach(enableDigest);
 
