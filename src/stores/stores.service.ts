@@ -89,6 +89,26 @@ const VALID_STATUS_TRANSITIONS = new Set<string>([
   'suspended',
 ]);
 
+// Public-visibility allow-list. ONLY stores in one of these states
+// surface on anonymous routes (GET /stores, GET /stores/:id) and
+// through derived public surfaces (GET /products?storeId=,
+// GET /products/:id). Every other status is owner-private:
+//   - draft / submitted / pending_review / changes_requested →
+//     pre-approval; the merchant sees these via /stores/me +
+//     /store-dashboard but the public never does.
+//   - rejected / suspended → operationally hidden; admin can still
+//     reach them via /admin/*.
+//
+// 'approved' is the only forward-looking state. 'pending' is the
+// legacy alias — pre-v2 stores were backfilled to 'approved', but
+// keep it in the allow-list as belt-and-braces in case any
+// integration path still writes the old value.
+//
+// Exported so ProductsService (and any future surface that joins
+// against Store) can use the same filter — one source of truth
+// for "what counts as a publicly-visible store".
+export const PUBLIC_STORE_STATUSES = ['approved', 'pending'] as const;
+
 export type CreateStoreInput = {
   name?: string;
   city?: string;
@@ -506,9 +526,15 @@ export class StoresService {
   }
 
   // Public listing — anyone (even unauthenticated UI) can browse stores.
-  // We never include `webhookSecret`.
+  // We never include `webhookSecret`. Filtered to publicly-visible
+  // statuses only (see PUBLIC_STORE_STATUSES) so draft / submitted /
+  // pending_review / changes_requested / rejected / suspended stores
+  // never appear in the consumer marketplace. Merchants reach their
+  // own non-public stores via listMine; admins use /admin/* which
+  // bypasses this filter.
   list() {
     return this.prisma.store.findMany({
+      where: { status: { in: PUBLIC_STORE_STATUSES as unknown as string[] } },
       select: PUBLIC_STORE_SELECT,
       orderBy: { createdAt: 'desc' },
     });
@@ -516,6 +542,10 @@ export class StoresService {
 
   // Stores owned by the JWT viewer. Powers the store dashboard's "pick
   // your store" header and the create-store CTA visibility.
+  //
+  // NOT filtered by status — the merchant must see their own pending /
+  // draft / suspended stores so they can resume the onboarding flow
+  // or contact support. This is the owner-private view.
   listMine(viewerUserId: string) {
     return this.prisma.store.findMany({
       where: { ownerId: viewerUserId },
@@ -524,9 +554,17 @@ export class StoresService {
     });
   }
 
+  // Anonymous detail read. Same public-status gate as list(). Returns
+  // 404 (not 403) when the store exists but is in a non-public state —
+  // a deep-link to a suspended store should be indistinguishable from
+  // a deep-link to a never-existed store; otherwise the suspension
+  // itself leaks.
   async findOne(id: string) {
-    const store = await this.prisma.store.findUnique({
-      where: { id },
+    const store = await this.prisma.store.findFirst({
+      where: {
+        id,
+        status: { in: PUBLIC_STORE_STATUSES as unknown as string[] },
+      },
       select: PUBLIC_STORE_SELECT,
     });
     if (!store) throw new NotFoundException('Store not found');

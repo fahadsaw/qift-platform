@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { StoresService } from '../stores/stores.service';
+import { PUBLIC_STORE_STATUSES, StoresService } from '../stores/stores.service';
 import {
   projectStorefrontMetrics,
   type ProjectedMetrics,
@@ -164,6 +164,14 @@ export class ProductsService {
   // unsellable item; pass `includeUnavailable=true` (used by the dashboard)
   // to bypass that filter.
   //
+  // Store-status gate (QA audit follow-up): products from non-public
+  // stores (draft / submitted / pending_review / changes_requested /
+  // rejected / suspended) never appear here. The dashboard reaches
+  // its own pre-approval products via the merchant-private
+  // `/store/*` endpoints (StoreController) which use a different
+  // service path with owner-asserts. PUBLIC_STORE_STATUSES is the
+  // shared allow-list — see stores.service.ts.
+  //
   // Metrics projection: every row in the result shares the same
   // parent store, so we fetch `metricsVisibility` ONCE and reuse
   // it for the full list. No N+1, no per-product visibility
@@ -174,30 +182,48 @@ export class ProductsService {
     opts: { includeUnavailable?: boolean } = {},
   ): Promise<PublicProduct[]> {
     if (!storeId) return [];
-    const [store, products] = await this.prisma.$transaction([
-      this.prisma.store.findUnique({
-        where: { id: storeId },
-        select: { metricsVisibility: true },
-      }),
-      this.prisma.product.findMany({
-        where: {
-          storeId,
-          ...(opts.includeUnavailable
-            ? {}
-            : { isAvailable: true, stockStatus: 'in_stock' }),
-        },
-        select: PUBLIC_PRODUCT_SELECT,
-        orderBy: { createdAt: 'desc' },
-      }),
-    ]);
-    const visibility = store?.metricsVisibility;
+    // Reject the storeId up front when the parent store isn't in a
+    // public status. Two queries collapse into a transaction: one
+    // looks up store status + metricsVisibility, the other lists
+    // products (only if the store passed). A short-circuit on the
+    // status check saves the product query entirely for hidden
+    // stores.
+    const store = await this.prisma.store.findFirst({
+      where: {
+        id: storeId,
+        status: { in: PUBLIC_STORE_STATUSES as unknown as string[] },
+      },
+      select: { metricsVisibility: true },
+    });
+    if (!store) return [];
+
+    const products = await this.prisma.product.findMany({
+      where: {
+        storeId,
+        ...(opts.includeUnavailable
+          ? {}
+          : { isAvailable: true, stockStatus: 'in_stock' }),
+      },
+      select: PUBLIC_PRODUCT_SELECT,
+      orderBy: { createdAt: 'desc' },
+    });
+    const visibility = store.metricsVisibility;
     const now = new Date();
     return products.map((p) => toPublic(p, visibility, now));
   }
 
   async findOne(id: string): Promise<PublicProduct> {
-    const product = await this.prisma.product.findUnique({
-      where: { id },
+    // findFirst (not findUnique) so we can attach the store-status
+    // filter. A product whose parent store is in a non-public state
+    // 404s — indistinguishable from "product doesn't exist" — so
+    // direct deep-links to suspended-store catalog can't leak.
+    const product = await this.prisma.product.findFirst({
+      where: {
+        id,
+        store: {
+          status: { in: PUBLIC_STORE_STATUSES as unknown as string[] },
+        },
+      },
       // Pull in the parent store's visibility flags inline so we
       // can project in one round-trip — no second query for the
       // single-product path.
@@ -269,6 +295,14 @@ export class ProductsService {
   // Stock check used by Orders + Gifts before they create a row. Returns
   // null when the productId is unknown (legacy/sample-product flows that
   // don't pass an id) — callers treat null as "no constraint to check".
+  //
+  // Store-status gate (QA audit follow-up): the buyer flow refuses to
+  // accept a product whose parent store is no longer public. Without
+  // this, a buyer could complete an order against a `suspended` /
+  // `rejected` store (the public list filters them out, but a
+  // bookmarked product URL or a stale wishlist entry would still
+  // resolve and pay). Returns the same "not available" message so
+  // we don't leak the moderation reason to the buyer.
   async checkAvailability(productId: string | null | undefined) {
     if (!productId) return null;
     const product = await this.prisma.product.findUnique({
@@ -278,6 +312,7 @@ export class ProductsService {
         storeId: true,
         isAvailable: true,
         stockStatus: true,
+        store: { select: { status: true } },
       },
     });
     if (!product) {
@@ -286,7 +321,18 @@ export class ProductsService {
     if (!product.isAvailable || product.stockStatus !== 'in_stock') {
       throw new BadRequestException('المنتج غير متوفر حاليًا');
     }
-    return product;
+    const storeStatus = product.store?.status ?? null;
+    if (
+      !storeStatus ||
+      !(PUBLIC_STORE_STATUSES as readonly string[]).includes(storeStatus)
+    ) {
+      throw new BadRequestException('المنتج غير متوفر حاليًا');
+    }
+    // Strip the join before returning so the wire shape stays the
+    // same (callers select `id, storeId, isAvailable, stockStatus`).
+    const { store: _ignored, ...row } = product;
+    void _ignored;
+    return row;
   }
 }
 

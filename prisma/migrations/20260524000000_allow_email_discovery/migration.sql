@@ -1,0 +1,22 @@
+-- QA audit follow-up — email discovery privacy.
+--
+-- Adds the `allowEmailDiscovery` switch on User, mirroring the
+-- existing `allowPhoneDiscovery` invariant. Two differences vs the
+-- phone column:
+--
+--   1. Default is FALSE (default-deny). Email is a permanent
+--      identifier reused across services; the prior behaviour of
+--      surfacing every account whose email substring-matched the
+--      query made /users/search?type=email a domain-enumeration
+--      surface. Existing accounts must explicitly opt in from
+--      /settings privacy to be email-discoverable again.
+--
+--   2. The matching logic at the application layer is now
+--      exact-match only (no `contains` / substring). This column
+--      is the second gate on top of that, not a substitute.
+--
+-- Existing rows are backfilled to FALSE — same opt-in posture
+-- new rows get. Anyone who relied on email discovery has to
+-- re-enable it, which is the privacy-correct default.
+
+ALTER TABLE "User" ADD COLUMN "allowEmailDiscovery" BOOLEAN NOT NULL DEFAULT false;

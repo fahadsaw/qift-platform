@@ -80,6 +80,10 @@ export class UsersController {
       showGiftsSent?: boolean;
       showFollowers?: boolean;
       showFollowing?: boolean;
+      // QA audit follow-up — explicit contact-channel
+      // discoverability switches surfaced to /settings.
+      allowPhoneDiscovery?: boolean;
+      allowEmailDiscovery?: boolean;
     },
     @Req() req: AuthedRequest,
   ) {

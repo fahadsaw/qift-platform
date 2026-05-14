@@ -120,6 +120,12 @@ export class UsersService {
           showGiftsSent: true,
           showFollowers: true,
           showFollowing: true,
+          // Contact-channel discoverability switches. Phone defaults
+          // to true (per the phone column's @default), email defaults
+          // to false (default-deny — see schema comment). Both gate
+          // /users/search?type=<phone|email> at the service layer.
+          allowPhoneDiscovery: true,
+          allowEmailDiscovery: true,
           // Wishlist preferences surfaced to /preferences.
           preferredClothingSize: true,
           preferredShoeSize: true,
@@ -448,6 +454,14 @@ export class UsersService {
       showGiftsSent?: boolean;
       showFollowers?: boolean;
       showFollowing?: boolean;
+      // Contact-channel discoverability switches. Both columns are
+      // boolean; we coerce loosely (any non-true value → false) so
+      // a stale frontend that sends "false" as a string still
+      // disables the flag correctly. allowEmailDiscovery is the new
+      // QA-audit-introduced toggle; phone has been here since the
+      // discoverability invariant first shipped.
+      allowPhoneDiscovery?: boolean;
+      allowEmailDiscovery?: boolean;
     },
   ) {
     const data: Prisma.UserUpdateInput = {};
@@ -472,6 +486,12 @@ export class UsersService {
     }
     if (body.showFollowing !== undefined) {
       data.showFollowing = body.showFollowing === true;
+    }
+    if (body.allowPhoneDiscovery !== undefined) {
+      data.allowPhoneDiscovery = body.allowPhoneDiscovery === true;
+    }
+    if (body.allowEmailDiscovery !== undefined) {
+      data.allowEmailDiscovery = body.allowEmailDiscovery === true;
     }
 
     if (Object.keys(data).length === 0) {
@@ -536,13 +556,13 @@ export class UsersService {
     const SUPPORTED = new Set(['qift', 'phone', 'email', ...SOCIAL_TYPES]);
     if (!SUPPORTED.has(normType)) return [];
 
-    // Min-length gate. Phone has its own dedicated path below (exact
-    // E.164 match — no partial query is ever accepted). Email keeps
-    // the longer prefix so a single-letter "@a" can't enumerate the
-    // domain. Username + social handles get the standard 2-char gate.
-    if (normType !== 'phone') {
-      const minLen = normType === 'email' ? 5 : 2;
-      if (term.length < minLen) return [];
+    // Min-length gate. Phone and email both have their own dedicated
+    // exact-match paths below — no partial query is ever accepted on
+    // those types. Username + social handles get the standard 2-char
+    // gate (handles are public-by-design — they're the addressing
+    // channel users explicitly publish).
+    if (normType !== 'phone' && normType !== 'email') {
+      if (term.length < 2) return [];
     }
 
     // Common projection — what the search row card actually renders.
@@ -650,14 +670,51 @@ export class UsersService {
     }
 
     if (normType === 'email') {
+      // Exact-match only — never substring. Three gates layer on top:
+      //
+      //   1. The query must look like an email (contains exactly one
+      //      '@', non-empty local-part, non-empty domain with at
+      //      least one '.'). A bare "@gmail.com" or "gmail" or
+      //      "user@" returns an empty list — there's no
+      //      domain-enumeration surface.
+      //   2. The target row must have `allowEmailDiscovery = true`.
+      //      Default-deny means a fresh account is invisible until
+      //      the owner opts in from /settings privacy.
+      //   3. `profileVisibility` must not be 'private'. A private
+      //      profile is reachable through known follow edges but
+      //      never via a contact-channel lookup, mirroring phone.
+      //
+      // Result is at most 1 row (User.email has a unique index).
+      // matchedValue is intentionally empty — we never echo the
+      // email back, so a single yes/no can't be flipped into a
+      // probe that returns the casing or domain-spelling of the
+      // hit.
+      const normalised = term.toLowerCase();
+      const at = normalised.indexOf('@');
+      const validShape =
+        at > 0 &&
+        at === normalised.lastIndexOf('@') &&
+        at < normalised.length - 1 &&
+        normalised.slice(at + 1).includes('.');
+      if (!validShape) return [];
+
       const rows = await this.prisma.user.findMany({
         where: {
           deletedAt: null,
           id: { not: viewerUserId, ...(excludedFilter ?? {}) },
-          email: { contains: term, mode: 'insensitive' },
+          // Exact match. User.email column is unique, so this returns
+          // at most one row regardless of `take`.
+          email: normalised,
+          // Per-user email-discoverability switch. Default-deny so
+          // any account that hasn't explicitly opted in is invisible
+          // even when the searcher knows the literal address.
+          allowEmailDiscovery: true,
+          // Private profiles are never exposed via contact-channel
+          // lookups — same rule applied to phone above.
+          profileVisibility: { not: 'private' },
         },
         select: PUBLIC_PROJECTION,
-        take: 20,
+        take: 1,
       });
       return rows.map<SearchRow>((u) => ({
         ...u,

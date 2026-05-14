@@ -84,6 +84,16 @@ model User {
   // contact list of someone they no longer interact with). Defaults
   // to true so existing demo accounts keep their current behaviour.
   allowPhoneDiscovery Boolean @default(true)
+  // Email-discoverability switch — narrower invariant than phone.
+  // When false, /users/search?type=email returns nothing even on
+  // exact match. Email is a permanent identifier reused across
+  // services; defaulting it on would convert every legitimate
+  // sender-confirmation flow into an enumeration surface
+  // (gmail.com, hotmail.com, corporate domains). DEFAULT-DENY:
+  // the user must explicitly opt in from /settings privacy. The
+  // QA audit added this column after finding email search was
+  // substring-matched without any opt-in gate.
+  allowEmailDiscovery Boolean @default(false)
 
   // -- Wishlist preferences (added for MVP private testing) --
   // All optional; designed to seed AI gift recommendations later. We
