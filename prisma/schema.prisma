@@ -216,6 +216,17 @@ model User {
   ownedOccasions        Occasion[]             @relation("OwnedOccasions")
   relatedOccasions      Occasion[]             @relation("RelatedOccasions")
   occasionReminders     OccasionReminder[]
+
+  // Invitation MVP — manual-share.
+  // `mintedInvites`  : invites this user created in /search no-match.
+  // `consumedInvite` : the invite this user joined via, if any
+  //                    (legacy users + admin-created have null).
+  // Single-cardinality on `consumedInvite` is enforced at the Invite
+  // table level (one Invite has one consumedByUserId); we don't
+  // unique-constrain it here because re-using a link across users
+  // is gated by the invite's `status` transition, not by a DB key.
+  mintedInvites         Invite[]               @relation("InviteCreator")
+  consumedInvites       Invite[]               @relation("InviteConsumer")
 }
 
 model Address {
@@ -1689,4 +1700,92 @@ model ReminderFiring {
   // Operator queries: "show me every firing for today" / "what's
   // pending follow-up". One index covers both.
   @@index([occurrenceAt, status])
+}
+
+// Invitation MVP — manual-share. A sender hits a "no match" state
+// in /search (phone/email/social handle that isn't on Qift yet)
+// and asks Qift to mint an invite link they can copy + share
+// MANUALLY via the recipient's preferred channel. There is NO
+// automated SMS/email/social DM send here — the provider seam
+// exists (InviteProvider) but the only implementation today is
+// ManualShareProvider, which just generates the URL + the calm
+// suggested-message string the sender copies.
+//
+// PRIVACY DESIGN (load-bearing)
+//
+//   1. The Invite row does NOT store the raw channel value (phone
+//      number / email / social handle). Only the coarse channel
+//      type ('phone' | 'email' | 'social' | 'unknown') + optional
+//      platform discriminator for social. This makes invite-table
+//      reads useless for enumeration attacks.
+//
+//   2. The token is an opaque, sufficiently-random string
+//      (24+ bytes, base64url). No id-incrementing, no
+//      predictability. Public token resolution
+//      (GET /invites/by-token/:token) returns the MINIMUM payload
+//      that lets the public landing page decide what to render.
+//
+//   3. Token resolution NEVER reveals whether a given channel
+//      value exists on Qift. The sender-side flow doesn't even
+//      consult the invite table for "is this user on Qift?" —
+//      that's the search endpoint's job, and search already
+//      respects per-user discoverability flags.
+//
+// LIFECYCLE
+//
+//   active     — created and within expiresAt. The sender can
+//                share the link; the recipient can land on /i/<token>
+//                and register.
+//   expired    — past expiresAt. Lazy transition (no cron); the
+//                resolver checks `now < expiresAt` at read time.
+//   revoked    — sender explicitly cancelled the link via
+//                POST /invites/:id/revoke. Public resolver returns
+//                isValid=false.
+//   consumed   — a registered user landed on /i/<token> and joined
+//                via that link. Single-use by default.
+//
+// RATE LIMITS
+//   Per-sender daily cap on Invite.create. Read with a single
+//   COUNT(*) on (createdByUserId, createdAt >= 24h ago). No new
+//   table for rate-limit counters — Invite is its own audit log.
+model Invite {
+  id              String   @id @default(cuid())
+  // Opaque token used in the public URL (/i/<token>). Random
+  // bytes base64url-encoded. UNIQUE so resolution is O(1) and
+  // collisions are vanishingly improbable. The token IS the
+  // capability — possession is the only credential the recipient
+  // needs to land on the public page.
+  token           String   @unique
+  // The sender (always set). Required for audit + rate-limit
+  // + revocation ownership checks.
+  createdByUserId String
+  // Coarse channel discriminator. NEVER the raw value.
+  //   'phone'   — sender typed a phone number we don't know yet
+  //   'email'   — sender typed an email we don't know yet
+  //   'social'  — sender typed a social handle (see `platform`)
+  //   'unknown' — sender wants a general invite link, no channel
+  channel         String
+  // For channel='social' only. One of the SocialPlatform values
+  // from the frontend (snapchat, tiktok, instagram, x, facebook,
+  // youtube, threads, telegram). Null for non-social channels.
+  // Drives the "Open Snapchat" / "Open TikTok" frontend hint.
+  platform        String?
+  // Lifecycle. See doc-comment above for transitions.
+  //   active | expired | revoked | consumed
+  status          String   @default("active")
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime
+  // Set when the invite is consumed (recipient registered via
+  // the public landing page). Null otherwise.
+  consumedByUserId String?
+  consumedAt      DateTime?
+
+  createdBy   User  @relation("InviteCreator", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  consumedBy  User? @relation("InviteConsumer", fields: [consumedByUserId], references: [id], onDelete: SetNull)
+
+  // Per-sender history queries + rate-limit count(*) reads. The
+  // combination (userId, createdAt) is the natural index for
+  // "show this sender their invites" + "how many did this sender
+  // mint in the last 24h".
+  @@index([createdByUserId, createdAt])
 }

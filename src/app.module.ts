@@ -29,6 +29,7 @@ import { GiftPostsModule } from './gift-posts/gift-posts.module';
 import { OccasionsModule } from './occasions/occasions.module';
 import { AdminModule } from './admin/admin.module';
 import { MailModule } from './mail/mail.module';
+import { InvitesModule } from './invites/invites.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { MailModule } from './mail/mail.module';
     OccasionsModule,
     AdminModule,
     MailModule,
+    InvitesModule,
   ],
   // UsersController + UsersService now live inside UsersModule —
   // imported above. Registering them here would create a duplicate
