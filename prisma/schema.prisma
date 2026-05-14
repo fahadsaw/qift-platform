@@ -155,6 +155,10 @@ model User {
   receivedGifts         Gift[]                 @relation("ReceiverGifts")
   orders                Order[]
   notifications         Notification[]
+  // Phase 7.1 — one preferences row per user, lazily created on
+  // first read. Drives the orchestrator's quiet-hours + opt-out
+  // decisions.
+  notificationPreferences NotificationPreferences?
   ownedStores           Store[]
   pushSubscriptions     PushSubscription[]
   // Follows (added in Step 2). `following` = rows where this user IS the
@@ -1155,10 +1159,90 @@ model Notification {
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
 
+  // Phase 7.1 — Notification Orchestrator columns.
+  //
+  // category    — one of the values in NotificationCategory
+  //               (notification-categories.ts). Drives budget +
+  //               quiet-hours + opt-out behaviour. Null on legacy
+  //               rows written before Phase 7.1.
+  // priority    — 'critical' | 'high' | 'normal' | 'low'. Derived
+  //               from the category at trigger time; persisted so
+  //               telemetry + future ordering work has a stable
+  //               read column.
+  // pushDeliveredAt — set when a real-time push was actually sent.
+  //               Null means either:
+  //                 (a) the row was queued for digest (alert
+  //                     channels deferred to the next batch)
+  //                 (b) the user opted out of push for this
+  //                     category
+  //                 (c) push provider failed
+  //               The future digest worker reads
+  //                 `pushDeliveredAt IS NULL AND createdAt > windowStart`
+  //               to bundle deferred notifications.
+  category        String?
+  priority        String?
+  pushDeliveredAt DateTime?
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, isRead])
   @@index([userId, createdAt])
+  // Phase 7.1 — budget engine reads (userId, category, createdAt)
+  // when counting "did this user already hit their daily / weekly
+  // cap for category X". Composite index keeps the count cheap
+  // even on a hot bell.
+  @@index([userId, category, createdAt])
+  // Phase 7.1 — digest worker reads (userId, pushDeliveredAt) to
+  // pull queued notifications. Sparse index — most rows have
+  // pushDeliveredAt set; the worker scans the small "still
+  // pending" tail.
+  @@index([userId, pushDeliveredAt])
+}
+
+// Phase 7.1 — per-user notification preferences.
+//
+// One row per user, lazily created on first read (defaults are
+// safe so missing rows are equivalent to "no overrides"). Drives
+// the Orchestrator's quiet-hours + per-category opt-out decisions.
+//
+// Quiet hours are stored as HH:MM strings in a named IANA timezone
+// so the user-side meaning is stable across server moves. The
+// service layer composes (start, end, tz) → "is now inside the
+// quiet window?". Crossing midnight is supported (e.g. 22:00 →
+// 08:00 means "from 10pm tonight to 8am tomorrow").
+//
+// categoryOptOuts is a JSON dict keyed by NotificationCategory.
+// Default-allow: a missing key = opted in. Mandatory categories
+// (security / OTP / legal) are bypassed regardless of the dict.
+model NotificationPreferences {
+  userId             String   @id
+  // "HH:MM" 24-hour local time. Null on both ends = no quiet hours
+  // configured. The pair must be both set or both null; the service
+  // rejects half-configured states at write time.
+  quietHoursStart    String?
+  quietHoursEnd      String?
+  // IANA timezone name. Defaults to Asia/Riyadh (Qift's primary
+  // region) so users who haven't set anything still get sensible
+  // local-time behaviour. The future Phase 8 internationalization
+  // pass can default per-country.
+  quietHoursTimezone String   @default("Asia/Riyadh")
+  // Per-category opt-out dict. Shape: { [categoryId]: boolean }.
+  // true = opted OUT. Missing key = opted in (default-allow).
+  // The Orchestrator filters this through MANDATORY_CATEGORIES so
+  // security / OTP / legal cannot be silenced.
+  categoryOptOuts    Json     @default("{}")
+  // Master digest toggle. When false, the user receives all
+  // notifications real-time (no batching) regardless of quiet
+  // hours / budget. Useful for power users who want every event
+  // immediately and accept the trade-off.
+  digestEnabled      Boolean  @default(true)
+  // "daily" | "weekly". The future digest worker batches non-
+  // critical notifications into this cadence.
+  digestFrequency    String   @default("daily")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Payment {

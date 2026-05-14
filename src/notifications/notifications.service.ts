@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PushService } from '../push/push.service';
+import { NotificationOrchestrator } from './notification-orchestrator.service';
 
 // Discriminator strings used by the gift-flow triggers. Kept as a const
 // object so the rest of the codebase imports a typo-proof symbol instead
@@ -61,40 +62,48 @@ export class NotificationsService {
   constructor(
     private prisma: PrismaService,
     private push: PushService,
+    private orchestrator: NotificationOrchestrator,
   ) {}
 
-  // Internal trigger used by GiftsService + StoreService. We deliberately
-  // swallow errors so a failed notification write can never block the
-  // underlying gift mutation — the user-visible flow is more important
-  // than the bell.
+  // Internal trigger used by GiftsService + StoreService + every
+  // gift-flow notification site. Phase 7.1 routes this through the
+  // NotificationOrchestrator so:
+  //   - category-aware budgets apply automatically (per-user daily
+  //     / weekly caps; mandatory categories bypass)
+  //   - quiet hours defer alert channels to digest
+  //   - per-user opt-outs are honored (mandatory categories bypass)
   //
-  // Side effect: every successful in-app create also fans out to the
-  // user's registered push subscriptions. Push is fire-and-forget — we
-  // don't await it, and PushService.sendToUser swallows internal errors,
-  // so a push outage / missing VAPID config never ripples back into the
-  // calling gift / payment / status flow.
+  // The wire shape of this method is unchanged — callers still pass
+  // { userId, type, title, body?, link? } and we return the
+  // Notification row (or null on suppression / DB error). Existing
+  // call sites need NO changes.
+  //
+  // Privacy invariant (enforced by the orchestrator's category
+  // resolution): the `body` field never carries hidden sender
+  // identity, recipient address, private occasion content, or any
+  // similar sensitive payload. Callers must keep their bodies
+  // generic — the architecture relies on it.
   async trigger(input: CreateNotificationInput) {
-    let row: Awaited<ReturnType<typeof this.prisma.notification.create>> | null;
-    try {
-      row = await this.prisma.notification.create({
-        data: {
-          userId: input.userId,
-          type: input.type,
-          title: input.title,
-          body: input.body ?? null,
-          link: input.link ?? null,
-        },
-      });
-    } catch {
-      return null;
-    }
-    void this.push.sendToUser(input.userId, {
+    const result = await this.orchestrator.enqueue({
+      userId: input.userId,
+      type: input.type,
       title: input.title,
       body: input.body ?? null,
-      url: input.link ?? null,
-      type: input.type,
+      link: input.link ?? null,
     });
-    return row;
+    if (result.kind === 'suppressed') {
+      // Suppression is silent to the caller — no log, no row, no
+      // throw. The orchestrator already records the decision
+      // reason internally; surfacing it here would leak the
+      // user's private opt-out to the gift flow.
+      return null;
+    }
+    // For both 'sent' and 'queued_for_digest' the Notification row
+    // exists. The gift flow's caller treats both identically — the
+    // bell will render the row whenever the user opens the app.
+    return this.prisma.notification.findUnique({
+      where: { id: result.notificationId },
+    });
   }
 
   // Public-via-controller create. Same as trigger() but lets exceptions
