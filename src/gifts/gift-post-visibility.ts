@@ -122,17 +122,50 @@ export type GiftPostInputs = {
   viewerUserId: string | null;
   senderUserId: string;
   receiverUserId: string;
+  // QA-audit follow-up — does the parent store still belong on a
+  // public surface? Computed by the service from `Store.status IN
+  // PUBLIC_STORE_STATUSES`. When false, the post stays visible
+  // (historical gift memory preserved), but the active-storefront
+  // layer is suppressed — product image, gallery, productId, storeId,
+  // productHref all null out. The snapshot strings (productName,
+  // storeName) survive because they're factual history of the
+  // gift, not promotional content.
+  //
+  // The legacy 2-arg / 3-arg call sites that predate this field
+  // default to `true` via the helper's `?? true` so a caller that
+  // hasn't been updated yet still produces the existing wire shape.
+  storeIsPublic?: boolean;
 };
 
 // Resolve the public-safe view of a GiftPost. Masks identity
 // according to the reveal flags + viewer relationship; null-fills
-// product / store fields when the post is deactivated.
+// product / store fields when the post is deactivated OR when the
+// parent store is no longer in a publicly-visible state (added in
+// the QA audit follow-up).
+//
+// Historical-memory vs active-storefront distinction:
+//   - productName + storeName stay because they're factual history
+//     of what was gifted, persisted as snapshots on Gift.
+//   - productImageUrl / productImages / productId / storeId /
+//     productHref are LIVE projections of the catalog. When the
+//     store is suspended / rejected / draft / pending_review /
+//     changes_requested, we suppress these so the GiftPost
+//     doesn't continue advertising the storefront — the gift moment
+//     persists as text + identity context, no active product CTA.
 export function buildGiftPostView(input: GiftPostInputs): GiftPostView {
   const { post, gift, viewerUserId, senderUserId, receiverUserId } = input;
+  // Default to true so call sites that pre-date the storeIsPublic
+  // field keep producing the old wire shape (the field is optional
+  // on GiftPostInputs). New service-layer callers always pass it.
+  const storeIsPublic = input.storeIsPublic ?? true;
   const visibility: GiftPostVisibility = isGiftPostVisibility(post.visibility)
     ? post.visibility
     : 'private';
   const deactivated = post.deactivatedAt !== null;
+  // Combined "hide the live catalog layer" flag. Either axis is
+  // sufficient to degrade. Identity masking remains independent so
+  // sender / receiver still see each other across both branches.
+  const hideCatalog = deactivated || !storeIsPublic;
 
   const viewerIsSender = viewerUserId !== null && viewerUserId === senderUserId;
   const viewerIsReceiver =
@@ -149,18 +182,22 @@ export function buildGiftPostView(input: GiftPostInputs): GiftPostView {
 
   return {
     id: post.id,
+    // Historical snapshot strings — preserved across both
+    // degradation axes. Showing "Roses from Riyadh Flowers" stays
+    // truthful even when the storefront is no longer browsable.
     productName: gift.productName,
     storeName: gift.storeName,
-    productId: deactivated ? null : gift.productId,
-    storeId: deactivated ? null : gift.storeId,
-    productImageUrl: deactivated ? null : gift.productImageUrl,
-    productImages: deactivated ? [] : gift.productImages,
+    productId: hideCatalog ? null : gift.productId,
+    storeId: hideCatalog ? null : gift.storeId,
+    productImageUrl: hideCatalog ? null : gift.productImageUrl,
+    productImages: hideCatalog ? [] : gift.productImages,
     // Deep-link to the product when we have one (`?product=<id>` is
     // the storefront's product-modal convention; see
     // /stores/[id]/page.tsx). Falls back to the storefront index
-    // when only storeId is known.
+    // when only storeId is known. Null when the catalog layer is
+    // suppressed.
     productHref:
-      deactivated || !gift.storeId
+      hideCatalog || !gift.storeId
         ? null
         : gift.productId
           ? `/stores/${gift.storeId}?product=${gift.productId}`

@@ -397,6 +397,122 @@ describe('GiftPostsService', () => {
       expect(view).toBeDefined();
       expect(prisma.block.findFirst).not.toHaveBeenCalled();
     });
+
+    // ── Suspended / non-public store cascade (QA-audit follow-up) ──
+    //
+    // The GiftPost stays visible — historical gift memory is
+    // preserved — but the active-storefront layer degrades:
+    //   - productImageUrl → null  (frontend renders gradient fallback)
+    //   - productImages   → []
+    //   - productId       → null
+    //   - storeId         → null
+    //   - productHref     → null  (no "shop this product" CTA)
+    //   - productName + storeName SURVIVE (historical snapshot)
+    //   - sender / receiver identity logic UNCHANGED (independent axis)
+
+    const NON_PUBLIC_STATUSES = [
+      'suspended',
+      'rejected',
+      'draft',
+      'submitted',
+      'pending_review',
+      'changes_requested',
+    ] as const;
+
+    for (const status of NON_PUBLIC_STATUSES) {
+      it(`null-fills the catalog layer when parent store is "${status}"`, async () => {
+        prisma.giftPost.findUnique.mockResolvedValue({
+          ...baseRow,
+          gift: {
+            ...baseRow.gift,
+            store: { status },
+          },
+        });
+        const view = await service.getBySlug('abc', null);
+        // Historical snapshot strings survive — the gift moment
+        // remains truthful.
+        expect(view.productName).toBe('باقة جوري');
+        expect(view.storeName).toBe('باقات الرياض');
+        // Active catalog layer is suppressed.
+        expect(view.productImageUrl).toBeNull();
+        expect(view.productImages).toEqual([]);
+        expect(view.productId).toBeNull();
+        expect(view.storeId).toBeNull();
+        // No deep-link CTA back to the now-hidden storefront.
+        expect(view.productHref).toBeNull();
+      });
+    }
+
+    it('keeps the catalog layer when parent store is "approved"', async () => {
+      prisma.giftPost.findUnique.mockResolvedValue({
+        ...baseRow,
+        gift: { ...baseRow.gift, store: { status: 'approved' } },
+      });
+      const view = await service.getBySlug('abc', null);
+      expect(view.productImageUrl).toBe('https://r2.qift.app/p1.jpg');
+      expect(view.productId).toBe('prod_1');
+      expect(view.storeId).toBe('store_1');
+      expect(view.productHref).toBe('/stores/store_1?product=prod_1');
+    });
+
+    it('keeps the catalog layer when parent store is the legacy "pending" alias', async () => {
+      // Pre-v2 stores were backfilled to status='approved', but
+      // the 'pending' legacy alias remains in the allow-list as
+      // belt-and-braces. Locking the alias down so a future
+      // integration that writes 'pending' doesn't accidentally
+      // suppress catalog data.
+      prisma.giftPost.findUnique.mockResolvedValue({
+        ...baseRow,
+        gift: { ...baseRow.gift, store: { status: 'pending' } },
+      });
+      const view = await service.getBySlug('abc', null);
+      expect(view.productImageUrl).toBe('https://r2.qift.app/p1.jpg');
+      expect(view.productHref).toBe('/stores/store_1?product=prod_1');
+    });
+
+    it('treats a gift with no linked store as public (legacy gifts)', async () => {
+      // storeId=null and store=null — a legacy gift created before
+      // the catalog FK landed. There's no storefront to suppress,
+      // so the catalog defaults stay (no image because no product,
+      // but productId/storeId nullity comes from the gift itself).
+      prisma.giftPost.findUnique.mockResolvedValue({
+        ...baseRow,
+        gift: {
+          ...baseRow.gift,
+          productId: null,
+          storeId: null,
+          product: null,
+          store: null,
+        },
+      });
+      const view = await service.getBySlug('abc', null);
+      // No-image gift renders with productImageUrl null.
+      expect(view.productImageUrl).toBeNull();
+      // productHref is null because there's no storeId — same as
+      // the legacy behavior before the QA fix.
+      expect(view.productHref).toBeNull();
+      // Snapshot strings still surface.
+      expect(view.productName).toBe('باقة جوري');
+      expect(view.storeName).toBe('باقات الرياض');
+    });
+
+    it('suppresses catalog layer for non-public store even for the gift owner', async () => {
+      // The sender / receiver are NOT exempt — even they shouldn't
+      // see a live shop-this-product CTA to a suspended store.
+      // Identity masking is independent: they still see each
+      // other's names because the reveal logic runs on a separate
+      // axis from the catalog layer.
+      prisma.giftPost.findUnique.mockResolvedValue({
+        ...baseRow,
+        gift: { ...baseRow.gift, store: { status: 'suspended' } },
+      });
+      const view = await service.getBySlug('abc', senderId);
+      expect(view.productImageUrl).toBeNull();
+      expect(view.productHref).toBeNull();
+      // Identity reveal still works (sender views their own post).
+      expect(view.senderUsername).toBe('sender');
+      expect(view.receiverUsername).toBe('receiver');
+    });
   });
 
   // ── listByUser ──────────────────────────────────────────────

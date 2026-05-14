@@ -11,6 +11,7 @@ import {
   buildGiftPostView,
   type GiftPostView,
 } from '../gifts/gift-post-visibility';
+import { PUBLIC_STORE_STATUSES } from '../stores/stores.service';
 import {
   NotificationsService,
   NotificationType,
@@ -575,6 +576,19 @@ export class GiftPostsService {
               },
             },
           },
+          // Parent store status — used by toView to decide whether
+          // the post's active-storefront layer (productId, storeId,
+          // productImages, productHref) should ship. A suspended /
+          // rejected / draft store causes the catalog layer to null
+          // out while the post + identity + snapshot strings
+          // continue to surface. See gift-post-visibility.ts for
+          // the cascade. Null-safe: legacy gifts without a linked
+          // store (storeId=null on Gift) won't have this row, in
+          // which case storeIsPublic defaults to true (nothing to
+          // hide — there was never a storefront).
+          store: {
+            select: { status: true },
+          },
           sender: {
             select: { qiftUsername: true, fullName: true },
           },
@@ -611,6 +625,19 @@ export class GiftPostsService {
     if (!row) {
       throw new NotFoundException('Post not found');
     }
+    // QA-audit follow-up — is the gift's parent store still on a
+    // public surface? Legacy gifts without a linked store
+    // (storeId=null / store=null) are treated as public because
+    // there's no storefront to suppress. When the store row exists
+    // and its status is NOT in the public allow-list, the cascade
+    // inside buildGiftPostView nulls out productId / storeId /
+    // productImageUrl / productImages / productHref while keeping
+    // the historical-snapshot strings.
+    const storeStatus = row.gift.store?.status ?? null;
+    const storeIsPublic =
+      storeStatus === null ||
+      (PUBLIC_STORE_STATUSES as readonly string[]).includes(storeStatus);
+
     const base = buildGiftPostView({
       post: {
         id: row.id,
@@ -642,6 +669,7 @@ export class GiftPostsService {
       viewerUserId: forceVisible ? row.ownerUserId : viewerUserId,
       senderUserId: row.gift.senderId,
       receiverUserId: row.gift.receiverId,
+      storeIsPublic,
     });
     return {
       ...base,
