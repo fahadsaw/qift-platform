@@ -757,6 +757,12 @@ export class UsersService {
     }
     return {
       exists: true as const,
+      // User id — Phase 6.4 needs it so the /send page can hit
+      // /users/:id/occasions for the gifting-context picker. This
+      // is the same id already exposed by /users/@/:username's
+      // public profile endpoint, so adding it here is not a new
+      // privacy surface.
+      id: user.id,
       qiftUsername: user.qiftUsername,
       fullName: user.fullName,
       avatarUrl: user.avatarUrl,
