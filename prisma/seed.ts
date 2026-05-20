@@ -400,6 +400,272 @@ async function seedMerchants(): Promise<Map<string, string>> {
   return slugToStoreId;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// RBAC test accounts — staging only.
+//
+// PURPOSE
+// Provisions 11 deterministic accounts spanning every authorization
+// role shape so test/rbac-matrix.e2e-spec (added in a follow-up PR)
+// can exercise OpsRoleGuard's dual-path dispatch under both
+// RBAC_PERMISSION_CHECKS_ENABLED states with real Prisma data.
+//
+// The 12th matrix shape — merchant/store — REUSES the existing
+// seeded merchant `merchant-rosary` rather than creating a new
+// Store row. This keeps the RBAC seed scope narrow (no Store
+// fixtures, no per-store coverage/zones) and avoids entangling
+// the RBAC seed with the merchant-onboarding seed shapes.
+//
+// SAFETY (defense in depth — either gate alone refuses a run)
+//   1. Primary gate: QIFT_SEED_RBAC_TEST_ACCOUNTS must equal 'true'.
+//      Production environments MUST NEVER have this var set. The
+//      gate var is intentionally absent from the production
+//      Railway service Variables tab and from .env / .env.example.
+//   2. Defense gate: DATABASE_URL is best-effort string-checked for
+//      production-ish substrings. If the URL appears to reference a
+//      production database the function THROWS — not skips — so a
+//      misconfigured staging deploy fails loud during `prisma db
+//      seed` rather than silently writing test rows into prod.
+//
+// DETERMINISTIC IDS
+// Every seeded user has id matching /^rbac-test-A\d{1,2}$/. Cleanup
+// is therefore the two-statement DELETE shown in the closing log.
+// The id prefix is visually unmistakable in any database GUI.
+//
+// IDEMPOTENT
+// Upsert with empty `update: {}` mirrors the existing merchant seed
+// pattern: re-running the seed never mutates already-created rows.
+// Operators can safely re-seed without losing manual edits.
+//
+// NO SCHEMA CHANGE
+// Every column written (id, qiftUsername, phone, email, passwordHash,
+// role, phoneVerifiedAt, deletedAt on User; userId, role, grantedBy
+// on OpsRoleAssignment) already exists on the deployed schema. No
+// Prisma migration. The deletedAt field on A12 stamps the row as
+// soft-deleted for the AdminGuard regression-check case.
+
+const RBAC_TEST_PASSWORD = 'staging-rbac-test-pwd';
+
+// Saudi mobile prefix (+9665…) with a clearly synthetic suffix
+// (00000100X) so collisions with real phone numbers are impossible.
+// Emails use the RFC 6761 reserved '.invalid' TLD so the addresses
+// can never resolve in real DNS and Resend's domain-restriction
+// (configured separately on the staging Resend key) provides a
+// second layer of recipient safety.
+const RBAC_TEST_ACCOUNTS: ReadonlyArray<{
+  id: string;
+  username: string;
+  phone: string;
+  email: string;
+  role: 'user' | 'admin';
+  opsRoles: ReadonlyArray<string>;
+  deletedAt: Date | null;
+}> = [
+  // A1 — normal user. Baseline: should 403 on every /admin/* route.
+  {
+    id: 'rbac-test-A1',
+    username: 'rbac_test_normal',
+    phone: '+966500001001',
+    email: 'rbac-test-a1@qift-rbac-test.invalid',
+    role: 'user',
+    opsRoles: [],
+    deletedAt: null,
+  },
+  // A2 (merchant/store) is intentionally NOT created here — the
+  // matrix maps A2 to the existing seeded merchant `merchant-rosary`.
+
+  // A3 — legacy admin with no ops grants. Passes coarse AdminGuard;
+  // fails every @RequireOpsPermission route.
+  {
+    id: 'rbac-test-A3',
+    username: 'rbac_test_legacy_admin',
+    phone: '+966500001003',
+    email: 'rbac-test-a3@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: [],
+    deletedAt: null,
+  },
+  // A4 — admin + support. Grants user.read + diagnostics.read +
+  // store.read_detail + report.read.
+  {
+    id: 'rbac-test-A4',
+    username: 'rbac_test_admin_support',
+    phone: '+966500001004',
+    email: 'rbac-test-a4@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['support'],
+    deletedAt: null,
+  },
+  // A5 — admin + finance. Grants finance.read_payouts /
+  // record_payout_event / approve_payout + store.read_detail +
+  // analytics.read.
+  {
+    id: 'rbac-test-A5',
+    username: 'rbac_test_admin_finance',
+    phone: '+966500001005',
+    email: 'rbac-test-a5@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['finance'],
+    deletedAt: null,
+  },
+  // A6 — admin + merchant_review.
+  {
+    id: 'rbac-test-A6',
+    username: 'rbac_test_admin_mr',
+    phone: '+966500001006',
+    email: 'rbac-test-a6@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['merchant_review'],
+    deletedAt: null,
+  },
+  // A7 — admin + operations_manager.
+  {
+    id: 'rbac-test-A7',
+    username: 'rbac_test_admin_om',
+    phone: '+966500001007',
+    email: 'rbac-test-a7@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['operations_manager'],
+    deletedAt: null,
+  },
+  // A8 — admin + trust_safety.
+  {
+    id: 'rbac-test-A8',
+    username: 'rbac_test_admin_ts',
+    phone: '+966500001008',
+    email: 'rbac-test-a8@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['trust_safety'],
+    deletedAt: null,
+  },
+  // A9 — admin + fulfillment_ops.
+  {
+    id: 'rbac-test-A9',
+    username: 'rbac_test_admin_fo',
+    phone: '+966500001009',
+    email: 'rbac-test-a9@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['fulfillment_ops'],
+    deletedAt: null,
+  },
+  // A10 — admin + analytics_viewer.
+  {
+    id: 'rbac-test-A10',
+    username: 'rbac_test_admin_av',
+    phone: '+966500001010',
+    email: 'rbac-test-a10@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['analytics_viewer'],
+    deletedAt: null,
+  },
+  // A11 — super_admin. Catalog grants ALL_ADMIN_PERMISSIONS;
+  // legacy map grants SUPER_ADMIN_ALL (every OpsPermission).
+  // Pinned by ops-roles-catalog-equivalence.spec.ts.
+  {
+    id: 'rbac-test-A11',
+    username: 'rbac_test_super_admin',
+    phone: '+966500001011',
+    email: 'rbac-test-a11@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: ['super_admin'],
+    deletedAt: null,
+  },
+  // A12 — soft-deleted admin. Pre-stamped deletedAt so the matrix
+  // verifies AdminGuard rejects with 'Admin access required' BEFORE
+  // any RBAC dispatch happens. If AuthService.login refuses to
+  // issue a JWT for soft-deleted accounts, the matrix spec will
+  // need to set deletedAt post-login via SQL — that's a spec-side
+  // concern; this seed always stamps deletedAt up front.
+  {
+    id: 'rbac-test-A12',
+    username: 'rbac_test_admin_deleted',
+    phone: '+966500001012',
+    email: 'rbac-test-a12@qift-rbac-test.invalid',
+    role: 'admin',
+    opsRoles: [],
+    deletedAt: new Date('2024-01-01T00:00:00Z'),
+  },
+];
+
+async function seedRbacTestAccounts(): Promise<void> {
+  // PRIMARY GATE.
+  if (process.env.QIFT_SEED_RBAC_TEST_ACCOUNTS !== 'true') {
+    console.log('[rbac-seed] skipped (QIFT_SEED_RBAC_TEST_ACCOUNTS not set).');
+    return;
+  }
+
+  // DEFENSE-IN-DEPTH GATE.
+  // Refuses to run if DATABASE_URL looks production-ish. Belt +
+  // braces — operational discipline (never set the gate var in prod)
+  // is the real guarantee, but this catches the most obvious
+  // misconfiguration: operator sets the gate var on a service whose
+  // DATABASE_URL still points at production.
+  const dbUrl = process.env.DATABASE_URL ?? '';
+  if (/qift-prod|prod-postgres|production/i.test(dbUrl)) {
+    throw new Error(
+      'Refusing to seed RBAC test accounts: DATABASE_URL appears to ' +
+        'reference a production database. The seed gate ' +
+        '(QIFT_SEED_RBAC_TEST_ACCOUNTS=true) must NEVER be set on a ' +
+        'service that talks to production data. If the database name ' +
+        "contains 'prod' / 'production' / 'qift-prod' coincidentally " +
+        'and this really is a staging environment, rename the database ' +
+        'to remove the substring before retrying.',
+    );
+  }
+
+  console.log(
+    `[rbac-seed] creating ${RBAC_TEST_ACCOUNTS.length} RBAC test ` +
+      'accounts (QIFT_SEED_RBAC_TEST_ACCOUNTS=true)…',
+  );
+
+  const passwordHash = await bcrypt.hash(RBAC_TEST_PASSWORD, BCRYPT_ROUNDS);
+
+  for (const a of RBAC_TEST_ACCOUNTS) {
+    await prisma.user.upsert({
+      where: { id: a.id },
+      create: {
+        id: a.id,
+        qiftUsername: a.username,
+        phone: a.phone,
+        email: a.email,
+        passwordHash,
+        role: a.role,
+        // Stamp phoneVerifiedAt so login skips OTP for these test
+        // accounts — mirrors the merchant seed pattern. The matrix
+        // spec then logs in with phone + password directly.
+        phoneVerifiedAt: new Date(),
+        deletedAt: a.deletedAt,
+      },
+      // Empty update: re-running the seed never mutates already-
+      // created rows. Same idempotency pattern as the merchant seed
+      // (which uses an empty `update: {}` on every upsert).
+      update: {},
+    });
+
+    for (const opsRole of a.opsRoles) {
+      await prisma.opsRoleAssignment.upsert({
+        where: { userId_role: { userId: a.id, role: opsRole } },
+        create: {
+          userId: a.id,
+          role: opsRole,
+          // Legacy admin (A3) is the granter — gives the audit-log
+          // chain a coherent grantedBy reference even in staging.
+          grantedBy: 'rbac-test-A3',
+        },
+        update: {},
+      });
+    }
+  }
+
+  console.log(
+    `[rbac-seed] ${RBAC_TEST_ACCOUNTS.length} accounts ready. ` +
+      'A2 (merchant role) reuses existing seeded merchant ' +
+      '`merchant-rosary` — not created here. Login: phone + password ' +
+      `"${RBAC_TEST_PASSWORD}". Cleanup SQL:\n` +
+      `  DELETE FROM "OpsRoleAssignment" WHERE "userId" LIKE 'rbac-test-%';\n` +
+      `  DELETE FROM "User" WHERE id LIKE 'rbac-test-%';`,
+  );
+}
+
 async function main() {
   // Merchants come first so the demo /stores grid + admin /admin/stores
   // tab are populated even if there are no human users yet. The social
@@ -572,6 +838,13 @@ async function main() {
       `  @${u.qiftUsername.padEnd(20)} ${String(followers).padStart(2)}        / ${String(following).padStart(2)}        / ${String(sent).padStart(2)}   / ${String(received).padStart(2)}       / ${String(wishes).padStart(2)}`,
     );
   }
+
+  // RBAC staging seed — no-op unless QIFT_SEED_RBAC_TEST_ACCOUNTS=true.
+  // Runs last so the test accounts are isolated from the social-ring
+  // section above (the user.findMany at the top of main() captured its
+  // result before this call, so RBAC admins don't fold into the
+  // follows / gifts / wishes generation).
+  await seedRbacTestAccounts();
 }
 
 main()
