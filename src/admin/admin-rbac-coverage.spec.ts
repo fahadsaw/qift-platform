@@ -217,17 +217,25 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
   describe('AdminGuard → OpsRoleGuard chain composition under both flag states', () => {
     let prismaFindUnique: jest.Mock;
     let userHasPermissionMock: jest.Mock;
+    // PR B-6a: OpsRoleGuard's flag-ON path consults opsRoles.getUserRoles
+    // and feeds the result through the catalog instead of calling
+    // userHasPermission. The mock must exist (returning a Promise) for
+    // tests that exercise the flag-ON path; default to [] so denial
+    // cases work without explicit per-test setup.
+    let getUserRolesMock: jest.Mock;
     let adminGuard: AdminGuard;
     let opsRoleGuard: OpsRoleGuard;
 
     beforeEach(() => {
       prismaFindUnique = jest.fn();
       userHasPermissionMock = jest.fn();
+      getUserRolesMock = jest.fn().mockResolvedValue([]);
       adminGuard = new AdminGuard({
         user: { findUnique: prismaFindUnique },
       } as unknown as PrismaService);
       opsRoleGuard = new OpsRoleGuard(new Reflector(), {
         userHasPermission: userHasPermissionMock,
+        getUserRoles: getUserRolesMock,
       } as unknown as OpsRolesService);
     });
 
@@ -267,14 +275,20 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
       async (_label, flag) => {
         process.env.RBAC_PERMISSION_CHECKS_ENABLED = flag;
         prismaFindUnique.mockResolvedValue({ role: 'admin', deletedAt: null });
+        // Provision BOTH dispatch sources so the test outcome is the
+        // same under either flag state:
+        //   - flag OFF → legacy userHasPermission returns true
+        //   - flag ON  → getUserRoles yields 'finance', which grants
+        //                finance.read_payouts in the catalog
+        // The internal-call assertion (which method was actually
+        // invoked) is covered by ops-role.guard.spec.ts. Here we
+        // only assert the COMPOSED outcome of AdminGuard +
+        // OpsRoleGuard.
         userHasPermissionMock.mockResolvedValue(true);
+        getUserRolesMock.mockResolvedValue(['finance']);
         await expect(
           runChain({ userId: 'admin-1', handler: decoratedHandler }),
         ).resolves.toBe(true);
-        expect(userHasPermissionMock).toHaveBeenCalledWith(
-          'admin-1',
-          'finance.read_payouts',
-        );
       },
     );
 
@@ -358,6 +372,11 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
 
     let prismaFindUnique: jest.Mock;
     let userHasPermissionMock: jest.Mock;
+    // PR B-6a: same reason as the block above — the flag-ON path
+    // would call getUserRoles. Undecorated routes don't actually
+    // reach the dispatch branch (OpsRoleGuard short-circuits on
+    // missing metadata) so the default [] suffices.
+    let getUserRolesMock: jest.Mock;
     let adminGuard: AdminGuard;
     let opsRoleGuard: OpsRoleGuard;
 
@@ -367,11 +386,13 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         deletedAt: null,
       });
       userHasPermissionMock = jest.fn();
+      getUserRolesMock = jest.fn().mockResolvedValue([]);
       adminGuard = new AdminGuard({
         user: { findUnique: prismaFindUnique },
       } as unknown as PrismaService);
       opsRoleGuard = new OpsRoleGuard(new Reflector(), {
         userHasPermission: userHasPermissionMock,
+        getUserRoles: getUserRolesMock,
       } as unknown as OpsRolesService);
     });
 
@@ -411,12 +432,20 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
   // ─────────────────────────────────────────────────────────────────
   describe('exhaustive: every decorated GET endpoint enforces its ops-permission under both flag states', () => {
     // Per-route smoke of the AdminGuard → OpsRoleGuard chain. Confirms
-    // that each decorated route's metadata flows through to a real
-    // userHasPermission(userId, opsPermission) call with the
-    // documented permission identifier.
+    // that each decorated route's metadata flows through to the
+    // dispatch path:
+    //   - flag OFF: userHasPermission(userId, opsPermission) is
+    //     called with the documented permission identifier.
+    //   - flag ON  (PR B-6a): getUserRoles(userId) is called, and
+    //     the catalog correctly authorises a super_admin grant.
+    // Per-(role, permission) equivalence between the two paths is
+    // proved by ops-roles-catalog-equivalence.spec.ts — this block
+    // proves the documented permission is correctly threaded into
+    // the dispatch on every route.
 
     let prismaFindUnique: jest.Mock;
     let userHasPermissionMock: jest.Mock;
+    let getUserRolesMock: jest.Mock;
     let adminGuard: AdminGuard;
     let opsRoleGuard: OpsRoleGuard;
 
@@ -426,11 +455,19 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         deletedAt: null,
       });
       userHasPermissionMock = jest.fn().mockResolvedValue(true);
+      // super_admin holds every OpsPermission via the catalog's
+      // ALL_ADMIN_PERMISSIONS aggregate — exhaustively asserted by
+      // ops-roles-catalog-equivalence.spec.ts. Using it here means
+      // every parameterised decorated-route case authorises under
+      // the flag-ON path regardless of which OpsPermission the
+      // route requires.
+      getUserRolesMock = jest.fn().mockResolvedValue(['super_admin']);
       adminGuard = new AdminGuard({
         user: { findUnique: prismaFindUnique },
       } as unknown as PrismaService);
       opsRoleGuard = new OpsRoleGuard(new Reflector(), {
         userHasPermission: userHasPermissionMock,
+        getUserRoles: getUserRolesMock,
       } as unknown as OpsRolesService);
     });
 
@@ -452,23 +489,30 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
           'admin-1',
           opsPermission,
         );
+        expect(getUserRolesMock).not.toHaveBeenCalled();
       },
     );
 
     it.each(decoratedRoutes)(
-      'flag ON: GET /admin/$path calls opsRoles.userHasPermission(_, $opsPermission)',
-      async ({ method, opsPermission }) => {
+      'flag ON: GET /admin/$path consults catalog via opsRoles.getUserRoles',
+      async ({ method }) => {
+        // The documented OpsPermission is no longer threaded through
+        // a service call argument under flag ON — it is consumed
+        // internally by permissionsForRoles(roles).has(perm). Asserting
+        // the per-permission threading under flag ON would require
+        // mocking the catalog itself, which buys nothing the
+        // ops-roles-catalog-equivalence.spec.ts proof doesn't already
+        // give us. So under flag ON we assert the dispatch direction
+        // + the composed outcome.
         process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
         const ctx = makeChainContext({
           userId: 'admin-1',
           handler: handlerFor(method),
         });
         await adminGuard.canActivate(ctx);
-        await opsRoleGuard.canActivate(ctx);
-        expect(userHasPermissionMock).toHaveBeenCalledWith(
-          'admin-1',
-          opsPermission,
-        );
+        await expect(opsRoleGuard.canActivate(ctx)).resolves.toBe(true);
+        expect(getUserRolesMock).toHaveBeenCalledWith('admin-1');
+        expect(userHasPermissionMock).not.toHaveBeenCalled();
       },
     );
   });

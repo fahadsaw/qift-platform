@@ -6,6 +6,7 @@ import {
   SetMetadata,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { arePermissionChecksEnabled, permissionsForRoles } from '../rbac';
 import { OpsRolesService } from './ops-roles.service';
 import type { OpsPermission } from './ops-roles';
 
@@ -47,7 +48,33 @@ export class OpsRoleGuard implements CanActivate {
     if (!userId) {
       throw new ForbiddenException('Missing user context');
     }
-    const ok = await this.opsRoles.userHasPermission(userId, required);
+
+    // Dual-path dispatch (PR B-6a). Mirrors the B-4 AdminGuard
+    // pattern:
+    //   - flag OFF (default in prod) → legacy ops-roles.ts capability
+    //     map via opsRoles.userHasPermission(userId, perm).
+    //   - flag ON  (default in dev/test) → unified RBAC catalog at
+    //     src/rbac/role-map.ts, fed the user's OpsRoleAssignment
+    //     rows via opsRoles.getUserRoles(userId).
+    //
+    // The OpsRoleAssignment read is unchanged in shape — both paths
+    // resolve the user's ops roles from the same DB rows; only the
+    // role→permission map differs. Behaviour preservation across
+    // the flag flip is established at test time by
+    // ops-roles-catalog-equivalence.spec.ts, which asserts that for
+    // every (OpsRole, OpsPermission) pair the two maps agree.
+    //
+    // Both branches throw `ForbiddenException('Operation requires
+    // elevated permissions')` — identical message, identical HTTP
+    // 403. The flag can be flipped back instantly via env var if
+    // anything drifts (see src/rbac/permission-checks-flag.ts).
+    let ok: boolean;
+    if (arePermissionChecksEnabled()) {
+      const roles = await this.opsRoles.getUserRoles(userId);
+      ok = permissionsForRoles(roles).has(required);
+    } else {
+      ok = await this.opsRoles.userHasPermission(userId, required);
+    }
     if (!ok) {
       throw new ForbiddenException('Operation requires elevated permissions');
     }

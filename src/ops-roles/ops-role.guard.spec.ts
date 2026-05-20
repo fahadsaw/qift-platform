@@ -1,32 +1,37 @@
-// Unit tests for OpsRoleGuard — PR B-5 (verification + kill-switch
-// independence pin).
+// Unit tests for OpsRoleGuard.
 //
-// OpsRoleGuard's migration to the unified RBAC catalog is deferred
-// to PR B-6a per src/rbac/MIGRATION_PLAN.md. This spec exists to
-// pin three contracts during the B-4 → B-6a window:
+// HISTORY
+// PR B-5 created this spec while OpsRoleGuard was still on the
+// legacy ops-roles.ts path. It pinned the deferral discipline with
+// source-level assertions ("kill-switch independence") so any
+// accidental coupling to RBAC_PERMISSION_CHECKS_ENABLED would fail
+// loud before B-6a was ready.
 //
-//   1. OpsRoleGuard's behaviour is identical under both kill-switch
-//      states. Migrated AdminGuard runs first; OpsRoleGuard inherits
-//      whatever it leaves on req. The new AdminGuard path must not
-//      perturb OpsRoleGuard's authorisation outcome.
+// PR B-6a (this PR) replaces the deferral-pin block with structural
+// assertions on the new dual-path dispatch. The guard now reads the
+// kill-switch on every request and routes either to
+// opsRoles.userHasPermission (legacy) or to permissionsForRoles via
+// opsRoles.getUserRoles (catalog). Behaviour preservation across the
+// flag flip is established by ops-roles-catalog-equivalence.spec.ts.
 //
-//   2. OpsRoleGuard does NOT yet read the kill-switch flag. Any
-//      accidental coupling (a stray import, a flag read) would
-//      conflate the AdminGuard migration with the OpsRoleGuard
-//      migration and break the staged rollout discipline.
-//
-//   3. The OpsRoleGuard behavioural contract — metadata-driven no-op
-//      vs gated access vs 'Operation requires elevated permissions'
-//      — is unchanged. Future PR B-6a will rewrite OpsRoleGuard
-//      internals; this spec is the regression-safety net against
-//      accidental scope creep before then.
+// COVERAGE
+//   1. No metadata → guard short-circuits without consulting either
+//      service method (unchanged from B-5).
+//   2. Flag OFF (legacy path): user-has-permission true/false,
+//      missing-userId, class-vs-handler metadata precedence — all
+//      route through opsRoles.userHasPermission(userId, perm).
+//   3. Flag ON  (catalog path): same matrix, routes through
+//      opsRoles.getUserRoles(userId) + permissionsForRoles(roles).
+//   4. Exception messages identical across both flag states.
+//   5. Dispatch direction (the new pin replacing B-5's
+//      deferral-pin): under flag OFF only userHasPermission is
+//      invoked; under flag ON only getUserRoles is invoked.
 
 import 'reflect-metadata';
-import { readFileSync } from 'node:fs';
 import { ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { OpsRoleGuard } from './ops-role.guard';
-import type { OpsPermission } from './ops-roles';
+import type { OpsPermission, OpsRole } from './ops-roles';
 import type { OpsRolesService } from './ops-roles.service';
 
 const META_KEY = 'qift:opsPermission';
@@ -65,13 +70,22 @@ function makeContext(opts: {
 
 describe('OpsRoleGuard', () => {
   let userHasPermissionMock: jest.Mock;
+  let getUserRolesMock: jest.Mock;
   let guard: OpsRoleGuard;
   const ORIGINAL_RBAC = process.env.RBAC_PERMISSION_CHECKS_ENABLED;
   const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
   beforeEach(() => {
     userHasPermissionMock = jest.fn();
-    const fakeOpsRoles = { userHasPermission: userHasPermissionMock };
+    // Default getUserRoles to empty so flag-ON tests that don't care
+    // about role grants still resolve a Promise instead of throwing
+    // TypeError on `await undefined`. Tests that need a specific
+    // grant override this in-test.
+    getUserRolesMock = jest.fn().mockResolvedValue([]);
+    const fakeOpsRoles = {
+      userHasPermission: userHasPermissionMock,
+      getUserRoles: getUserRolesMock,
+    };
     guard = new OpsRoleGuard(
       new Reflector(),
       fakeOpsRoles as unknown as OpsRolesService,
@@ -80,7 +94,7 @@ describe('OpsRoleGuard', () => {
 
   afterEach(() => {
     // Hermetic env restoration — same discipline as
-    // admin.guard.spec.ts. Sibling test suites rely on
+    // admin.guard.spec.ts. Sibling suites rely on
     // NODE_ENV === 'test'.
     if (ORIGINAL_RBAC === undefined) {
       delete process.env.RBAC_PERMISSION_CHECKS_ENABLED;
@@ -96,27 +110,51 @@ describe('OpsRoleGuard', () => {
 
   // ─────────────────────────────────────────────────────────────────
   describe('no metadata (route without @RequireOpsPermission)', () => {
-    it('returns true without consulting ops-roles', async () => {
+    // Short-circuit runs BEFORE either dispatch branch — neither
+    // service method is consulted, regardless of flag state.
+    it('returns true without consulting ops-roles (flag OFF)', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '0';
       const ctx = makeContext({ user: { userId: 'u-1' } });
       const result = await guard.canActivate(ctx);
       expect(result).toBe(true);
       expect(userHasPermissionMock).not.toHaveBeenCalled();
+      expect(getUserRolesMock).not.toHaveBeenCalled();
     });
 
-    it('returns true even when req.user is absent', async () => {
+    it('returns true without consulting ops-roles (flag ON)', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+      const ctx = makeContext({ user: { userId: 'u-1' } });
+      const result = await guard.canActivate(ctx);
+      expect(result).toBe(true);
+      expect(userHasPermissionMock).not.toHaveBeenCalled();
+      expect(getUserRolesMock).not.toHaveBeenCalled();
+    });
+
+    it('returns true even when req.user is absent (flag OFF)', async () => {
       // A route without @RequireOpsPermission must never trip a 403
       // on a valid admin request — even if an upstream guard somehow
       // forgot to populate req.user. The short-circuit on absent
       // metadata MUST run before any user-context inspection.
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '0';
       const ctx = makeContext({ user: undefined });
       const result = await guard.canActivate(ctx);
       expect(result).toBe(true);
-      expect(userHasPermissionMock).not.toHaveBeenCalled();
+    });
+
+    it('returns true even when req.user is absent (flag ON)', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+      const ctx = makeContext({ user: undefined });
+      const result = await guard.canActivate(ctx);
+      expect(result).toBe(true);
     });
   });
 
   // ─────────────────────────────────────────────────────────────────
-  describe('metadata present', () => {
+  describe('metadata present — flag OFF (legacy ops-roles.ts path)', () => {
+    beforeEach(() => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '0';
+    });
+
     it('returns true when opsRoles.userHasPermission returns true', async () => {
       userHasPermissionMock.mockResolvedValue(true);
       const ctx = makeContext({
@@ -155,7 +193,7 @@ describe('OpsRoleGuard', () => {
       );
     });
 
-    it('honours class-level metadata when handler has none (Reflector getAllAndOverride)', async () => {
+    it('honours class-level metadata when handler has none', async () => {
       userHasPermissionMock.mockResolvedValue(true);
       const ctx = makeContext({
         permissionOnClass: 'diagnostics.read',
@@ -182,98 +220,194 @@ describe('OpsRoleGuard', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────
-  describe('behaviour is identical under both kill-switch states', () => {
-    // OpsRoleGuard does not read the flag (its migration is B-6a).
-    // These assertions PIN that contract: flipping
-    // RBAC_PERMISSION_CHECKS_ENABLED must not change a single
-    // OpsRoleGuard outcome.
+  describe('metadata present — flag ON (unified RBAC catalog path)', () => {
+    beforeEach(() => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+    });
 
-    type FlagCase = [label: string, flag: '0' | '1'];
-    const FLAG_CASES: FlagCase[] = [
-      ['flag OFF', '0'],
-      ['flag ON', '1'],
-    ];
+    it('returns true when getUserRoles yields a role granting the permission', async () => {
+      // operations_manager grants user.read in both maps (verified
+      // exhaustively by ops-roles-catalog-equivalence.spec.ts).
+      const grantingRoles: OpsRole[] = ['operations_manager'];
+      getUserRolesMock.mockResolvedValue(grantingRoles);
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: { userId: 'u-1' },
+      });
+      const result = await guard.canActivate(ctx);
+      expect(result).toBe(true);
+      expect(getUserRolesMock).toHaveBeenCalledWith('u-1');
+    });
 
-    it.each(FLAG_CASES)(
-      '%s: no metadata → returns true',
-      async (_label, flag) => {
-        process.env.RBAC_PERMISSION_CHECKS_ENABLED = flag;
-        const ctx = makeContext({ user: { userId: 'u-1' } });
-        await expect(guard.canActivate(ctx)).resolves.toBe(true);
-      },
-    );
+    it('throws "Operation requires elevated permissions" when getUserRoles yields no granting role', async () => {
+      // analytics_viewer holds only analytics.read; checking
+      // finance.read_payouts must reject.
+      const nonGrantingRoles: OpsRole[] = ['analytics_viewer'];
+      getUserRolesMock.mockResolvedValue(nonGrantingRoles);
+      const ctx = makeContext({
+        permissionOnHandler: 'finance.read_payouts',
+        user: { userId: 'u-1' },
+      });
+      await expect(guard.canActivate(ctx)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        'Operation requires elevated permissions',
+      );
+    });
 
-    it.each(FLAG_CASES)(
-      '%s: metadata + ops-permission granted → returns true',
-      async (_label, flag) => {
-        process.env.RBAC_PERMISSION_CHECKS_ENABLED = flag;
-        userHasPermissionMock.mockResolvedValue(true);
-        const ctx = makeContext({
-          permissionOnHandler: 'user.read',
-          user: { userId: 'u-1' },
-        });
-        await expect(guard.canActivate(ctx)).resolves.toBe(true);
-      },
-    );
+    it('throws "Operation requires elevated permissions" when getUserRoles yields an empty list', async () => {
+      // No ops-role assignments at all — admin without granular grants.
+      getUserRolesMock.mockResolvedValue([]);
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: { userId: 'u-1' },
+      });
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        'Operation requires elevated permissions',
+      );
+    });
 
-    it.each(FLAG_CASES)(
-      '%s: metadata + ops-permission denied → throws identical message',
-      async (_label, flag) => {
-        process.env.RBAC_PERMISSION_CHECKS_ENABLED = flag;
-        userHasPermissionMock.mockResolvedValue(false);
-        const ctx = makeContext({
-          permissionOnHandler: 'finance.read_payouts',
-          user: { userId: 'u-1' },
-        });
-        await expect(guard.canActivate(ctx)).rejects.toThrow(
-          'Operation requires elevated permissions',
-        );
-      },
-    );
+    it('throws "Missing user context" when req.user is absent', async () => {
+      // Same upstream short-circuit as flag OFF. No DB read.
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: undefined,
+      });
+      await expect(guard.canActivate(ctx)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        'Missing user context',
+      );
+      expect(getUserRolesMock).not.toHaveBeenCalled();
+    });
 
-    it.each(FLAG_CASES)(
-      '%s: metadata + missing userId → throws "Missing user context"',
-      async (_label, flag) => {
-        process.env.RBAC_PERMISSION_CHECKS_ENABLED = flag;
-        const ctx = makeContext({
-          permissionOnHandler: 'user.read',
-          user: undefined,
-        });
-        await expect(guard.canActivate(ctx)).rejects.toThrow(
-          'Missing user context',
-        );
-      },
-    );
+    it('honours class-level metadata when handler has none', async () => {
+      getUserRolesMock.mockResolvedValue(['support']);
+      const ctx = makeContext({
+        permissionOnClass: 'diagnostics.read',
+        user: { userId: 'u-1' },
+      });
+      const result = await guard.canActivate(ctx);
+      expect(result).toBe(true);
+      expect(getUserRolesMock).toHaveBeenCalledWith('u-1');
+    });
+
+    it('handler-level metadata overrides class-level metadata', async () => {
+      // Handler asks for user.read; class asks for diagnostics.read.
+      // Role 'trust_safety' grants user.read but NOT diagnostics.read.
+      // If the handler metadata wins, this passes; if the class wins,
+      // this rejects.
+      getUserRolesMock.mockResolvedValue(['trust_safety']);
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        permissionOnClass: 'diagnostics.read',
+        user: { userId: 'u-1' },
+      });
+      const result = await guard.canActivate(ctx);
+      expect(result).toBe(true);
+    });
+
+    it('OR-semantics across multiple roles: any role granting the permission authorises', async () => {
+      // User holds two roles; only one grants the permission. The
+      // catalog's permissionsForRoles unions the grants — guard must
+      // authorise.
+      getUserRolesMock.mockResolvedValue(['analytics_viewer', 'finance']);
+      const ctx = makeContext({
+        permissionOnHandler: 'finance.read_payouts',
+        user: { userId: 'u-1' },
+      });
+      const result = await guard.canActivate(ctx);
+      expect(result).toBe(true);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────
-  describe('kill-switch independence (PR B-6a deferral pin)', () => {
-    // The guard's source must not reference the kill-switch flag.
-    // Any accidental coupling — direct import of
-    // arePermissionChecksEnabled / hasPermission, a literal
-    // RBAC_PERMISSION_CHECKS_ENABLED env read, an import from
-    // ../rbac — would conflate the AdminGuard migration with the
-    // OpsRoleGuard migration. PR B-6a will replace these
-    // assertions with structural ones once the migration lands.
-    const guardSource = readFileSync(
-      require.resolve('./ops-role.guard'),
-      'utf8',
-    );
+  describe('exception messages identical across both flag states', () => {
+    // The exact strings the frontend / clients depend on for routing
+    // and copy. Any drift would surface as user-facing UI regression.
 
-    it('does NOT reference arePermissionChecksEnabled', () => {
-      expect(guardSource).not.toContain('arePermissionChecksEnabled');
+    it('flag OFF: denial → "Operation requires elevated permissions"', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '0';
+      userHasPermissionMock.mockResolvedValue(false);
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: { userId: 'u-1' },
+      });
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        'Operation requires elevated permissions',
+      );
     });
 
-    it('does NOT reference hasPermission', () => {
-      expect(guardSource).not.toContain('hasPermission');
+    it('flag ON: denial → "Operation requires elevated permissions"', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+      getUserRolesMock.mockResolvedValue([]);
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: { userId: 'u-1' },
+      });
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        'Operation requires elevated permissions',
+      );
     });
 
-    it('does NOT reference RBAC_PERMISSION_CHECKS_ENABLED', () => {
-      expect(guardSource).not.toContain('RBAC_PERMISSION_CHECKS_ENABLED');
+    it('flag OFF: missing userId → "Missing user context"', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '0';
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: undefined,
+      });
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        'Missing user context',
+      );
     });
 
-    it('does NOT import from ../rbac', () => {
-      expect(guardSource).not.toMatch(/from\s+['"]\.\.\/rbac['"]/);
+    it('flag ON: missing userId → "Missing user context"', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: undefined,
+      });
+      await expect(guard.canActivate(ctx)).rejects.toThrow(
+        'Missing user context',
+      );
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  describe('dispatch direction (PR B-6a migration assertion)', () => {
+    // Replaces B-5's "kill-switch independence (PR B-6a deferral pin)"
+    // block. With B-6a merged, the deferral is over — the guard now
+    // DOES read the kill-switch and dispatches accordingly. These
+    // assertions pin the direction of dispatch so any future
+    // accidental swap (flag OFF accidentally calls catalog; flag ON
+    // accidentally calls legacy) fails fast.
+
+    it('flag OFF → opsRoles.userHasPermission is called; getUserRoles is NOT', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '0';
+      userHasPermissionMock.mockResolvedValue(true);
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: { userId: 'u-1' },
+      });
+      await guard.canActivate(ctx);
+      expect(userHasPermissionMock).toHaveBeenCalledTimes(1);
+      expect(userHasPermissionMock).toHaveBeenCalledWith('u-1', 'user.read');
+      expect(getUserRolesMock).not.toHaveBeenCalled();
+    });
+
+    it('flag ON → opsRoles.getUserRoles is called; userHasPermission is NOT', async () => {
+      process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+      getUserRolesMock.mockResolvedValue(['operations_manager']);
+      const ctx = makeContext({
+        permissionOnHandler: 'user.read',
+        user: { userId: 'u-1' },
+      });
+      await guard.canActivate(ctx);
+      expect(getUserRolesMock).toHaveBeenCalledTimes(1);
+      expect(getUserRolesMock).toHaveBeenCalledWith('u-1');
+      expect(userHasPermissionMock).not.toHaveBeenCalled();
     });
   });
 });
