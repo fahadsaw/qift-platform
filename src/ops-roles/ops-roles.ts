@@ -5,8 +5,8 @@
 // operations beyond a single "admin" bucket without exploding
 // the AdminGuard surface.
 //
-// Mirrored on the frontend at `lib/opsRoles.ts` — keep role
-// codes + permission codes in sync. The frontend mirror is
+// Mirrored on the frontend at `qift-ui-v2/lib/opsRoles.ts` — keep
+// role codes + permission codes in sync. The frontend mirror is
 // presentational only (badge labels, role pickers); the
 // authoritative gate is the OpsRoleGuard on the backend.
 //
@@ -17,6 +17,33 @@
 //   - Per-resource ACLs (e.g. "this user can review THIS
 //     specific store"). Today every role is platform-wide;
 //     resource scoping is a future surface.
+//
+// SOURCE-OF-TRUTH INVARIANTS (PR B-3a)
+// This module no longer maintains a separate string-literal
+// universe for identifiers. Instead:
+//   - `OPS_ROLES` satisfies `readonly QiftRole[]` from
+//     src/rbac/roles.ts — every role name here must exist in the
+//     unified RBAC role catalog (a typo or stale name fails to
+//     compile).
+//   - `OpsPermission` is derived from `OPS_PERMISSIONS`, which
+//     satisfies `readonly Permission[]` from
+//     src/rbac/permissions.ts — every permission identifier here
+//     is verified against the unified RBAC permission catalog.
+// Drift between this file and the RBAC catalog on shared
+// identifiers is therefore impossible.
+//
+// CONTENT REMAINS MANUALLY MAINTAINED
+// `PERMISSIONS_BY_ROLE` and `SUPER_ADMIN_ALL` are not derived
+// from src/rbac/role-map.ts. ops-roles.ts has a behavioural
+// contract with the deployed schema (`OpsRoleAssignment` rows
+// reference these role codes; live operators hold real grants),
+// not with the frontend-shaped RBAC catalog. The drift check
+// here covers identifier spelling, not role content. When the
+// content needs to change, update both this file and
+// src/rbac/role-map.ts to match.
+
+import type { Permission } from '../rbac/permissions';
+import type { QiftRole } from '../rbac/roles';
 
 export const OPS_ROLES = [
   // Root. Always has every permission. Use sparingly — bootstrap
@@ -40,7 +67,7 @@ export const OPS_ROLES = [
   'fulfillment_ops',
   // Read-only access to platform analytics dashboards.
   'analytics_viewer',
-] as const;
+] as const satisfies readonly QiftRole[];
 
 export type OpsRole = (typeof OPS_ROLES)[number];
 
@@ -51,30 +78,39 @@ export function isOpsRole(value: string): value is OpsRole {
 // Permission catalog. One entry per action surface that needs
 // gating. Grouped by domain for readability — actual checks are
 // flat strings.
-export type OpsPermission =
+//
+// Source-of-truth tuple. Every identifier is verified at compile
+// time against the unified RBAC Permission catalog
+// (src/rbac/permissions.ts) via `satisfies readonly Permission[]`.
+// Parallel to `OPS_ROLES` above: the tuple is the runtime value,
+// the `OpsPermission` type is derived from it.
+export const OPS_PERMISSIONS = [
   // Store / merchant management.
-  | 'store.review'
-  | 'store.set_plan'
-  | 'store.set_featured'
-  | 'store.set_status'
-  | 'store.read_detail'
+  'store.review',
+  'store.set_plan',
+  'store.set_featured',
+  'store.set_status',
+  'store.read_detail',
   // User management.
-  | 'user.read'
-  | 'user.set_role'
-  | 'user.suspend'
-  | 'user.assign_ops_role'
+  'user.read',
+  'user.set_role',
+  'user.suspend',
+  'user.assign_ops_role',
   // Finance.
-  | 'finance.read_payouts'
-  | 'finance.record_payout_event'
-  | 'finance.approve_payout'
+  'finance.read_payouts',
+  'finance.record_payout_event',
+  'finance.approve_payout',
   // Diagnostics / debug.
-  | 'diagnostics.read'
-  | 'diagnostics.run_seed'
+  'diagnostics.read',
+  'diagnostics.run_seed',
   // Trust & safety.
-  | 'report.read'
-  | 'report.resolve'
+  'report.read',
+  'report.resolve',
   // Analytics.
-  | 'analytics.read';
+  'analytics.read',
+] as const satisfies readonly Permission[];
+
+export type OpsPermission = (typeof OPS_PERMISSIONS)[number];
 
 // Capability map. Role → permissions granted. super_admin is
 // computed lazily at call time as "all permissions"; we don't
@@ -148,9 +184,12 @@ export function hasOpsPermission(
   return permissionsFor(roles).has(permission);
 }
 
-// Authoritative permission list. Update alongside the
-// OpsPermission union — the typechecker doesn't enforce this
-// alignment automatically.
+// Authoritative permission list for super_admin. Update
+// alongside OPS_PERMISSIONS — the typechecker enforces that
+// every entry is a valid OpsPermission, but does NOT enforce
+// that EVERY OpsPermission appears here. The ops-roles.spec.ts
+// runtime test (PR B-3a) asserts the two are kept aligned so
+// new permissions can't silently miss super_admin.
 const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'store.review',
   'store.set_plan',
