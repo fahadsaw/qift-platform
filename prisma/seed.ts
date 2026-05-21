@@ -679,6 +679,16 @@ async function main() {
     select: { id: true, qiftUsername: true },
   });
 
+  // RBAC staging seed — placed BEFORE the early-return check below so
+  // it runs on a fresh DB where `users.length < 2` would otherwise
+  // skip the rest of main(). The findMany above has already bound
+  // `users`, so RBAC admins (which this call may create) do NOT fold
+  // into the social-ring section's follows / gifts / wishes
+  // generation even when that section does run.
+  //
+  // No-op unless QIFT_SEED_RBAC_TEST_ACCOUNTS=true.
+  await seedRbacTestAccounts();
+
   if (users.length < 2) {
     console.log(
       `Found ${users.length} non-merchant user(s) — need at least 2 to seed follows/gifts. Skipping the rest.`,
@@ -838,13 +848,6 @@ async function main() {
       `  @${u.qiftUsername.padEnd(20)} ${String(followers).padStart(2)}        / ${String(following).padStart(2)}        / ${String(sent).padStart(2)}   / ${String(received).padStart(2)}       / ${String(wishes).padStart(2)}`,
     );
   }
-
-  // RBAC staging seed — no-op unless QIFT_SEED_RBAC_TEST_ACCOUNTS=true.
-  // Runs last so the test accounts are isolated from the social-ring
-  // section above (the user.findMany at the top of main() captured its
-  // result before this call, so RBAC admins don't fold into the
-  // follows / gifts / wishes generation).
-  await seedRbacTestAccounts();
 }
 
 main()
