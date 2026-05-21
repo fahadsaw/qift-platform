@@ -18,6 +18,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+import { OtpService } from '../otp/otp.service';
 import { normalizePhone } from './phone-normalize';
 
 export type RegisterInput = {
@@ -46,6 +47,38 @@ export type LoginInput = {
   password?: string;
 };
 
+// Week 2 — Forgot Password Flow.
+//
+// `identifier` is the user-supplied phone or email (we look it up by
+// the chosen channel only — never both — so a probing attacker
+// cannot infer cross-channel account existence).
+//
+// `channel` selects which verified channel the OTP is dispatched to.
+// Defaults to 'phone' (every active account has a verified phone at
+// registration). Email recovery only works for accounts whose
+// `emailVerifiedAt` is set.
+//
+// `code` and `newPassword` are required on /auth/reset-password.
+// Minimum-length validation on `newPassword` runs BEFORE OTP verify
+// so a too-short password doesn't waste the single-use OTP.
+export type ForgotPasswordInput = {
+  identifier?: string;
+  channel?: 'phone' | 'email';
+};
+
+export type ResetPasswordInput = {
+  identifier?: string;
+  channel?: 'phone' | 'email';
+  code?: string;
+  newPassword?: string;
+};
+
+// Minimum-length policy for new passwords on /auth/reset-password.
+// Mirrors the implicit floor enforced by /auth/register's password
+// requirement (>= 8 chars). Future PRs can extend with character-
+// class rules; for now length is the only gate.
+const MIN_PASSWORD_LENGTH = 8;
+
 const BCRYPT_ROUNDS = 10;
 
 @Injectable()
@@ -54,6 +87,11 @@ export class AuthService {
     private prisma: PrismaService,
     private jwtService: JwtService,
     private mail: MailService,
+    // Week 2 — Forgot Password Flow reuses OtpService.send /
+    // OtpService.verify. The F1 verify-attempt lockout, the
+    // send-side rate limit, and the single-use delete-on-success
+    // semantics are all inherited automatically.
+    private otp: OtpService,
   ) {}
 
   // POST /auth/register — register OR login via phone OR email OTP.
@@ -314,6 +352,176 @@ export class AuthService {
       user: this.sanitize(user),
     };
   }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Week 2 — Forgot Password Flow.
+  //
+  // POST /auth/forgot-password
+  //   body: { identifier, channel? }
+  //
+  // Always returns { ok: true } regardless of whether the identifier
+  // matches an account. A probing attacker therefore cannot
+  // distinguish 'account exists' from 'account does not exist' from
+  // 'channel is unverified' from 'OTP send rate-limited' — every
+  // path emits the same response shape. The OTP dispatch is silent
+  // (no-op when the user can't be reached on the chosen channel).
+  //
+  // Verified-channel-only contract:
+  //   - channel='phone' (default): requires user.phoneVerifiedAt
+  //     set. Every account registered via /auth/register has this
+  //     stamped, so phone recovery works for every active user.
+  //   - channel='email': requires user.emailVerifiedAt set. Users
+  //     who never confirmed their email cannot recover via email;
+  //     they fall back to phone.
+  //
+  // Soft-deleted users (deletedAt != null) silently get no OTP —
+  // recovery for a deleted account is an operator-only flow.
+  //
+  // F1 (verify-attempt lockout) and the send-side rate limit are
+  // inherited automatically from OtpService.
+  async forgotPassword(body: ForgotPasswordInput): Promise<{ ok: true }> {
+    const identifier = body.identifier?.trim();
+    const channel: 'phone' | 'email' =
+      body.channel === 'email' ? 'email' : 'phone';
+
+    // Missing identifier → silent no-op. Same response shape as the
+    // happy path to keep the anti-enumeration contract uniform even
+    // for clearly-broken input.
+    if (!identifier) {
+      return { ok: true };
+    }
+
+    // Normalise so the User.phone lookup matches the canonical form
+    // (and so the OTP-row target is keyed identically to what
+    // /auth/reset-password will look up).
+    const target =
+      channel === 'phone'
+        ? (normalizePhone(identifier) ?? null)
+        : identifier.toLowerCase();
+
+    if (!target) {
+      // E.g. a phone identifier that fails normalisation. Still
+      // silent — bad input is indistinguishable from "no account".
+      return { ok: true };
+    }
+
+    // Lookup constrained to a VERIFIED channel + active account.
+    // Email recovery silently no-ops if the email was never
+    // verified; phone recovery silently no-ops if the phone was
+    // never verified (extremely rare — registration stamps it).
+    const user = await this.prisma.user.findFirst({
+      where: {
+        deletedAt: null,
+        ...(channel === 'phone'
+          ? { phone: target, phoneVerifiedAt: { not: null } }
+          : { email: target, emailVerifiedAt: { not: null } }),
+      },
+      select: { id: true },
+    });
+
+    if (!user) {
+      // Silent no-op for: user-not-found / soft-deleted /
+      // channel-unverified. All collapse to the same response.
+      return { ok: true };
+    }
+
+    // Dispatch OTP via the existing primitive. Any thrown error
+    // (rate-limited, transport-unavailable, transient failure) is
+    // swallowed so the response shape stays uniform — the worst
+    // case is the user re-requests after a few minutes.
+    try {
+      await this.otp.send({ target, type: channel });
+    } catch {
+      // Intentional swallow. The user-facing response is { ok: true }
+      // regardless. Server-side OtpService already logs the failure
+      // reason internally.
+    }
+
+    return { ok: true };
+  }
+
+  // POST /auth/reset-password
+  //   body: { identifier, channel?, code, newPassword }
+  //
+  // Verifies the OTP issued by /auth/forgot-password and, on success,
+  // updates the user's password hash. The OTP is single-use (deleted
+  // on successful verify by OtpService.verify).
+  //
+  // Error matrix:
+  //   newPassword < 8 chars  → BadRequest('invalid_password')
+  //   missing input          → BadRequest('invalid_code')
+  //   user not found / soft- → BadRequest('invalid_code')  (no
+  //     deleted / channel       enumeration — same shape as
+  //     unverified              "OTP doesn't match")
+  //   wrong code             → BadRequest('invalid_code')  (from
+  //                             OtpService.verify; attempts++)
+  //   expired OTP            → BadRequest('expired_code') (no
+  //                             attempts increment)
+  //   5+ wrong attempts      → BadRequest('otp_locked')   (F1)
+  //   reused code            → BadRequest('invalid_code') (row
+  //                             already deleted)
+  //
+  // Password length is validated BEFORE OTP verify so a too-short
+  // password doesn't waste the single-use OTP.
+  async resetPassword(body: ResetPasswordInput): Promise<{ ok: true }> {
+    const identifier = body.identifier?.trim();
+    const channel: 'phone' | 'email' =
+      body.channel === 'email' ? 'email' : 'phone';
+    const code = body.code?.trim();
+    const newPassword = body.newPassword;
+
+    if (!newPassword || newPassword.length < MIN_PASSWORD_LENGTH) {
+      throw new BadRequestException('invalid_password');
+    }
+    if (!identifier || !code) {
+      throw new BadRequestException('invalid_code');
+    }
+
+    const target =
+      channel === 'phone'
+        ? (normalizePhone(identifier) ?? null)
+        : identifier.toLowerCase();
+
+    if (!target) {
+      throw new BadRequestException('invalid_code');
+    }
+
+    // Resolve user before touching OTP. If the user isn't a valid
+    // recovery target (missing / soft-deleted / channel unverified)
+    // we throw the same invalid_code that OtpService.verify would
+    // throw for a missing row — no enumeration distinction.
+    const user = await this.prisma.user.findFirst({
+      where: {
+        deletedAt: null,
+        ...(channel === 'phone'
+          ? { phone: target, phoneVerifiedAt: { not: null } }
+          : { email: target, emailVerifiedAt: { not: null } }),
+      },
+      select: { id: true },
+    });
+
+    if (!user) {
+      throw new BadRequestException('invalid_code');
+    }
+
+    // OtpService.verify throws BadRequestException with one of:
+    //   'invalid_code' | 'expired_code' | 'otp_locked' |
+    //   'target and code are required'
+    // — all of which we want to propagate verbatim. Single-use
+    // semantics: the row is deleted on success, so reused codes
+    // fall through to 'invalid_code' on the next call.
+    await this.otp.verify({ target, code });
+
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash },
+    });
+
+    return { ok: true };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
 
   private signToken(sub: string, qiftUsername: string) {
     return this.jwtService.signAsync({ sub, qiftUsername });
