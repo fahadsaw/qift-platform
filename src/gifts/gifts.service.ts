@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { BlocksService } from '../blocks/blocks.service';
 import {
   NotificationsService,
   NotificationType,
@@ -131,6 +132,11 @@ export class GiftsService {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    // Week 1 security hardening (F3) — bidirectional block check on
+    // gift creation. The platform's block primitive must apply at
+    // every interaction surface; gift creation was the lone bypass
+    // (every other surface already consults BlocksService).
+    private blocks: BlocksService,
   ) {}
 
   async create(body: CreateGiftInput, viewerUserId: string) {
@@ -179,6 +185,21 @@ export class GiftsService {
     if (!receiver) {
       throw new NotFoundException('Receiver not found');
     }
+
+    // Week 1 security hardening (F3) — bidirectional block check.
+    // If EITHER party has blocked the other, gift creation must fail
+    // with a generic message that doesn't reveal the block status to
+    // the sender (a probing sender shouldn't be able to distinguish
+    // "blocked" from "unreachable"). Every other social surface
+    // (profile, search, follow, gift-post view) already applies
+    // BlocksService.isBlockedEitherWay; this closes the lone bypass.
+    if (await this.blocks.isBlockedEitherWay(senderId, receiver.id)) {
+      this.logger.warn(
+        `[gifts:create-blocked] senderId=${senderId} receiverUsername=${receiverUsername} reason=blocked-either-way`,
+      );
+      throw new ForbiddenException('Recipient unavailable');
+    }
+
     // Canonical default-address resolver. Same helper as
     // /users/check?username=, so the pre-flight gate and the create
     // gate can never disagree on whether a recipient is ready.

@@ -278,8 +278,17 @@ export class AuthService {
     }
 
     const lower = identifier.toLowerCase();
+    // Week 1 security hardening (F2) — exclude soft-deleted accounts.
+    // Soft-deleted users must not be able to obtain a fresh JWT via
+    // password login. AdminGuard already rejects soft-deleted users
+    // per-request, but blocking at login is the upstream guarantee.
+    // The 'Invalid credentials' rejection below matches the
+    // wrong-password and unknown-user paths verbatim — a probing
+    // attacker cannot distinguish 'account deleted' from 'account
+    // never existed' from 'wrong password'.
     const user = await this.prisma.user.findFirst({
       where: {
+        deletedAt: null,
         OR: [{ qiftUsername: lower }, { phone: identifier }, { email: lower }],
       },
     });
