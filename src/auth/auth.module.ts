@@ -5,12 +5,19 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy, getJwtSecret } from './jwt.strategy';
 import { PrismaService } from '../prisma/prisma.service';
+import { OtpModule } from '../otp/otp.module';
 
 // JWT secret is env-driven so production can rotate per environment.
 // Local dev keeps the historical literal as a fallback so a fresh
 // checkout boots without setting any env. Auth logic (sign / verify
 // flow) is unchanged — only the secret SOURCE moved from a literal
 // into `getJwtSecret()`.
+//
+// Week 2 (Forgot Password Flow) — OtpModule is imported so
+// AuthService can reuse OtpService.send / OtpService.verify for the
+// forgot-password / reset-password endpoints. No duplicate OTP
+// infrastructure; F1 lockout + send rate-limit + single-use semantics
+// all inherited automatically.
 @Module({
   imports: [
     PassportModule,
@@ -18,6 +25,7 @@ import { PrismaService } from '../prisma/prisma.service';
       secret: getJwtSecret(),
       signOptions: { expiresIn: '7d' },
     }),
+    OtpModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, PrismaService],
