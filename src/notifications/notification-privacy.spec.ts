@@ -7,7 +7,9 @@
 
 import {
   bodyForReceiverGiftUpdate,
+  senderDisplayForReceiverGiftNotification,
   shouldMaskGiftBody,
+  shouldMaskGiftSender,
 } from './notification-privacy';
 
 describe('shouldMaskGiftBody', () => {
@@ -114,5 +116,174 @@ describe('bodyForReceiverGiftUpdate', () => {
         null,
       ),
     ).toBeNull();
+  });
+});
+
+// =====================================================================
+// Week 2 — Anonymous-sender masking.
+//
+// Single rule: receiver-facing gift notifications must hide sender
+// identity when gift.isAnonymous === true. The helpers here are the
+// canonical surface; producers wanting to render "X sent you a gift"
+// must thread through senderDisplayForReceiverGiftNotification.
+//
+// Audit context: at the time of this commit, no receiver-facing
+// producer references sender.qiftUsername / sender.fullName in any
+// notification title or body. These helpers exist as defense-in-
+// depth for future producers (and as a regression-safety net for the
+// current ones).
+// =====================================================================
+
+describe('shouldMaskGiftSender', () => {
+  it('returns true when isAnonymous=true (regardless of sender projection)', () => {
+    expect(
+      shouldMaskGiftSender({
+        isAnonymous: true,
+        sender: { qiftUsername: 'reem', fullName: 'Reem' },
+      }),
+    ).toBe(true);
+  });
+
+  it('returns false when isAnonymous=false', () => {
+    expect(
+      shouldMaskGiftSender({
+        isAnonymous: false,
+        sender: { qiftUsername: 'reem', fullName: 'Reem' },
+      }),
+    ).toBe(false);
+  });
+
+  it('returns true when isAnonymous=true even with sender=null', () => {
+    expect(shouldMaskGiftSender({ isAnonymous: true, sender: null })).toBe(
+      true,
+    );
+  });
+
+  it('returns true when isAnonymous=true even with sender=undefined', () => {
+    expect(shouldMaskGiftSender({ isAnonymous: true })).toBe(true);
+  });
+});
+
+describe('senderDisplayForReceiverGiftNotification', () => {
+  describe('anonymous gifts mask the sender (the load-bearing case)', () => {
+    it('returns null when isAnonymous=true + fullName + qiftUsername populated', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: true,
+          sender: { qiftUsername: 'reem', fullName: 'Reem AlDossari' },
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null when isAnonymous=true + only qiftUsername', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: true,
+          sender: { qiftUsername: 'reem', fullName: null },
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null when isAnonymous=true + sender entirely missing', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({ isAnonymous: true }),
+      ).toBeNull();
+    });
+  });
+
+  describe('non-anonymous gifts surface sender identity', () => {
+    it('returns fullName when available', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: false,
+          sender: { qiftUsername: 'reem', fullName: 'Reem AlDossari' },
+        }),
+      ).toBe('Reem AlDossari');
+    });
+
+    it('returns trimmed fullName (incidental whitespace)', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: false,
+          sender: { qiftUsername: 'reem', fullName: '  Reem  ' },
+        }),
+      ).toBe('Reem');
+    });
+
+    it('falls back to @qiftUsername when fullName is null', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: false,
+          sender: { qiftUsername: 'reem', fullName: null },
+        }),
+      ).toBe('@reem');
+    });
+
+    it('falls back to @qiftUsername when fullName is empty string', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: false,
+          sender: { qiftUsername: 'reem', fullName: '' },
+        }),
+      ).toBe('@reem');
+    });
+  });
+
+  describe('defensive null path (sender projection missing)', () => {
+    it('returns null when isAnonymous=false but sender row is null', () => {
+      // Should never happen in well-formed flows — defense in depth.
+      // The producer that hits this path sees `null`, the same
+      // sentinel as anonymous, and renders the generic variant
+      // rather than leaking a partial / wrong identity.
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: false,
+          sender: null,
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null when sender exists but both name fields are missing', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: false,
+          sender: { qiftUsername: null, fullName: null },
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null when sender exists but qiftUsername is empty', () => {
+      expect(
+        senderDisplayForReceiverGiftNotification({
+          isAnonymous: false,
+          sender: { qiftUsername: '', fullName: null },
+        }),
+      ).toBeNull();
+    });
+  });
+
+  describe('contract: structural subtype accepted', () => {
+    it('accepts a richer Gift shape without an explicit cast', () => {
+      // Confirms the AnonAwareGift type is structurally permissive —
+      // producers can pass their full Prisma-row shape (with extra
+      // fields like productName, status, sender.id, etc.) without
+      // a cast or projection step.
+      const fullGift = {
+        id: 'gift-1',
+        senderId: 'sender-1',
+        receiverId: 'receiver-1',
+        productName: 'باقة جوري',
+        storeName: 'باقات الرياض',
+        status: 'pending_address',
+        isAnonymous: true,
+        isSurprise: false,
+        sender: {
+          id: 'sender-1',
+          qiftUsername: 'reem',
+          fullName: 'Reem',
+        },
+      };
+      expect(senderDisplayForReceiverGiftNotification(fullGift)).toBeNull();
+    });
   });
 });

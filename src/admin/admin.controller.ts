@@ -43,7 +43,14 @@ export class AdminController {
     return this.admin.listUsers(q);
   }
 
+  // Week 2 hardening — state-changing role assignment requires the
+  // narrowest available ops permission. Currently granted only to
+  // super_admin (PERMISSIONS_BY_ROLE in ops-roles.ts has no other
+  // role holding 'user.set_role'); a legacy admin without any ops
+  // grant now gets a 403 'Operation requires elevated permissions'
+  // instead of being able to silently promote arbitrary users.
   @Patch('users/:id/role')
+  @RequireOpsPermission('user.set_role')
   setUserRole(
     @Param('id') id: string,
     @Body() body: { role?: string },
@@ -59,7 +66,12 @@ export class AdminController {
     return this.admin.listStores(q);
   }
 
+  // Week 2 hardening — store status mutation requires 'store.set_status'.
+  // Granted to super_admin + operations_manager + merchant_review +
+  // trust_safety. Roles without it (finance, support, fulfillment_ops,
+  // analytics_viewer) can no longer flip store visibility.
   @Patch('stores/:id/status')
+  @RequireOpsPermission('store.set_status')
   setStoreStatus(@Param('id') id: string, @Body() body: { status?: string }) {
     return this.admin.setStoreStatus(id, body?.status ?? '');
   }
@@ -69,7 +81,12 @@ export class AdminController {
   // (approve / reject / request_changes), enforces a non-empty
   // reason for the two negative branches, and records reviewedAt /
   // reviewedBy for the audit trail.
+  //
+  // Week 2 hardening — the review action requires the dedicated
+  // 'store.review' ops permission. Granted to super_admin +
+  // operations_manager + merchant_review.
   @Patch('stores/:id/review')
+  @RequireOpsPermission('store.review')
   reviewStore(
     @Param('id') id: string,
     @Body() body: { action?: string; reason?: string },
@@ -165,7 +182,13 @@ export class AdminController {
     return this.admin.listReports();
   }
 
+  // Week 2 hardening — report-resolution mutation requires the
+  // 'report.resolve' ops permission. Granted to super_admin +
+  // trust_safety. Other admins can still LIST reports
+  // (GET /admin/reports has no decorator), but only T&S operators
+  // can change their status.
   @Patch('reports/:id/status')
+  @RequireOpsPermission('report.resolve')
   setReportStatus(@Param('id') id: string, @Body() body: { status?: string }) {
     return this.admin.setReportStatus(id, body?.status ?? '');
   }
@@ -299,7 +322,13 @@ export class AdminController {
     return this.admin.debugSeedStatus();
   }
 
+  // Week 2 hardening — seeding is a state-changing diagnostic
+  // operation; protect with 'diagnostics.run_seed'. Granted to
+  // super_admin + operations_manager. The read-only counterpart
+  // GET /admin/debug/seed-status remains undecorated (admin-only
+  // by the controller-level AdminGuard).
   @Post('debug/seed-merchants')
+  @RequireOpsPermission('diagnostics.run_seed')
   debugSeedMerchants(@Req() req: AuthedRequest) {
     return this.admin.debugSeedMerchants(req.user.userId);
   }

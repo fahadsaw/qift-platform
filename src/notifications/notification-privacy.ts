@@ -70,3 +70,85 @@ export function bodyForReceiverGiftUpdate(
   if (shouldMaskGiftBody(gift)) return null;
   return candidateBody;
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Week 2 — Anonymous-sender masking.
+//
+// The platform's anonymous-gift contract: a recipient receiving an
+// anonymous gift must NEVER learn the sender's identity through
+// ANY notification surface (push title, push body, email subject,
+// email body, in-app row title, in-app row body, digest aggregate).
+//
+// The audit at the time of this commit confirmed every receiver-
+// facing gift notification producer (gifts.service / gifts-auto-
+// default.service / store.service / addresses.service) uses
+// generic titles + product/store strings in bodies — none currently
+// reference `sender.qiftUsername` or `sender.fullName`. The helpers
+// below install the CONTRACT so any future producer wanting to
+// render "X sent you a gift" must thread through
+// senderDisplayForReceiverGiftNotification, which returns `null`
+// for anonymous gifts. A future template doing
+// `title: \`${senderDisplay} sent you a gift\`` would render an
+// awkward `null sent you a gift` for anonymous — a clear signal
+// during code review that the producer needs a sender-less variant
+// rather than a silent identity leak.
+//
+// Pure module: no Prisma, no Nest. Tested in isolation.
+// ─────────────────────────────────────────────────────────────────────
+
+// The minimal Gift projection this helper needs. Producers project
+// this from their richer Gift type; the structural-subset signature
+// lets callers pass any wider shape (Prisma rows, Gift includes,
+// etc.) without an explicit cast.
+export type AnonAwareGift = {
+  // Required: the anonymous flag on the Gift row.
+  isAnonymous: boolean;
+  // Optional sender projection. Producers that don't have a
+  // populated `sender` (e.g. before a Prisma include resolves) get
+  // a defensive null — same observable result as anonymous, no
+  // leak path.
+  sender?: {
+    qiftUsername?: string | null;
+    fullName?: string | null;
+  } | null;
+};
+
+// Should the producer hide sender identity from a receiver-facing
+// notification? Single-purpose predicate so other code (titles,
+// digest aggregation, future surfaces) can consult the same rule.
+// Sender-side notifications NEVER mask — those notifications go
+// to the sender themselves and "concealing" the sender from
+// themselves would be theatrical, not protective.
+export function shouldMaskGiftSender(gift: AnonAwareGift): boolean {
+  return gift.isAnonymous === true;
+}
+
+// Returns the display string the producer should render for the
+// sender in a receiver-facing notification — OR `null` when the
+// gift is anonymous (or when the sender projection is missing,
+// which is treated as the same "no identity" state for safety).
+//
+// Producers that want to compose "{name} sent you a gift" should:
+//   const senderDisplay = senderDisplayForReceiverGiftNotification(gift);
+//   const title = senderDisplay
+//     ? `${senderDisplay} sent you a gift`
+//     : 'You received a gift';
+//
+// The structured return — display string OR null — forces the
+// producer to write the sender-less branch as a deliberate code
+// path. A producer that interpolates the return value blindly will
+// render `null sent you a gift` in dev/staging — an obvious
+// regression signal that the sender-less branch is missing.
+export function senderDisplayForReceiverGiftNotification(
+  gift: AnonAwareGift,
+): string | null {
+  if (shouldMaskGiftSender(gift)) return null;
+  const fullName = gift.sender?.fullName?.trim();
+  if (fullName) return fullName;
+  const handle = gift.sender?.qiftUsername?.trim();
+  if (handle) return `@${handle}`;
+  // Sender projection missing — defense in depth: behave as if
+  // anonymous. Producers should never reach this branch in well-
+  // formed flows.
+  return null;
+}

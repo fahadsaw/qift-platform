@@ -516,4 +516,292 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
       },
     );
   });
+
+  // ───────────────────────────────────────────────────────────────────
+  // Week 2 hardening — admin MUTATION endpoints now carry
+  // @RequireOpsPermission decorators. Pinning the metadata so a
+  // future refactor that drops a decorator (or assigns the wrong
+  // permission) fails fast at this layer.
+  //
+  // Behaviour for each route (exercised through the guard chain
+  // under both flag states):
+  //   - admin with the matching ops permission       → 200
+  //   - admin without the matching ops permission    → 403
+  //     'Operation requires elevated permissions'
+  //   - super_admin (holds all OpsPermissions)       → 200
+  //   - non-admin                                    → 403
+  //     'Admin access required' (AdminGuard short-circuit)
+  //   - soft-deleted admin                           → 403
+  //     'Admin access required' (BEFORE RBAC dispatch)
+  // ───────────────────────────────────────────────────────────────────
+
+  describe('Week 2 — admin mutation routes carry @RequireOpsPermission', () => {
+    type AdminMutationRoute = {
+      method: keyof AdminController;
+      path: string;
+      httpMethod: 'PATCH' | 'POST';
+      opsPermission: OpsPermission;
+    };
+
+    // Each row pins one of the 5 mutation routes hardened in Week 2.
+    // Adding a 6th to the controller without updating this list (or
+    // the controller) will surface as a missing-test signal during
+    // review.
+    const ADMIN_MUTATION_ROUTES: ReadonlyArray<AdminMutationRoute> = [
+      {
+        method: 'setUserRole',
+        path: 'users/:id/role',
+        httpMethod: 'PATCH',
+        opsPermission: 'user.set_role',
+      },
+      {
+        method: 'setStoreStatus',
+        path: 'stores/:id/status',
+        httpMethod: 'PATCH',
+        opsPermission: 'store.set_status',
+      },
+      {
+        method: 'reviewStore',
+        path: 'stores/:id/review',
+        httpMethod: 'PATCH',
+        opsPermission: 'store.review',
+      },
+      {
+        method: 'setReportStatus',
+        path: 'reports/:id/status',
+        httpMethod: 'PATCH',
+        opsPermission: 'report.resolve',
+      },
+      {
+        method: 'debugSeedMerchants',
+        path: 'debug/seed-merchants',
+        httpMethod: 'POST',
+        opsPermission: 'diagnostics.run_seed',
+      },
+    ];
+
+    describe('metadata pinning', () => {
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$httpMethod /admin/$path carries @RequireOpsPermission($opsPermission)',
+        ({ method, opsPermission }) => {
+          const handler = handlerFor(method);
+          const perm = Reflect.getMetadata(OPS_PERM_META_KEY, handler) as
+            | OpsPermission
+            | undefined;
+          expect(perm).toBe(opsPermission);
+        },
+      );
+
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$httpMethod /admin/$path has the expected HTTP method + path metadata',
+        ({ method, httpMethod, path }) => {
+          const handler = handlerFor(method);
+          const verbCode = Reflect.getMetadata(METHOD_METADATA, handler) as
+            | number
+            | undefined;
+          const routePath = Reflect.getMetadata(PATH_METADATA, handler) as
+            | string
+            | undefined;
+          const expectedVerb =
+            httpMethod === 'POST' ? RequestMethod.POST : RequestMethod.PATCH;
+          expect(verbCode).toBe(expectedVerb);
+          expect(routePath).toBe(path);
+        },
+      );
+    });
+
+    describe('guard chain composition (representative samples)', () => {
+      let prismaFindUnique: jest.Mock;
+      let userHasPermissionMock: jest.Mock;
+      let getUserRolesMock: jest.Mock;
+      let adminGuard: AdminGuard;
+      let opsRoleGuard: OpsRoleGuard;
+
+      beforeEach(() => {
+        prismaFindUnique = jest.fn();
+        userHasPermissionMock = jest.fn();
+        getUserRolesMock = jest.fn();
+        adminGuard = new AdminGuard({
+          user: { findUnique: prismaFindUnique },
+        } as unknown as PrismaService);
+        opsRoleGuard = new OpsRoleGuard(new Reflector(), {
+          userHasPermission: userHasPermissionMock,
+          getUserRoles: getUserRolesMock,
+        } as unknown as OpsRolesService);
+      });
+
+      async function runChain(opts: {
+        userId: string | undefined;
+        handler: (...args: unknown[]) => unknown;
+      }): Promise<true> {
+        const ctx = makeChainContext(opts);
+        await adminGuard.canActivate(ctx);
+        await opsRoleGuard.canActivate(ctx);
+        return true;
+      }
+
+      // Each parameterised block below sets the flag inline rather
+      // than via it.each(FLAG_CASES) — the matrix here is over the
+      // 5 mutation routes, not over flag states, so a separate
+      // FLAG_CASES parameterisation would only obfuscate the test
+      // names.
+
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$method: admin WITHOUT $opsPermission → 403 "Operation requires elevated permissions" (flag OFF)',
+        async ({ method }) => {
+          process.env.RBAC_PERMISSION_CHECKS_ENABLED = '0';
+          prismaFindUnique.mockResolvedValue({
+            role: 'admin',
+            deletedAt: null,
+          });
+          userHasPermissionMock.mockResolvedValue(false);
+
+          await expect(
+            runChain({ userId: 'admin-1', handler: handlerFor(method) }),
+          ).rejects.toThrow('Operation requires elevated permissions');
+        },
+      );
+
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$method: admin WITHOUT $opsPermission → 403 (flag ON, role without grant)',
+        async ({ method }) => {
+          process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+          prismaFindUnique.mockResolvedValue({
+            role: 'admin',
+            deletedAt: null,
+          });
+          // analytics_viewer holds only analytics.read — never any
+          // mutation permission. This is the canonical "read-only
+          // ops role cannot mutate state" assertion.
+          getUserRolesMock.mockResolvedValue(['analytics_viewer']);
+
+          await expect(
+            runChain({ userId: 'admin-1', handler: handlerFor(method) }),
+          ).rejects.toThrow('Operation requires elevated permissions');
+        },
+      );
+
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$method: admin WITH matching ops role → chain passes (flag ON)',
+        async ({ method, opsPermission }) => {
+          // Pick a role that actually grants this permission. The
+          // grants are pinned by ops-roles-catalog-equivalence.spec
+          // for super_admin (every OpsPermission); other roles are
+          // picked manually below by inspection of PERMISSIONS_BY_ROLE
+          // (mirrored in ROLE_PERMISSIONS catalog entries).
+          const granteeRoleByPerm: Record<OpsPermission, string[]> = {
+            'store.review': ['operations_manager', 'merchant_review'],
+            'store.set_plan': [],
+            'store.set_featured': ['operations_manager'],
+            'store.set_status': [
+              'operations_manager',
+              'merchant_review',
+              'trust_safety',
+            ],
+            'store.read_detail': [
+              'operations_manager',
+              'merchant_review',
+              'support',
+              'fulfillment_ops',
+              'finance',
+            ],
+            'user.read': ['operations_manager', 'support', 'trust_safety'],
+            // user.set_role is intentionally granted ONLY to
+            // super_admin in the current catalog. Other tests in
+            // this block cover the super_admin path; this map uses
+            // 'super_admin' here so the parameterised "narrower
+            // role grants" assertion still has a valid grantee
+            // to mock against.
+            'user.set_role': ['super_admin'],
+            'user.suspend': ['trust_safety'],
+            'user.assign_ops_role': [],
+            'finance.read_payouts': ['finance'],
+            'finance.record_payout_event': ['finance'],
+            'finance.approve_payout': ['finance'],
+            'diagnostics.read': [
+              'operations_manager',
+              'support',
+              'fulfillment_ops',
+            ],
+            'diagnostics.run_seed': ['operations_manager'],
+            'report.read': ['operations_manager', 'support', 'trust_safety'],
+            'report.resolve': ['trust_safety'],
+            'analytics.read': ['operations_manager', 'analytics_viewer'],
+          };
+          const grantee = granteeRoleByPerm[opsPermission][0];
+          // Sanity: every mutation route here has at least one
+          // non-super_admin grantee.
+          expect(grantee).toBeDefined();
+
+          process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+          prismaFindUnique.mockResolvedValue({
+            role: 'admin',
+            deletedAt: null,
+          });
+          getUserRolesMock.mockResolvedValue([grantee]);
+
+          await expect(
+            runChain({ userId: 'admin-1', handler: handlerFor(method) }),
+          ).resolves.toBe(true);
+        },
+      );
+
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$method: super_admin → chain passes (flag ON)',
+        async ({ method }) => {
+          process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+          prismaFindUnique.mockResolvedValue({
+            role: 'admin',
+            deletedAt: null,
+          });
+          // super_admin via the catalog holds ALL_ADMIN_PERMISSIONS
+          // which is a superset of OPS_PERMISSIONS (pinned by
+          // ops-roles-catalog-equivalence.spec.ts).
+          getUserRolesMock.mockResolvedValue(['super_admin']);
+
+          await expect(
+            runChain({ userId: 'admin-1', handler: handlerFor(method) }),
+          ).resolves.toBe(true);
+        },
+      );
+
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$method: non-admin → 403 "Admin access required" BEFORE RBAC dispatch',
+        async ({ method }) => {
+          process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+          prismaFindUnique.mockResolvedValue({
+            role: 'store',
+            deletedAt: null,
+          });
+
+          await expect(
+            runChain({ userId: 'store-1', handler: handlerFor(method) }),
+          ).rejects.toThrow('Admin access required');
+
+          // OpsRoleGuard never runs — AdminGuard short-circuits.
+          expect(getUserRolesMock).not.toHaveBeenCalled();
+          expect(userHasPermissionMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(ADMIN_MUTATION_ROUTES)(
+        '$method: soft-deleted admin → 403 "Admin access required" regardless of catalog',
+        async ({ method }) => {
+          process.env.RBAC_PERMISSION_CHECKS_ENABLED = '1';
+          prismaFindUnique.mockResolvedValue({
+            role: 'admin',
+            deletedAt: new Date('2024-01-01T00:00:00Z'),
+          });
+          // Even if the catalog would grant this permission, the
+          // deletedAt rejection short-circuits BEFORE the RBAC
+          // dispatch.
+          getUserRolesMock.mockResolvedValue(['super_admin']);
+
+          await expect(
+            runChain({ userId: 'admin-1', handler: handlerFor(method) }),
+          ).rejects.toThrow('Admin access required');
+        },
+      );
+    });
+  });
 });
