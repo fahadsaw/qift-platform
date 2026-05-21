@@ -16,6 +16,13 @@ const PUBLIC_PRODUCT_SELECT = {
   name: true,
   price: true,
   imageUrl: true,
+  // Phase 2.5a — optional product video. Surfaced on the wire so
+  // the storefront renderer can opt in when the playback surface
+  // ships (gated by NEXT_PUBLIC_PRODUCT_VIDEO_ENABLED on the
+  // frontend). Backend writes are accepted today; render is
+  // deferred.
+  videoUrl: true,
+  videoType: true,
   category: true,
   isFastDelivery: true,
   sourceType: true,
@@ -30,8 +37,15 @@ const PUBLIC_PRODUCT_SELECT = {
   // can keep reading `imageUrl`. The storefront theme renderer
   // uses the full list for galleries (perfumes, jewelry, gift
   // sets benefit most). No binary copy — URL pointers only.
+  //
+  // Phase 2.5a — `imageMeta` was added to ProductImage as
+  // forward-compat shape (per-image dimensions / mime / alt
+  // text). It's selected here so downstream consumers can begin
+  // reading it when populated; the 2.5a upload path does NOT
+  // populate it yet (server-side dimension extraction is
+  // deferred until storefront gallery rendering needs it).
   images: {
-    select: { url: true, displayOrder: true },
+    select: { url: true, displayOrder: true, imageMeta: true },
     orderBy: { displayOrder: 'asc' as const },
   },
   // Phase 5 metrics-on-the-wire — denormalized counters + the
@@ -52,6 +66,8 @@ type RawProductRow = {
   name: string;
   price: number;
   imageUrl: string | null;
+  videoUrl: string | null;
+  videoType: string | null;
   category: string;
   isFastDelivery: boolean;
   sourceType: string;
@@ -60,7 +76,11 @@ type RawProductRow = {
   isAvailable: boolean;
   lastSyncedAt: Date | null;
   createdAt: Date;
-  images: { url: string; displayOrder: number }[];
+  images: {
+    url: string;
+    displayOrder: number;
+    imageMeta: unknown;
+  }[];
   wishlistedByCount: number;
   giftedByCount: number;
   trendingAt: Date | null;
@@ -99,7 +119,33 @@ export type CreateProductInput = {
   storeId?: string;
   name?: string;
   price?: number | string;
+  // Legacy single-image field. Kept on the input surface for
+  // backward compat with the URL-paste flow on the old
+  // ProductModal and any external API integration that already
+  // posts here. When `imageUrls` is ALSO provided, the
+  // imageUrls[0] wins — the gallery is the source of truth and
+  // imageUrl gets re-derived from imageUrls[0] in the service
+  // body.
   imageUrl?: string | null;
+  // Phase 2.5a — ordered gallery of product image URLs.
+  // - First entry = primary; mirrored into `imageUrl` for
+  //   backward compat with legacy consumers.
+  // - Capped at MAX_PRODUCT_IMAGES.
+  // - URLs are expected to come from POST /media/product-image
+  //   (R2 public URLs); the legacy URL-paste path still accepts
+  //   external http/https URLs for the same reason imageUrl
+  //   does — closed beta doesn't enforce R2-only writes.
+  // - Passing an EMPTY array clears the gallery (and the
+  //   denormalised imageUrl). Passing `undefined` leaves the
+  //   gallery untouched (PATCH semantics).
+  imageUrls?: string[];
+  // Phase 2.5a — optional product video. Backend accepts writes
+  // during closed beta but no playback surface ships yet. videoType
+  // is required when videoUrl is set; passing one without the
+  // other throws BadRequestException so we never persist a
+  // half-defined video reference.
+  videoUrl?: string | null;
+  videoType?: 'mp4' | 'webm' | 'mov' | null;
   category?: string;
   isFastDelivery?: boolean;
   stockStatus?: 'in_stock' | 'out_of_stock';
@@ -108,6 +154,85 @@ export type CreateProductInput = {
 export type UpdateProductInput = Partial<CreateProductInput> & {
   isAvailable?: boolean;
 };
+
+// Cap on the number of product images per product. Chosen to match
+// common e-commerce ceilings (Etsy: 10, Shopify: 250 per product
+// but recommends ≤8). Closed beta starts conservative — the limit
+// can be raised in a config without a schema migration.
+const MAX_PRODUCT_IMAGES = 8;
+
+// Validate + normalise an imageUrls input. Returns the cleaned
+// array (trimmed, deduplicated by URL while preserving order,
+// capped). Rejects payloads larger than the cap so a tampered
+// client can't fill ProductImage with thousands of rows.
+//
+// URL validation: we accept http/https URLs only. Closed beta
+// stays permissive about which origin (R2 + the legacy URL-paste
+// fallback), but pathologically-long URLs are refused with a
+// stable 400 — ProductImage.url is TEXT, but downstream
+// consumers (storefront render) assume reasonable lengths.
+function normaliseImageUrls(input: string[] | undefined): string[] | null {
+  if (input === undefined) return null;
+  if (!Array.isArray(input)) {
+    throw new BadRequestException('imageUrls must be an array of strings');
+  }
+  if (input.length > MAX_PRODUCT_IMAGES) {
+    throw new BadRequestException(
+      `imageUrls supports at most ${MAX_PRODUCT_IMAGES} entries`,
+    );
+  }
+  const cleaned: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== 'string') {
+      throw new BadRequestException('imageUrls entries must be strings');
+    }
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (!/^https?:\/\//i.test(trimmed)) {
+      throw new BadRequestException(
+        'imageUrls entries must be http or https URLs',
+      );
+    }
+    if (trimmed.length > 1024) {
+      throw new BadRequestException('imageUrls entry exceeds 1024 chars');
+    }
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    cleaned.push(trimmed);
+  }
+  return cleaned;
+}
+
+// Validate the (videoUrl, videoType) pair. Both null/undefined =
+// no video. Both set = persist. Exactly one set = 400 (we never
+// persist a half-defined video reference).
+function normaliseVideo(
+  videoUrl: string | null | undefined,
+  videoType: 'mp4' | 'webm' | 'mov' | null | undefined,
+): { videoUrl: string | null; videoType: string | null } | null {
+  // Both undefined → caller didn't touch the video fields. Return
+  // null to signal "no-op" to the caller.
+  if (videoUrl === undefined && videoType === undefined) return null;
+  const url =
+    typeof videoUrl === 'string' && videoUrl.trim() ? videoUrl.trim() : null;
+  const type =
+    videoType === 'mp4' || videoType === 'webm' || videoType === 'mov'
+      ? videoType
+      : null;
+  if ((url && !type) || (type && !url)) {
+    throw new BadRequestException(
+      'videoUrl and videoType must be provided together',
+    );
+  }
+  if (url && url.length > 1024) {
+    throw new BadRequestException('videoUrl exceeds 1024 chars');
+  }
+  if (url && !/^https?:\/\//i.test(url)) {
+    throw new BadRequestException('videoUrl must be an http or https URL');
+  }
+  return { videoUrl: url, videoType: type };
+}
 
 @Injectable()
 export class ProductsService {
@@ -133,18 +258,61 @@ export class ProductsService {
     }
     await this.stores.assertOwner(viewerUserId, storeId);
 
+    // Phase 2.5a — validate + normalise the gallery + video
+    // inputs up front. Both throw BadRequestException on malformed
+    // input so the caller gets a clean 400 instead of a Prisma
+    // constraint error.
+    const imageUrls = normaliseImageUrls(body.imageUrls);
+    const video = normaliseVideo(body.videoUrl, body.videoType);
+
+    // Resolve the denormalised `imageUrl` column. Three sources,
+    // in priority order:
+    //   1. imageUrls[0]  — the new gallery's primary wins.
+    //   2. body.imageUrl — legacy URL-paste path (kept for
+    //                      backward compat).
+    //   3. null          — neither provided.
+    // This means a client posting BOTH `imageUrl` AND `imageUrls`
+    // gets imageUrls[0] in the legacy field — predictable, and the
+    // gallery is the new source of truth.
+    const denormalisedImageUrl =
+      imageUrls && imageUrls.length > 0
+        ? imageUrls[0]
+        : body.imageUrl?.trim() || null;
+
     const created = await this.prisma.product.create({
       data: {
         storeId,
         name,
         price,
         category,
-        imageUrl: body.imageUrl?.trim() || null,
+        imageUrl: denormalisedImageUrl,
         isFastDelivery: body.isFastDelivery === true,
         sourceType: 'manual',
         stockStatus:
           body.stockStatus === 'out_of_stock' ? 'out_of_stock' : 'in_stock',
         isAvailable: true,
+        // Video fields. `normaliseVideo` already enforced the
+        // both-or-neither invariant — when it returns null the
+        // caller didn't touch the fields, when it returns an
+        // object the pair is consistent.
+        ...(video !== null
+          ? { videoUrl: video.videoUrl, videoType: video.videoType }
+          : {}),
+        // Gallery: create ProductImage rows inline using Prisma's
+        // nested `create` on the Product.images relation. Safe
+        // because the Product is brand-new — there are no
+        // existing rows to conflict with on the @@unique
+        // (productId, displayOrder) constraint.
+        ...(imageUrls && imageUrls.length > 0
+          ? {
+              images: {
+                create: imageUrls.map((url, idx) => ({
+                  url,
+                  displayOrder: idx,
+                })),
+              },
+            }
+          : {}),
       },
       select: PUBLIC_PRODUCT_SELECT,
     });
@@ -245,13 +413,31 @@ export class ProductsService {
     if (!existing) throw new NotFoundException('Product not found');
     await this.stores.assertOwner(viewerUserId, existing.storeId);
 
+    // Phase 2.5a — validate + normalise the gallery + video
+    // inputs up front, BEFORE any DB write, so a malformed input
+    // never partially mutates the row.
+    const imageUrls = normaliseImageUrls(body.imageUrls);
+    const video = normaliseVideo(body.videoUrl, body.videoType);
+
     const data: Record<string, unknown> = {};
     if (typeof body.name === 'string') data.name = body.name.trim();
     if (typeof body.category === 'string') data.category = body.category.trim();
-    if (typeof body.imageUrl === 'string')
+    // Gallery sync — when body.imageUrls is provided, the
+    // imageUrls[0] becomes the new denormalised imageUrl. Empty
+    // array clears both. When imageUrls is undefined (not touched
+    // by the caller), legacy body.imageUrl still applies via its
+    // own branch below.
+    if (imageUrls !== null) {
+      data.imageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
+    } else if (typeof body.imageUrl === 'string') {
       data.imageUrl = body.imageUrl.trim() || null;
-    if (typeof body.imageUrl === 'object' && body.imageUrl === null)
+    } else if (typeof body.imageUrl === 'object' && body.imageUrl === null) {
       data.imageUrl = null;
+    }
+    if (video !== null) {
+      data.videoUrl = video.videoUrl;
+      data.videoType = video.videoType;
+    }
     if (body.price !== undefined) {
       const price = parsePrice(body.price);
       if (price == null) {
@@ -266,10 +452,32 @@ export class ProductsService {
     if (typeof body.isAvailable === 'boolean')
       data.isAvailable = body.isAvailable;
 
-    const updated = await this.prisma.product.update({
-      where: { id },
-      data,
-      select: PUBLIC_PRODUCT_SELECT,
+    // Gallery replace + Product update are in one transaction so
+    // a partial failure (e.g. ProductImage rows replaced but the
+    // Product update fails) can't leave the row inconsistent.
+    // The deleteMany→createMany pattern is the canonical "replace
+    // an ordered set" idiom for Prisma — cleaner than diffing the
+    // existing rows against the incoming list, and the
+    // @@unique(productId, displayOrder) constraint guarantees the
+    // ordinals are unambiguous after the transaction.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (imageUrls !== null) {
+        await tx.productImage.deleteMany({ where: { productId: id } });
+        if (imageUrls.length > 0) {
+          await tx.productImage.createMany({
+            data: imageUrls.map((url, idx) => ({
+              productId: id,
+              url,
+              displayOrder: idx,
+            })),
+          });
+        }
+      }
+      return tx.product.update({
+        where: { id },
+        data,
+        select: PUBLIC_PRODUCT_SELECT,
+      });
     });
     // Merchant-driven update — they own the visibility dict
     // already. Read it once and apply the projection so the wire

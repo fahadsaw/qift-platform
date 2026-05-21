@@ -375,6 +375,111 @@ export class MediaController {
     await this.prisma.storeDocument.delete({ where: { id } });
     return { ok: true };
   }
+
+  // POST /media/product-image — multipart/form-data with `file` +
+  // `storeId` form fields.
+  //
+  // Phase 2.5a — first product-image upload surface. Used by the
+  // (forthcoming) ProductMediaPicker on /store-dashboard/products.
+  // The endpoint UPLOADS THE BYTES + RETURNS THE URL only — it
+  // does NOT mutate any Product row. The caller is responsible
+  // for passing the returned URL into POST /products or
+  // PATCH /products/:id (via the imageUrls field), which writes
+  // the ProductImage row + denormalises Product.imageUrl from
+  // imageUrls[0]. Decoupling upload from product-mutation lets
+  // a merchant stage multiple images before saving — a single
+  // failed save doesn't lose every upload.
+  //
+  // Limits + allow-list:
+  //   - Photos only (PNG/JPEG/WebP/HEIC/AVIF). Same set the
+  //     existing gift / avatar endpoints accept.
+  //   - 8 MB ceiling — same as gift photos. Operationally this
+  //     covers every clean smartphone shot; the very large
+  //     product photos (>8 MB) are typically uncompressed
+  //     exports the merchant should compress first anyway.
+  //   - No video endpoint in this slice. Product.videoUrl +
+  //     videoType ship in the schema but the upload surface for
+  //     video is gated behind a feature flag and built in a later
+  //     slice (storefront-side playback is needed first).
+  //
+  // Ownership:
+  //   The caller must own the target storeId (or be in the
+  //   STORE_USER_IDS env override list — same legacy staging
+  //   escape hatch the other media endpoints honour). A
+  //   tampered client uploading against another merchant's
+  //   store gets a 403; the upload never reaches R2.
+  //
+  // Privacy:
+  //   The R2 key uses an unguessable timestamp+random suffix
+  //   under product-images/<storeId>/, mirroring gift-media's
+  //   convention. The public URL is the only handle returned.
+  //   Product images ARE public (the storefront displays them
+  //   to anyone), so no additional gating is needed beyond the
+  //   ownership-of-storeId check at upload time.
+  @Post('product-image')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: MAX_PHOTO_BYTES, files: 1 },
+    }),
+  )
+  async uploadProductImage(
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() body: { storeId?: string; fileName?: string },
+    @Req() req: AuthedRequest,
+  ): Promise<{
+    url: string;
+    mime: string | null;
+  }> {
+    if (!file) throw new BadRequestException('Missing file field "file".');
+    if (!body?.storeId)
+      throw new BadRequestException('Missing storeId in form data.');
+    if (!ALLOWED_PHOTO_MIME.test(file.mimetype || '')) {
+      throw new BadRequestException(
+        'Unsupported image type. Use PNG, JPEG, WebP, HEIC, or AVIF.',
+      );
+    }
+    if (!file.buffer || file.buffer.length === 0) {
+      throw new BadRequestException('Empty file.');
+    }
+    if (file.buffer.length > MAX_PHOTO_BYTES) {
+      throw new BadRequestException('Image too large (max 8 MB).');
+    }
+
+    // Ownership / admin check. Same pattern as store-document
+    // (STORE_USER_IDS env override passes through for legacy
+    // staging admin access).
+    const storeId = body.storeId.trim();
+    const allowList = (process.env.STORE_USER_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!allowList.includes(req.user.userId)) {
+      const owns = await this.prisma.store.findFirst({
+        where: { id: storeId, ownerId: req.user.userId },
+        select: { id: true },
+      });
+      if (!owns) throw new ForbiddenException('Not the store owner.');
+    }
+
+    const { url } = await this.media.uploadBuffer({
+      keyPrefix: `product-images/${storeId}`,
+      originalName: file.originalname || 'product-image',
+      contentType: file.mimetype,
+      body: file.buffer,
+    });
+
+    if (url.length > 1024) {
+      // Defensive: mirrors the gift-media URL-length guard.
+      // ProductImage.url is TEXT (no hard cap), but downstream
+      // consumers (storefront render, share OG images) assume
+      // reasonable lengths. Refuse pathological URLs at the edge.
+      throw new BadRequestException(
+        'Public URL exceeds 1024 chars; check R2_PUBLIC_BASE_URL.',
+      );
+    }
+
+    return { url, mime: file.mimetype || null };
+  }
 }
 
 // Documents accept PDFs in addition to the standard image set —
