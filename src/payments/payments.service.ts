@@ -142,6 +142,21 @@ export class PaymentsService {
           // create re-validates it against (senderId, receiverId, owner)
           // so a stale Order.occasionId won't slip through.
           occasionId: order.occasionId ?? undefined,
+          // Closed-beta sandbox inheritance. The Order row carries the
+          // resolved sandbox flag (resolveSandboxFlag was already
+          // applied at Order create-time). Pass it through verbatim so
+          // the resulting Gift inherits the Order's classification.
+          //
+          // GiftsService.create re-runs resolveSandboxFlag on this
+          // value — under normal operation the boolean passes through
+          // unchanged (`resolveSandboxFlag(true)` → true,
+          // `resolveSandboxFlag(false)` → false unless env forces
+          // sandbox). The only edge case is an env-flag flip BETWEEN
+          // Order create and Order confirm: a previously-live Order
+          // would yield a sandbox Gift, never the reverse. That's the
+          // safer direction — closed-beta-on never silently leaks
+          // sandbox lifecycles into live ledgers.
+          isSandbox: order.isSandbox,
         },
         viewerUserId,
         // No Idempotency-Key for the internal Order → Gift path.

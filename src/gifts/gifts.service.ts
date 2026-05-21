@@ -17,6 +17,7 @@ import {
   NotificationType,
 } from '../notifications/notifications.service';
 import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
+import { resolveSandboxFlag } from '../payments/sandbox-mode';
 import { assertTransition, type GiftStatus } from './gift-status';
 import {
   applyGiftVisibility,
@@ -87,6 +88,14 @@ export type CreateGiftInput = {
   // it doesn't leak any data because the value is sender-side
   // bookkeeping only. Phase 7 hardens this if telemetry shows abuse.
   occasionId?: string;
+  // Closed-beta sandbox flag. Folds through resolveSandboxFlag —
+  // under SANDBOX_ONLY_MODE=true every Gift is forced sandbox
+  // regardless of body; post-beta the body controls per-request.
+  // PaymentsService (Order → Gift transition) passes the Order's
+  // resolved flag verbatim; direct POST /gifts callers may pass
+  // true/false/undefined and the helper resolves. See
+  // src/payments/sandbox-mode.ts for the full decision matrix.
+  isSandbox?: boolean;
 };
 
 const PARTY_SELECT = {
@@ -230,6 +239,15 @@ export class GiftsService {
     );
     const isAnonymous = body.isAnonymous === true;
     const isSurprise = body.isSurprise === true;
+    // Closed-beta sandbox flag. Two entry shapes converge here:
+    //   1. Direct POST /gifts: body.isSandbox may be undefined; the
+    //      helper falls back to env-based resolution.
+    //   2. PaymentsService (Order → Gift): body.isSandbox is the
+    //      Order row's resolved boolean. Re-running the helper is
+    //      idempotent — true stays true, false stays false unless
+    //      env forces sandbox (the safer-direction edge case
+    //      documented in payments.service.ts).
+    const isSandbox = resolveSandboxFlag(body.isSandbox);
 
     if (!receiverUsername || !productName || !storeName) {
       throw new BadRequestException(
@@ -542,6 +560,7 @@ export class GiftsService {
           mediaType,
           isAnonymous,
           isSurprise,
+          isSandbox,
           // Receiver still has to confirm or override the address.
           status: 'pending_address',
           // Week 2 — idempotency identity. Both NULL when no header.

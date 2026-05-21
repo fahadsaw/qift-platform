@@ -52,6 +52,14 @@ export type StoreOrderRow = {
   status: GiftStatus;
   trackingNumber: string | null;
   carrier: string | null;
+  // Closed-beta sandbox classification. Merchant dashboards render a
+  // "TEST" chip on sandbox rows so the operator can distinguish a
+  // simulated order (where the buyer paid no real money and there's
+  // no payout obligation) from a real one — both walk the same
+  // accept/ship/deliver lifecycle, but only the latter ever settles.
+  // The frontend chip lands in the follow-up qift-ui-v2 PR; this
+  // field is the data contract it consumes.
+  isSandbox: boolean;
   createdAt: Date;
   confirmedAt: Date | null;
   shippedAt: Date | null;
@@ -197,6 +205,7 @@ export class StoreService {
       status: g.status as GiftStatus,
       trackingNumber: g.trackingNumber,
       carrier: g.carrier,
+      isSandbox: g.isSandbox,
       createdAt: g.createdAt,
       confirmedAt: g.confirmedAt,
       shippedAt: g.shippedAt,

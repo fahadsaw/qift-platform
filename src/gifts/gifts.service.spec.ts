@@ -1330,3 +1330,187 @@ describe('GiftsService — F3-adjacent: Week 2 idempotency on create', () => {
     });
   });
 });
+
+// ====================================================================
+// Closed-beta sandbox-flag propagation on POST /gifts direct path.
+//
+// PaymentsService passes order.isSandbox verbatim through to
+// GiftsService.create — that path is covered by orders/payments
+// specs. This block covers the OTHER caller: direct POST /gifts,
+// where body.isSandbox may be true / false / undefined and we
+// expect resolveSandboxFlag's env-aware resolution to win.
+// ====================================================================
+describe('GiftsService — closed-beta sandbox flag propagation', () => {
+  let service: GiftsService;
+  let prisma: MockPrisma;
+  let notifications: { trigger: jest.Mock };
+  const originalEnv = process.env.SANDBOX_ONLY_MODE;
+
+  beforeEach(async () => {
+    prisma = createPrismaMock();
+    notifications = { trigger: jest.fn().mockResolvedValue(undefined) };
+
+    prisma.user.findUnique.mockResolvedValue({
+      id: SENDER_ID,
+      qiftUsername: 'sender_handle',
+      role: 'user',
+      deletedAt: null,
+    });
+    prisma.user.findFirst.mockResolvedValue({
+      id: RECEIVER_ID,
+      qiftUsername: 'receiver_handle',
+      role: 'user',
+      deletedAt: null,
+    });
+    prisma.address.count.mockResolvedValue(1);
+    prisma.address.findFirst.mockResolvedValue({ id: 'addr_1' });
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        GiftsService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: NotificationsService, useValue: notifications },
+        {
+          provide: BlocksService,
+          useValue: {
+            isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+          },
+        },
+      ],
+    }).compile();
+    service = module.get<GiftsService>(GiftsService);
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.SANDBOX_ONLY_MODE;
+    } else {
+      process.env.SANDBOX_ONLY_MODE = originalEnv;
+    }
+  });
+
+  // Local helpers — the parent describes scope their own helpers,
+  // but we want this block to be reorder-resilient (i.e. runnable
+  // in isolation via `jest -t "sandbox flag propagation"`).
+  function body(overrides: Record<string, unknown> = {}) {
+    return {
+      receiverUsername: 'receiver_handle',
+      productName: 'باقة جوري',
+      storeName: 'باقات الرياض',
+      ...overrides,
+    };
+  }
+
+  function fakeRow(extra: Record<string, unknown> = {}) {
+    return {
+      id: 'gift_1',
+      senderId: SENDER_ID,
+      receiverId: RECEIVER_ID,
+      productName: 'باقة جوري',
+      storeName: 'باقات الرياض',
+      productId: null,
+      storeId: null,
+      status: 'pending_address',
+      isAnonymous: false,
+      isSurprise: false,
+      isSandbox: false,
+      idempotencyKey: null,
+      idempotencyRequestHash: null,
+      sender: {
+        id: SENDER_ID,
+        qiftUsername: 'sender_handle',
+        fullName: null,
+      },
+      receiver: {
+        id: RECEIVER_ID,
+        qiftUsername: 'receiver_handle',
+        fullName: null,
+      },
+      address: null,
+      ...extra,
+    };
+  }
+
+  describe('SANDBOX_ONLY_MODE=true (closed beta)', () => {
+    beforeEach(() => {
+      process.env.SANDBOX_ONLY_MODE = 'true';
+    });
+
+    it('forces isSandbox=true when body omits the flag', async () => {
+      prisma.gift.create.mockResolvedValue(fakeRow({ isSandbox: true }));
+      await service.create(body(), SENDER_ID);
+      const data = prisma.gift.create.mock.calls[0][0].data;
+      expect(data.isSandbox).toBe(true);
+    });
+
+    it('forces isSandbox=true even when body sets false (no opt-out path)', async () => {
+      prisma.gift.create.mockResolvedValue(fakeRow({ isSandbox: true }));
+      await service.create(body({ isSandbox: false }), SENDER_ID);
+      const data = prisma.gift.create.mock.calls[0][0].data;
+      expect(data.isSandbox).toBe(true);
+    });
+  });
+
+  describe('SANDBOX_ONLY_MODE=false (post-beta)', () => {
+    beforeEach(() => {
+      process.env.SANDBOX_ONLY_MODE = 'false';
+    });
+
+    it('writes isSandbox=false when body omits the flag (production default)', async () => {
+      prisma.gift.create.mockResolvedValue(fakeRow({ isSandbox: false }));
+      await service.create(body(), SENDER_ID);
+      const data = prisma.gift.create.mock.calls[0][0].data;
+      expect(data.isSandbox).toBe(false);
+    });
+
+    it('writes isSandbox=true when body explicitly opts in', async () => {
+      prisma.gift.create.mockResolvedValue(fakeRow({ isSandbox: true }));
+      await service.create(body({ isSandbox: true }), SENDER_ID);
+      const data = prisma.gift.create.mock.calls[0][0].data;
+      expect(data.isSandbox).toBe(true);
+    });
+  });
+
+  describe('SANDBOX_ONLY_MODE unset', () => {
+    beforeEach(() => {
+      delete process.env.SANDBOX_ONLY_MODE;
+    });
+
+    it('defaults to isSandbox=false — production cannot become sandbox by accident', async () => {
+      prisma.gift.create.mockResolvedValue(fakeRow({ isSandbox: false }));
+      await service.create(body(), SENDER_ID);
+      const data = prisma.gift.create.mock.calls[0][0].data;
+      expect(data.isSandbox).toBe(false);
+    });
+  });
+
+  describe('idempotency hash is unaffected by isSandbox', () => {
+    // The hash exists to identify gift CONTENT — recipient, product,
+    // message, presentation flags. isSandbox is a deployment-mode
+    // tag; two requests that differ only in their sandbox flag
+    // should replay against the same stored gift, not 409. This
+    // also covers the closed-beta case where body.isSandbox is
+    // ignored entirely and the env forces the column.
+    beforeEach(() => {
+      delete process.env.SANDBOX_ONLY_MODE;
+    });
+
+    it('same content + different isSandbox produces the same hash', async () => {
+      prisma.gift.create.mockResolvedValue(fakeRow());
+      await service.create(body({ isSandbox: true }), 'sender_h_a', 'k-a');
+      await service.create(body({ isSandbox: false }), 'sender_h_b', 'k-b');
+
+      const hashA = (
+        prisma.gift.create.mock.calls[0][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+      const hashB = (
+        prisma.gift.create.mock.calls[1][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+      expect(hashA).toBe(hashB);
+    });
+  });
+});

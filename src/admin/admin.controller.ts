@@ -9,7 +9,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { AdminService } from './admin.service';
+import { AdminService, type AdminSandboxModeFilter } from './admin.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { AdminGuard } from './admin.guard';
 import { OpsRolesService } from '../ops-roles/ops-roles.service';
@@ -170,9 +170,13 @@ export class AdminController {
 
   // ── Gifts ────────────────────────────────────────────────────────
 
+  // Closed-beta sandbox tab. `?mode=sandbox|live|all`; defaults to
+  // 'all' so the existing admin gift-list view is unchanged during
+  // closed beta (every row is sandbox anyway). The frontend renders
+  // a TEST chip per row on the 'all' view using AdminGiftRow.isSandbox.
   @Get('gifts')
-  listGifts() {
-    return this.admin.listGifts();
+  listGifts(@Query('mode') mode?: string) {
+    return this.admin.listGifts(parseSandboxMode(mode, 'all'));
   }
 
   // ── Reports ──────────────────────────────────────────────────────
@@ -219,10 +223,14 @@ export class AdminController {
   // any of the finance surfaces — the frontend hides the tab
   // entirely, but the server-side gate is authoritative.
 
+  // Closed-beta sandbox filter. `?mode=sandbox|live|all`; defaults
+  // to 'live' — real-money balance totals MUST never include
+  // sandbox events by accident. Operators viewing test ledger
+  // activity opt in explicitly with mode=sandbox.
   @Get('finance/stores')
   @RequireOpsPermission('finance.read_payouts')
-  financeStoreBalances() {
-    return this.admin.financeStoreBalances();
+  financeStoreBalances(@Query('mode') mode?: string) {
+    return this.admin.financeStoreBalances(parseSandboxMode(mode, 'live'));
   }
 
   @Get('finance/stores/:id/events')
@@ -332,4 +340,16 @@ export class AdminController {
   debugSeedMerchants(@Req() req: AuthedRequest) {
     return this.admin.debugSeedMerchants(req.user.userId);
   }
+}
+
+// Coerce the raw query-string value to the three-state filter. Any
+// unrecognised value falls back to `fallback`; the caller chooses
+// the safe default per route (gift-list defaults to 'all', finance
+// defaults to 'live').
+function parseSandboxMode(
+  raw: string | undefined,
+  fallback: AdminSandboxModeFilter,
+): AdminSandboxModeFilter {
+  if (raw === 'sandbox' || raw === 'live' || raw === 'all') return raw;
+  return fallback;
 }

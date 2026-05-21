@@ -9,6 +9,7 @@ import {
 import { Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { validatePaymentProvider } from '../payments/providers';
+import { resolveSandboxFlag } from '../payments/sandbox-mode';
 import { UsersService } from '../users/users.service';
 import { ProductsService } from '../products/products.service';
 import { validateGiftMedia } from '../gifts/gift-visibility';
@@ -58,6 +59,13 @@ export type CreateOrderInput = {
   // the Order confirms. Validation lives at the Gift boundary — we
   // accept the string as-given here.
   occasionId?: string;
+  // Closed-beta sandbox flag. When SANDBOX_ONLY_MODE=true on the
+  // deploy, this field is IGNORED — every Order is forced sandbox
+  // regardless of body. When SANDBOX_ONLY_MODE is unset/false, the
+  // body controls the flag: `true` opts a single order into sandbox,
+  // `false`/omitted creates a live order. Resolution happens in
+  // src/payments/sandbox-mode.ts (single source of truth).
+  isSandbox?: boolean;
 };
 
 const FORBIDDEN_MSG = 'غير مصرح لك';
@@ -87,6 +95,12 @@ export class OrdersService {
     const message = body.message?.trim() || null;
     const isAnonymous = body.isAnonymous === true;
     const isSurprise = body.isSurprise === true;
+    // Closed-beta sandbox flag. resolveSandboxFlag folds in the
+    // deployment-level SANDBOX_ONLY_MODE env var: during closed
+    // beta the env forces sandbox=true regardless of body; post-
+    // beta the body controls per-request. See sandbox-mode.ts for
+    // the full decision matrix.
+    const isSandbox = resolveSandboxFlag(body.isSandbox);
     // Validate the (mediaUrl, mediaType) pair with the SAME helper that
     // POST /gifts uses. A URL without a valid type throws — keeps the
     // server in one canonical place for media validation.
@@ -285,6 +299,7 @@ export class OrdersService {
         mediaType,
         isSurprise,
         isAnonymous,
+        isSandbox,
         status: 'pending',
       },
       include: ORDER_INCLUDE,

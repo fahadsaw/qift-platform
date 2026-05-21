@@ -329,6 +329,23 @@ model Gift {
   // and existing callers don't change semantics. The store + sender
   // ALWAYS see real values; the mask is purely a receiver-side reveal.
   isSurprise  Boolean @default(false)
+  // Closed-beta / sandbox simulation flag. When true, this Gift was
+  // created without a real payment capture — the full lifecycle
+  // (address-confirm, merchant prepare/ship/deliver, notifications,
+  // recipient confirmation) runs end-to-end against this row, but no
+  // real money moved and no PayoutEvent for this gift should ever
+  // settle to a merchant ledger. Inherited from Order.isSandbox at
+  // payment-confirmation time. Default false so any unflagged write
+  // is treated as production — closed-beta deploys force the flag on
+  // server-side via SANDBOX_ONLY_MODE=true (see sandbox-mode.ts).
+  //
+  // When real payment providers integrate later, the real-PSP entry
+  // point MUST refuse to capture against orders with isSandbox=true,
+  // and the mock-PSP entry point continues to handle every order
+  // regardless of flag (it never moved real money to begin with).
+  // The boundary check is the load-bearing invariant separating
+  // sandbox from production money flow.
+  isSandbox   Boolean @default(false)
   addressId   String?
 
   // Tracking timestamps. Each one is written exactly once (the first time
@@ -387,6 +404,11 @@ model Gift {
   @@index([storeId, status])
   // Used by the 24h auto-default sweep (find pending gifts past their TTL).
   @@index([status, createdAt])
+  // Closed-beta sandbox filter. Admin "show sandbox gifts" /
+  // "show live gifts" tabs need (isSandbox, status, createdAt) for
+  // efficient filtered listing; merchant dashboards may later filter
+  // sandbox gifts inline using the same prefix.
+  @@index([isSandbox, status, createdAt])
   // Week 2 idempotency — the compound is the dedup primitive. The
   // unique constraint is what makes the concurrent-retry case
   // race-safe: two simultaneous POSTs with the same key both pass
@@ -814,6 +836,23 @@ model Order {
   // Gift schema default.
   isSurprise       Boolean  @default(false)
   isAnonymous      Boolean  @default(false)
+  // Closed-beta / sandbox simulation flag. When true, this Order was
+  // created without intent to capture real funds — the only payment
+  // entry point that may settle it is the mock gateway, and the
+  // resulting Gift inherits the flag so the entire downstream
+  // lifecycle is tagged. Default false matches production semantics;
+  // closed-beta deploys force the flag on server-side via
+  // SANDBOX_ONLY_MODE=true (see src/payments/sandbox-mode.ts) so
+  // a missing env var can NEVER silently turn a sandbox deploy into
+  // a live one.
+  //
+  // The PSP boundary check is the load-bearing invariant: when a
+  // real payment provider integrates later, the real-PSP code path
+  // MUST refuse orders with isSandbox=true; the mock-PSP path
+  // continues to accept both (it never moved real money to begin
+  // with). PayoutEvents accrued from sandbox orders are filtered
+  // out of finance balances by default.
+  isSandbox        Boolean  @default(false)
   // Optional Phase 6.4 gifting-context tag. The sender may attach
   // an occasion when sending — typically the recipient's upcoming
   // birthday or a milestone — so the eventual Gift row inherits
@@ -830,6 +869,9 @@ model Order {
   payment Payment?
 
   @@index([userId])
+  // Closed-beta sandbox filter. Admin order-list "sandbox / live / all"
+  // tabs need (isSandbox, status) for efficient slicing.
+  @@index([isSandbox, status])
 }
 
 // Shipment record. Created by the merchant when they hand the
@@ -1118,11 +1160,22 @@ model PayoutEvent {
   recordedBy String
   occurredAt DateTime
   createdAt  DateTime @default(now())
+  // Closed-beta sandbox flag. Inherited from the linked Gift's
+  // isSandbox value when the event is recorded. Default false so
+  // legacy rows stay live. Finance balance computations filter
+  // (isSandbox = false) by default — sandbox events never settle
+  // into real merchant ledgers regardless of how/whether they were
+  // recorded.
+  isSandbox  Boolean  @default(false)
 
   // Per-store ledger reads: filter by storeId, order by
   // occurredAt. Per-gift drilldown uses (giftId).
   @@index([storeId, occurredAt])
   @@index([giftId])
+  // Closed-beta sandbox filter. financeStoreBalances excludes
+  // sandbox rows by default; this lets the filter execute as an
+  // indexed range scan instead of a full table scan.
+  @@index([isSandbox, occurredAt])
 }
 
 model Otp {

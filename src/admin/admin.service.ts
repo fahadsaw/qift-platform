@@ -218,8 +218,15 @@ export class AdminService {
   // never serialize the linked address row over this surface (admin
   // can drill into the store dashboard if address is genuinely
   // needed for support).
-  async listGifts(): Promise<AdminGiftRow[]> {
+  async listGifts(
+    mode: AdminSandboxModeFilter = 'all',
+  ): Promise<AdminGiftRow[]> {
+    // Closed-beta filter. Default 'all' so the existing UI keeps
+    // showing every gift (closed beta produces sandbox-only data,
+    // so 'all' renders the same view as 'sandbox' for now). The
+    // controller exposes ?mode=sandbox|live|all for the tabbed UI.
     const rows = await this.prisma.gift.findMany({
+      where: { ...sandboxFilterWhere(mode) },
       orderBy: { createdAt: 'desc' },
       take: 100,
       select: {
@@ -228,6 +235,7 @@ export class AdminService {
         storeName: true,
         status: true,
         isAnonymous: true,
+        isSandbox: true,
         createdAt: true,
         sender: { select: { id: true, qiftUsername: true } },
         receiver: { select: { id: true, qiftUsername: true } },
@@ -239,6 +247,7 @@ export class AdminService {
       storeName: g.storeName,
       status: g.status,
       isAnonymous: g.isAnonymous,
+      isSandbox: g.isSandbox,
       createdAt: g.createdAt,
       sender: g.sender,
       receiver: g.receiver,
@@ -399,7 +408,7 @@ export class AdminService {
   // Sign convention: `amount` is signed in the row; `adjustment`
   // events can be either direction. Everything else is positive at
   // record time.
-  async financeStoreBalances(): Promise<
+  async financeStoreBalances(mode: AdminSandboxModeFilter = 'live'): Promise<
     {
       storeId: string;
       storeName: string;
@@ -415,6 +424,12 @@ export class AdminService {
       lastEventAt: Date | null;
     }[]
   > {
+    // Closed-beta filter. Defaults to 'live' — real-money balance
+    // totals MUST never include sandbox events by accident. The
+    // admin UI surfaces 'all' / 'sandbox' tabs for visibility into
+    // test ledger activity, but the default view is the production
+    // ledger only. The (isSandbox, occurredAt) index makes this a
+    // bounded range scan instead of a full table scan.
     const stores = await this.prisma.store.findMany({
       select: {
         id: true,
@@ -427,7 +442,10 @@ export class AdminService {
     if (stores.length === 0) return [];
 
     const events = await this.prisma.payoutEvent.findMany({
-      where: { storeId: { in: stores.map((s) => s.id) } },
+      where: {
+        storeId: { in: stores.map((s) => s.id) },
+        ...sandboxFilterWhere(mode),
+      },
       orderBy: { occurredAt: 'desc' },
     });
 
@@ -549,16 +567,33 @@ export class AdminService {
     if (type === 'adjustment' && !body.reason?.trim()) {
       throw new BadRequestException('Reason is required for adjustment events');
     }
+    // Closed-beta sandbox inheritance. If the event references a
+    // specific Gift, the event inherits that Gift's sandbox flag.
+    // Store-level adjustments (giftId omitted) default to live —
+    // operators recording bare adjustments are doing real-money
+    // bookkeeping. financeStoreBalances filters by isSandbox=false
+    // by default, so sandbox events stay out of real-money totals
+    // regardless.
+    const giftIdTrimmed = body.giftId?.trim() || null;
+    let isSandbox = false;
+    if (giftIdTrimmed) {
+      const linkedGift = await this.prisma.gift.findUnique({
+        where: { id: giftIdTrimmed },
+        select: { isSandbox: true },
+      });
+      isSandbox = linkedGift?.isSandbox === true;
+    }
     return this.prisma.payoutEvent.create({
       data: {
         storeId,
-        giftId: body.giftId?.trim() || null,
+        giftId: giftIdTrimmed,
         type,
         amount,
         currency,
         reason: body.reason?.trim() || null,
         recordedBy: adminUserId,
         occurredAt: body.occurredAt ? new Date(body.occurredAt) : new Date(),
+        isSandbox,
       },
     });
   }
@@ -1339,10 +1374,38 @@ export type AdminGiftRow = {
   storeName: string;
   status: string;
   isAnonymous: boolean;
+  // Closed-beta sandbox classification. The admin UI uses this to
+  // render a "TEST" chip on sandbox rows when the operator is
+  // viewing the mixed (mode=all) feed. Filterable via the `mode`
+  // query parameter on the controller.
+  isSandbox: boolean;
   createdAt: Date;
   sender: { id: string; qiftUsername: string } | null;
   receiver: { id: string; qiftUsername: string } | null;
 };
+
+// Three-state filter accepted by listGifts and financeStoreBalances.
+// 'all' returns mixed sandbox + live; 'sandbox' returns only test
+// data; 'live' returns only production rows. Defaults vary per
+// caller — admin gift list defaults to 'all' (preserves current
+// behaviour during closed beta where every row is sandbox); the
+// finance view defaults to 'live' (real-money totals must never
+// include sandbox by accident).
+export type AdminSandboxModeFilter = 'all' | 'sandbox' | 'live';
+
+// Map the filter onto a Prisma where-clause fragment. Returns an
+// empty object for 'all' so the spread is a no-op at the call site;
+// returns `{ isSandbox: true/false }` otherwise. Centralised here
+// so every caller filters consistently and the indexed scan
+// (Order_isSandbox_status_idx / Gift_isSandbox_status_createdAt_idx
+// / PayoutEvent_isSandbox_occurredAt_idx) lights up the same way.
+export function sandboxFilterWhere(mode: AdminSandboxModeFilter): {
+  isSandbox?: boolean;
+} {
+  if (mode === 'sandbox') return { isSandbox: true };
+  if (mode === 'live') return { isSandbox: false };
+  return {};
+}
 
 export type AdminReportRow = {
   id: string;
