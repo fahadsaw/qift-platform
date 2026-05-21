@@ -687,6 +687,14 @@ model Product {
   storeId           String
   name              String
   price             Float
+  // Legacy single-image field. Kept as a DENORMALIZED PRIMARY:
+  // every Product write that supplies a `ProductImage` gallery
+  // also writes `imageUrls[0]` here so older consumers that read
+  // only `imageUrl` keep rendering through the migration window.
+  // Phase 2.5a continues to support direct writes too (URL-paste
+  // fallback in the legacy ProductModal). Phase 2.5d will drop
+  // this column once every consumer has switched to the
+  // `images` relation.
   imageUrl          String?
   category          String
   isFastDelivery    Boolean   @default(false)
@@ -698,6 +706,21 @@ model Product {
   isAvailable       Boolean   @default(true)
   lastSyncedAt      DateTime?
   createdAt         DateTime  @default(now())
+
+  // Phase 2.5a — optional product video. The merchant attaches a
+  // short product video; the storefront renderer will surface it
+  // in a future slice (gated by NEXT_PUBLIC_PRODUCT_VIDEO_ENABLED).
+  // Closed beta: backend accepts writes but no playback UI ships
+  // yet. videoType discriminates the renderer so the client
+  // doesn't have to MIME-sniff the URL.
+  //
+  //   videoUrl   — public R2 URL (or external URL for the legacy
+  //                URL-paste path, same as imageUrl).
+  //   videoType  — 'mp4' | 'webm' | 'mov' (the same MIMEs the
+  //                Gift media endpoint accepts). Null when
+  //                videoUrl is null.
+  videoUrl          String?
+  videoType         String?
 
   // Denormalized counter: distinct users who have this product on
   // their wishlist. Updated transactionally by WishesService on
@@ -773,6 +796,16 @@ model ProductImage {
   url          String
   // 0-based ordinal. The first image is the primary.
   displayOrder Int      @default(0)
+  // Phase 2.5a — optional per-image metadata (width, height,
+  // mime, alt text, blurhash, etc.). Sparse: missing entries
+  // are fine; the storefront falls back to a default aspect
+  // ratio + lazy intrinsic detection. The Phase 2.5a upload
+  // endpoint doesn't populate this yet (server-side dimension
+  // extraction is deferred until storefront gallery rendering
+  // actually needs it in Phase 2.5c) — the column exists as
+  // forward-compat shape so callers can begin writing it
+  // without a second migration.
+  imageMeta    Json?
   createdAt    DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
