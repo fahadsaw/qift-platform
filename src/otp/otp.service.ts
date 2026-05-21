@@ -25,6 +25,18 @@ export type VerifyOtpInput = { target?: string; code?: string };
 const CODE_LENGTH = 4;
 const TTL_MINUTES = 5;
 
+// Week 1 security hardening (F1) — per-OTP-row verify-attempt cap.
+// With CODE_LENGTH=4 the code space is 10,000, which is trivially
+// brute-forceable inside the 5-minute TTL window without a lockout.
+// We use the existing `Otp.attempts` column (already in the schema
+// with default 0): every wrong-code attempt increments it; once it
+// reaches MAX_VERIFY_ATTEMPTS the row is dead and verify rejects
+// with `otp_locked` BEFORE comparing the code. The send-side rate
+// limit (5 sends per 5 minutes per target) still caps how many
+// fresh OTP rows an attacker can generate, so the effective
+// attack budget is bounded.
+const MAX_VERIFY_ATTEMPTS = 5;
+
 // Email-shape sanity check. The full RFC is a tarpit; this catches
 // obvious typos (no @, no dot in domain) without rejecting valid
 // uncommon shapes. The downstream Resend `to` is the authoritative
@@ -270,15 +282,60 @@ export class OtpService {
       orderBy: { createdAt: 'desc' },
     });
 
-    if (!otp || otp.code !== code) {
-      this.logger.warn(
-        `[otp:verify-failed] target=${target} reason=invalid-code`,
-      );
+    if (!otp) {
+      // No row at all — same observable behaviour as before. Don't
+      // distinguish 'no code requested' from 'wrong code' to keep
+      // the response shape uniform for an enumeration-resistant
+      // contract.
+      this.logger.warn(`[otp:verify-failed] target=${target} reason=no-code`);
       throw new BadRequestException('invalid_code');
     }
+
+    // F1 lockout check — runs BEFORE the code comparison so an
+    // attacker who has burned MAX_VERIFY_ATTEMPTS on this row cannot
+    // bypass the cap by submitting one more guess. The user-facing
+    // recovery path is to request a fresh OTP via /otp/send (the
+    // new row starts at attempts=0).
+    if (otp.attempts >= MAX_VERIFY_ATTEMPTS) {
+      this.logger.warn(
+        `[otp:verify-failed] target=${target} reason=locked attempts=${otp.attempts}`,
+      );
+      throw new BadRequestException('otp_locked');
+    }
+
     if (otp.expiresAt.getTime() < Date.now()) {
+      // Expiry runs BEFORE the code comparison so expired rows
+      // emit a distinct error code (UX: the frontend prompts the
+      // user to request a new code). Expiry deliberately does NOT
+      // increment `attempts` — an expired row is dead either way,
+      // and incrementing here would conflate two failure modes.
       this.logger.warn(`[otp:verify-failed] target=${target} reason=expired`);
       throw new BadRequestException('expired_code');
+    }
+
+    if (otp.code !== code) {
+      // Wrong code. Increment `attempts` on this row so a brute-force
+      // attacker exhausts the budget. The update is best-effort
+      // (catch + swallow) — a transient DB hiccup must NOT change the
+      // error returned to the user, who still gets 'invalid_code'.
+      // The update uses an atomic increment so concurrent verify
+      // attempts each contribute exactly one to the counter.
+      await this.prisma.otp
+        .update({
+          where: { id: otp.id },
+          data: { attempts: { increment: 1 } },
+        })
+        .catch(() => {
+          // Logged as a warn; do not throw — the user-facing error
+          // path is `invalid_code` regardless.
+          this.logger.warn(
+            `[otp:verify-failed] target=${target} reason=attempt-increment-failed`,
+          );
+        });
+      this.logger.warn(
+        `[otp:verify-failed] target=${target} reason=invalid-code attempts=${otp.attempts + 1}`,
+      );
+      throw new BadRequestException('invalid_code');
     }
 
     // Single-use: best-effort delete so the code can't be replayed.

@@ -16,9 +16,11 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- jest mocks are intentionally `any`-typed inside test files; the production code is fully typed. */
 
 import { Test, type TestingModule } from '@nestjs/testing';
+import { ForbiddenException } from '@nestjs/common';
 import { GiftsService } from './gifts.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BlocksService } from '../blocks/blocks.service';
 
 type MockPrisma = {
   user: { findUnique: jest.Mock; findFirst: jest.Mock };
@@ -91,6 +93,19 @@ describe('GiftsService — wishlist purchase fulfillment hook', () => {
         GiftsService,
         { provide: PrismaService, useValue: prisma },
         { provide: NotificationsService, useValue: notifications },
+        // Week 1 security hardening (F3) — BlocksService is consulted
+        // in GiftsService.create before any DB write. Default mock
+        // returns `false` so all existing tests (which exercise the
+        // happy-path / unrelated-feature code paths) pass through the
+        // new block check unchanged. The F3 describe block at the end
+        // of this file overrides the mock to true to verify the
+        // rejection behaviour.
+        {
+          provide: BlocksService,
+          useValue: {
+            isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+          },
+        },
       ],
     }).compile();
     service = module.get<GiftsService>(GiftsService);
@@ -572,6 +587,15 @@ describe('GiftsService — occasion attach (Phase 6.4)', () => {
           provide: NotificationsService,
           useValue: { trigger: jest.fn().mockResolvedValue(undefined) },
         },
+        // Week 1 security hardening (F3) — same default-false mock
+        // as the earlier describe block. Lets these tests pass
+        // through the new block check unchanged.
+        {
+          provide: BlocksService,
+          useValue: {
+            isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+          },
+        },
       ],
     }).compile();
     service = module.get<GiftsService>(GiftsService);
@@ -680,5 +704,168 @@ describe('GiftsService — occasion attach (Phase 6.4)', () => {
     expect(prisma.occasion.findFirst).not.toHaveBeenCalled();
     const created = prisma.gift.create.mock.calls[0][0];
     expect(created.data.occasionId).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Week 1 security hardening — F3 block check on gift creation.
+//
+// CONTRACT
+// GiftsService.create must call BlocksService.isBlockedEitherWay
+// before persisting any gift. If either direction of the block
+// relationship exists, the create is rejected with
+// `ForbiddenException('Recipient unavailable')` — a generic message
+// so a probing sender cannot distinguish "blocked" from
+// "unreachable".
+//
+// The bidirectionality of the check (A blocks B OR B blocks A → both
+// rejected) is a property of BlocksService.isBlockedEitherWay and is
+// covered by that service's own spec. Here we verify GiftsService
+// only delegates correctly.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('GiftsService — F3 block check on gift creation', () => {
+  let service: GiftsService;
+  let prisma: MockPrisma;
+  let blocks: { isBlockedEitherWay: jest.Mock };
+
+  beforeEach(async () => {
+    prisma = createPrismaMock();
+    blocks = { isBlockedEitherWay: jest.fn() };
+
+    // Sender lookup — every create() call hits this first.
+    prisma.user.findUnique.mockResolvedValue({
+      qiftUsername: 'sender_handle',
+    });
+    // Receiver lookup — resolves to a real user so we proceed past
+    // the receiver-not-found gate to the new block check.
+    prisma.user.findFirst.mockResolvedValue({ id: RECEIVER_ID });
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        GiftsService,
+        { provide: PrismaService, useValue: prisma },
+        {
+          provide: NotificationsService,
+          useValue: { trigger: jest.fn().mockResolvedValue(undefined) },
+        },
+        { provide: BlocksService, useValue: blocks },
+      ],
+    }).compile();
+    service = module.get<GiftsService>(GiftsService);
+  });
+
+  it('throws ForbiddenException("Recipient unavailable") when isBlockedEitherWay returns true', async () => {
+    blocks.isBlockedEitherWay.mockResolvedValue(true);
+
+    await expect(
+      service.create(
+        {
+          receiverUsername: 'receiver_handle',
+          productName: 'باقة جوري',
+          storeName: 'باقات الرياض',
+        },
+        SENDER_ID,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    await expect(
+      service.create(
+        {
+          receiverUsername: 'receiver_handle',
+          productName: 'باقة جوري',
+          storeName: 'باقات الرياض',
+        },
+        SENDER_ID,
+      ),
+    ).rejects.toThrow('Recipient unavailable');
+  });
+
+  it('passes (senderId, receiverId) to BlocksService.isBlockedEitherWay', async () => {
+    blocks.isBlockedEitherWay.mockResolvedValue(true);
+
+    await service
+      .create(
+        {
+          receiverUsername: 'receiver_handle',
+          productName: 'باقة جوري',
+          storeName: 'باقات الرياض',
+        },
+        SENDER_ID,
+      )
+      .catch(() => {
+        // expected — we just want to inspect the call arguments
+      });
+
+    expect(blocks.isBlockedEitherWay).toHaveBeenCalledWith(
+      SENDER_ID,
+      RECEIVER_ID,
+    );
+  });
+
+  it('does NOT persist a Gift row when blocked', async () => {
+    blocks.isBlockedEitherWay.mockResolvedValue(true);
+
+    await service
+      .create(
+        {
+          receiverUsername: 'receiver_handle',
+          productName: 'باقة جوري',
+          storeName: 'باقات الرياض',
+        },
+        SENDER_ID,
+      )
+      .catch(() => {
+        // expected
+      });
+
+    expect(prisma.gift.create).not.toHaveBeenCalled();
+  });
+
+  it('does NOT short-circuit the existing self-send check (regression)', async () => {
+    // Self-send must throw BEFORE the block check is reached —
+    // the sender and receiver are the same user, so consulting
+    // BlocksService.isBlockedEitherWay would be wasteful (and would
+    // emit a misleading "blocked-either-way" log line).
+    prisma.user.findUnique.mockResolvedValue({
+      qiftUsername: 'sender_handle',
+    });
+    blocks.isBlockedEitherWay.mockResolvedValue(false);
+
+    await expect(
+      service.create(
+        {
+          receiverUsername: 'sender_handle',
+          productName: 'باقة جوري',
+          storeName: 'باقات الرياض',
+        },
+        SENDER_ID,
+      ),
+    ).rejects.toThrow('لا يمكنك إرسال هدية لنفسك');
+
+    // The self-send guard runs BEFORE the receiver lookup and the
+    // block check; neither prisma.user.findFirst nor isBlockedEitherWay
+    // should be called.
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
+    expect(blocks.isBlockedEitherWay).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call isBlockedEitherWay when the receiver does not exist (NotFound short-circuit)', async () => {
+    // Receiver-not-found short-circuits before the block check.
+    prisma.user.findFirst.mockResolvedValue(null);
+    blocks.isBlockedEitherWay.mockResolvedValue(false);
+
+    await expect(
+      service.create(
+        {
+          receiverUsername: 'ghost_user',
+          productName: 'باقة جوري',
+          storeName: 'باقات الرياض',
+        },
+        SENDER_ID,
+      ),
+    ).rejects.toThrow('Receiver not found');
+
+    expect(blocks.isBlockedEitherWay).not.toHaveBeenCalled();
   });
 });
