@@ -2,11 +2,14 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { GiftsService, type CreateGiftInput } from './gifts.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 
@@ -21,11 +24,33 @@ type ConfirmAddressBody = { addressId?: string };
 export class GiftsController {
   constructor(private service: GiftsService) {}
 
+  // Week 2 — POST /gifts supports an optional `Idempotency-Key`
+  // header. Same (senderId, key, payload) replays return the
+  // original gift + `Idempotent-Replayed: true` response header.
+  // Same key + DIFFERENT payload returns 409 idempotency_key_reused.
+  // No header at all behaves exactly like before (no dedup
+  // tracking; both DB columns NULL). See GiftsService.create for
+  // the full behaviour matrix.
   @Post()
-  create(@Body() body: CreateGiftInput, @Req() req: AuthedRequest) {
+  async create(
+    @Body() body: CreateGiftInput,
+    @Req() req: AuthedRequest,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     // The body's senderId (if any) is intentionally ignored — sender is the
     // authenticated viewer.
-    return this.service.create(body, req.user.userId);
+    const result = await this.service.create(
+      body,
+      req.user.userId,
+      idempotencyKey ?? null,
+    );
+    if (result.replayed) {
+      // Surface the replay signal to the client (and to anything
+      // observing the response, e.g. operator log tooling).
+      res.setHeader('Idempotent-Replayed', 'true');
+    }
+    return result.gift;
   }
 
   // Receiver confirms the delivery address. Optional `addressId` lets them

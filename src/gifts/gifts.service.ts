@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   HttpException,
   HttpStatus,
@@ -7,6 +8,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
 import {
@@ -119,11 +122,70 @@ const GIFT_INCLUDE = {
 
 const FORBIDDEN_MSG = 'غير مصرح لك';
 
+// Week 2 — Idempotency on POST /gifts.
+//
+// Max acceptable length for the Idempotency-Key header value. 255 is
+// generous (UUIDv4 hex is 36; ksuid is 27); rejecting longer keys
+// avoids unbounded-text DoS on the lookup index.
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
+
+// Canonicalises the idempotency-relevant subset of CreateGiftInput
+// and returns a hex SHA-256 hash. Two requests with the same
+// canonicalised payload produce the same hash regardless of input-
+// field ordering or stray whitespace. The hash field set is
+// deliberately narrow: only fields that affect gift identity
+// (recipient, product, store, message, mode flags, occasion, media)
+// participate. Adding a new field to CreateGiftInput later requires
+// a deliberate update here — that's the right friction for an
+// idempotency contract.
+function computeGiftRequestHash(body: CreateGiftInput): string {
+  const canonical: Record<string, unknown> = {
+    receiverUsername: body.receiverUsername?.trim().toLowerCase() ?? null,
+    productName: body.productName?.trim() ?? null,
+    storeName: body.storeName?.trim() ?? null,
+    productId: body.productId?.trim() || null,
+    storeId: body.storeId?.trim() || null,
+    // messageText and `message` (legacy alias) collapse to the same
+    // canonical field — re-submitting with the alias swapped must
+    // still be considered the same payload.
+    messageText: body.messageText?.trim() || body.message?.trim() || null,
+    isAnonymous: body.isAnonymous === true,
+    isSurprise: body.isSurprise === true,
+    isFastDelivery: body.isFastDelivery === true,
+    storeCity: body.storeCity?.trim() || null,
+    occasionId: body.occasionId?.trim() || null,
+    mediaUrl: body.mediaUrl?.trim() || null,
+    mediaType: body.mediaType ?? null,
+  };
+  const sortedKeys = Object.keys(canonical).sort();
+  const canonicalString = JSON.stringify(canonical, sortedKeys);
+  return createHash('sha256').update(canonicalString).digest('hex');
+}
+
+// Prisma's typed error for unique-constraint violations. The
+// instanceof check is the canonical way to distinguish a P2002
+// (which is recoverable in our idempotency flow — refetch the
+// winner) from any other DB error (which must propagate).
+function isPrismaUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
+  );
+}
+
 // `GiftWithParties` is the shape Prisma returns when we include sender +
 // receiver. We re-export the type from the visibility module so every
 // helper agrees on the field names and tightening one place propagates
 // everywhere.
 type GiftWithParties = GiftLike;
+
+// Week 2 — create() return shape. The `replayed` flag is true when
+// the request matched an existing gift's (senderId, idempotencyKey)
+// tuple and the canonical request hash agreed. Callers that don't
+// supply an idempotencyKey always receive { replayed: false }.
+export type CreateGiftResult = {
+  gift: GiftWithParties;
+  replayed: boolean;
+};
 
 @Injectable()
 export class GiftsService {
@@ -139,7 +201,16 @@ export class GiftsService {
     private blocks: BlocksService,
   ) {}
 
-  async create(body: CreateGiftInput, viewerUserId: string) {
+  async create(
+    body: CreateGiftInput,
+    viewerUserId: string,
+    // Week 2 — optional Idempotency-Key from the request header.
+    // Null/undefined means "no idempotency tracking" — the call
+    // behaves exactly as before (legacy contract preserved). When
+    // non-null, the (senderId, idempotencyKey) tuple participates
+    // in the dedup compound-unique index on Gift.
+    idempotencyKey?: string | null,
+  ): Promise<CreateGiftResult> {
     // Sender is always the authenticated user — never trust client input.
     const senderId = viewerUserId;
     const receiverUsername = body.receiverUsername?.trim().toLowerCase();
@@ -164,6 +235,56 @@ export class GiftsService {
       throw new BadRequestException(
         'receiverUsername, productName and storeName are required',
       );
+    }
+
+    // Week 2 — Idempotency pre-check.
+    //
+    // Empty / whitespace-only / absent Idempotency-Key → opt-out
+    // (no dedup tracking; legacy contract preserved). Any non-empty
+    // string > MAX_IDEMPOTENCY_KEY_LENGTH chars is rejected up
+    // front to avoid unbounded-text DoS on the lookup index.
+    //
+    // When a usable key is provided we compute the canonical
+    // request hash and look up an existing gift for this
+    // (senderId, key) tuple. Hash match → return the existing gift
+    // with replayed=true (the controller sets `Idempotent-Replayed:
+    // true` on the response). Hash mismatch → 409
+    // idempotency_key_reused — the safer interpretation (mirrors
+    // Stripe's Idempotency-Key contract). The race-condition tail
+    // (two simultaneous POSTs with the same key) is handled at the
+    // prisma.gift.create site below: the loser catches P2002, then
+    // re-enters this same lookup path.
+    const trimmedIdempotencyKey = idempotencyKey?.trim() || null;
+    if (
+      trimmedIdempotencyKey !== null &&
+      trimmedIdempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH
+    ) {
+      throw new BadRequestException('invalid_idempotency_key');
+    }
+
+    let requestHash: string | null = null;
+    if (trimmedIdempotencyKey !== null) {
+      requestHash = computeGiftRequestHash(body);
+      const existing = await this.prisma.gift.findFirst({
+        where: { senderId, idempotencyKey: trimmedIdempotencyKey },
+        include: GIFT_INCLUDE,
+      });
+      if (existing) {
+        if (existing.idempotencyRequestHash !== requestHash) {
+          this.logger.warn(
+            `[gifts:idempotency-conflict] senderId=${senderId} key="${trimmedIdempotencyKey}" stored-hash=${existing.idempotencyRequestHash ?? '(null)'} new-hash=${requestHash}`,
+          );
+          throw new ConflictException({
+            statusCode: 409,
+            code: 'idempotency_key_reused',
+            message: 'Idempotency-Key reused with a different request body',
+          });
+        }
+        return {
+          gift: applyGiftVisibility(existing as GiftWithParties, senderId),
+          replayed: true,
+        };
+      }
     }
 
     // Self-send guard: look up sender's username and compare.
@@ -387,29 +508,79 @@ export class GiftsService {
       }
     }
 
-    const created = await this.prisma.gift.create({
-      data: {
-        senderId,
-        receiverId: receiver.id,
-        productName,
-        storeName,
-        // Persist catalog identifiers when available so the per-store
-        // dashboard can filter on storeId. Legacy / sample-product flows
-        // pass nothing and these stay null.
-        storeId: resolvedStoreId,
-        productId: body.productId?.trim() || null,
-        // Phase 6.4 gifting-context tag — resolved above.
-        occasionId: resolvedOccasionId,
-        messageText,
-        mediaUrl,
-        mediaType,
-        isAnonymous,
-        isSurprise,
-        // Receiver still has to confirm or override the address.
-        status: 'pending_address',
-      },
-      include: GIFT_INCLUDE,
-    });
+    // Week 2 — race-safe create-or-replay. Two simultaneous POSTs
+    // with the same (senderId, idempotencyKey) both pass the pre-
+    // check above, both attempt the create, and the second receives
+    // a Prisma P2002 unique-constraint violation. We catch it,
+    // refetch the winner via the same lookup, and return the
+    // winner's gift with replayed=true (matching the pre-check
+    // semantics). When idempotencyKey is null the @@unique allows
+    // multiple NULLs so the unique constraint never fires; existing
+    // legacy callers (PaymentsService) are unaffected.
+    // The Prisma-derived row type (with GIFT_INCLUDE) is the right
+    // shape for downstream consumers — the auto-default sweep, the
+    // wishlist-fulfilment hook (created.productId), and the
+    // product trending counter (created.productId again) all need
+    // fields beyond what the visibility-helper's GiftLike exposes.
+    let created: Prisma.GiftGetPayload<{ include: typeof GIFT_INCLUDE }>;
+    try {
+      created = await this.prisma.gift.create({
+        data: {
+          senderId,
+          receiverId: receiver.id,
+          productName,
+          storeName,
+          // Persist catalog identifiers when available so the per-store
+          // dashboard can filter on storeId. Legacy / sample-product flows
+          // pass nothing and these stay null.
+          storeId: resolvedStoreId,
+          productId: body.productId?.trim() || null,
+          // Phase 6.4 gifting-context tag — resolved above.
+          occasionId: resolvedOccasionId,
+          messageText,
+          mediaUrl,
+          mediaType,
+          isAnonymous,
+          isSurprise,
+          // Receiver still has to confirm or override the address.
+          status: 'pending_address',
+          // Week 2 — idempotency identity. Both NULL when no header.
+          idempotencyKey: trimmedIdempotencyKey,
+          idempotencyRequestHash: requestHash,
+        },
+        include: GIFT_INCLUDE,
+      });
+    } catch (err) {
+      if (isPrismaUniqueViolation(err) && trimmedIdempotencyKey !== null) {
+        // Concurrent retry: a parallel POST won the unique race.
+        // Refetch the winner. If its stored hash matches our
+        // canonical request hash we hand back the winning gift; if
+        // not, the caller raced TWO different payloads with the
+        // same key — propagate the same 409 they would have got
+        // had they hit the pre-check single-threaded.
+        const winner = await this.prisma.gift.findFirst({
+          where: { senderId, idempotencyKey: trimmedIdempotencyKey },
+          include: GIFT_INCLUDE,
+        });
+        if (winner) {
+          if (winner.idempotencyRequestHash !== requestHash) {
+            this.logger.warn(
+              `[gifts:idempotency-race-conflict] senderId=${senderId} key="${trimmedIdempotencyKey}"`,
+            );
+            throw new ConflictException({
+              statusCode: 409,
+              code: 'idempotency_key_reused',
+              message: 'Idempotency-Key reused with a different request body',
+            });
+          }
+          return {
+            gift: applyGiftVisibility(winner as GiftWithParties, senderId),
+            replayed: true,
+          };
+        }
+      }
+      throw err;
+    }
 
     if (process.env.ORDER_FLOW_DEBUG === '1') {
       this.logger.log(
@@ -520,7 +691,10 @@ export class GiftsService {
       link: giftLink,
     });
 
-    return created;
+    // Week 2 — first-time create. replayed=false signals to the
+    // controller (and to PaymentsService) that this is a fresh
+    // gift, not an idempotency replay.
+    return { gift: created, replayed: false };
   }
 
   async findOne(giftId: string, viewerUserId: string) {

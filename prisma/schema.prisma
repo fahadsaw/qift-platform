@@ -342,6 +342,30 @@ model Gift {
 
   createdAt DateTime @default(now())
 
+  // Week 2 — idempotency on POST /gifts. Optional Idempotency-Key
+  // (from the request header) plus a SHA-256 of the canonicalised
+  // request body. Both NULL on every existing row + on every gift
+  // created without the header — current behaviour is preserved
+  // for callers that opt out.
+  //
+  //   idempotencyKey         — the client-supplied opaque string
+  //                            (max 255 chars enforced at service
+  //                            layer). Compound unique with
+  //                            senderId so each sender has an
+  //                            independent key namespace.
+  //   idempotencyRequestHash — hex SHA-256 of the canonicalised
+  //                            request body. Re-submitting the
+  //                            same key with a DIFFERENT body
+  //                            returns 409 idempotency_key_reused
+  //                            instead of silently shadowing the
+  //                            first request.
+  //
+  // PostgreSQL allows multiple NULLs in a unique-constrained
+  // column, so legacy gifts (key=NULL) are not constrained — the
+  // unique applies only when key is non-NULL.
+  idempotencyKey         String?
+  idempotencyRequestHash String?
+
   sender   User       @relation("SenderGifts", fields: [senderId], references: [id], onDelete: Cascade)
   receiver User       @relation("ReceiverGifts", fields: [receiverId], references: [id], onDelete: Cascade)
   address  Address?   @relation("GiftDeliveryAddress", fields: [addressId], references: [id], onDelete: SetNull)
@@ -363,6 +387,12 @@ model Gift {
   @@index([storeId, status])
   // Used by the 24h auto-default sweep (find pending gifts past their TTL).
   @@index([status, createdAt])
+  // Week 2 idempotency — the compound is the dedup primitive. The
+  // unique constraint is what makes the concurrent-retry case
+  // race-safe: two simultaneous POSTs with the same key both pass
+  // the pre-check, both attempt create, the second receives a
+  // Prisma P2002 which the service catches + refetches.
+  @@unique([senderId, idempotencyKey])
 }
 
 // Failed gift-send attempts. Created when a sender tries to send a gift

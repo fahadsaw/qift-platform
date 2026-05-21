@@ -103,9 +103,17 @@ export class PaymentsService {
     // the only thing we need here is `id` for the linking update
     // below. Narrowing to `{ id: string }` keeps the lint clean
     // without pulling in the full Gift type from another module.
+    //
+    // Week 2 — GiftsService.create now returns { gift, replayed }
+    // because POST /gifts supports the Idempotency-Key header.
+    // PaymentsService is an internal caller that doesn't supply a
+    // key (every Order → Gift transition is the operator's intent
+    // and the Order row itself is the dedup primitive at that
+    // layer), so we get { replayed: false } here and only need
+    // the gift's id.
     let gift: { id: string };
     try {
-      gift = await this.gifts.create(
+      const created = await this.gifts.create(
         {
           receiverUsername: order.receiverUsername,
           productName: order.productName,
@@ -136,7 +144,10 @@ export class PaymentsService {
           occasionId: order.occasionId ?? undefined,
         },
         viewerUserId,
+        // No Idempotency-Key for the internal Order → Gift path.
+        null,
       );
+      gift = created.gift;
     } catch (err) {
       // Gift creation failed AFTER the gateway charged — record the
       // failure on the order so the user (and ops) can investigate.
