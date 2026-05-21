@@ -16,7 +16,8 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- jest mocks are intentionally `any`-typed inside test files; the production code is fully typed. */
 
 import { Test, type TestingModule } from '@nestjs/testing';
-import { ForbiddenException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { GiftsService } from './gifts.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -26,6 +27,7 @@ type MockPrisma = {
   user: { findUnique: jest.Mock; findFirst: jest.Mock };
   gift: {
     create: jest.Mock;
+    findFirst: jest.Mock;
     findUnique: jest.Mock;
     update: jest.Mock;
     updateMany: jest.Mock;
@@ -47,6 +49,11 @@ function createPrismaMock(): MockPrisma {
     user: { findUnique: jest.fn(), findFirst: jest.fn() },
     gift: {
       create: jest.fn(),
+      // Week 2 — idempotency pre-check uses findFirst to look up an
+      // existing (senderId, idempotencyKey) gift. Default returns
+      // null so all existing tests (which pass no idempotency key)
+      // pass through the new code path unchanged.
+      findFirst: jest.fn().mockResolvedValue(null),
       findUnique: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
@@ -867,5 +874,459 @@ describe('GiftsService — F3 block check on gift creation', () => {
     ).rejects.toThrow('Receiver not found');
 
     expect(blocks.isBlockedEitherWay).not.toHaveBeenCalled();
+  });
+});
+
+// =====================================================================
+// Week 2 — Idempotency on POST /gifts.
+//
+// CONTRACTS PINNED BY THESE TESTS
+//   1. No header → both new columns NULL, returns { replayed: false }
+//      (legacy contract preserved verbatim).
+//   2. First call with a key → row persists idempotencyKey +
+//      idempotencyRequestHash, returns { replayed: false }.
+//   3. Retry with same (senderId, key, payload) → returns the
+//      original gift with replayed: true; no duplicate insert.
+//   4. Retry with same (senderId, key) but DIFFERENT payload →
+//      409 ConflictException with code 'idempotency_key_reused'.
+//   5. Different senders, same key value → independent (each sender
+//      has its own key namespace).
+//   6. Concurrent retry: prisma.gift.create rejects with P2002 →
+//      service catches, refetches by (senderId, key), returns the
+//      winner's gift with replayed: true (or 409 if hashes diverge).
+//   7. Key > 255 chars → 400 BadRequestException
+//      'invalid_idempotency_key', no DB hit.
+//   8. Empty / whitespace-only key string → treated as no key
+//      (opt-out path).
+//   9. Hash function is canonical: same inputs in different order →
+//      same hash; differing inputs → different hash.
+// =====================================================================
+
+describe('GiftsService — F3-adjacent: Week 2 idempotency on create', () => {
+  let service: GiftsService;
+  let prisma: MockPrisma;
+  let notifications: { trigger: jest.Mock };
+
+  beforeEach(async () => {
+    prisma = createPrismaMock();
+    notifications = { trigger: jest.fn().mockResolvedValue(undefined) };
+
+    // Default happy-path mocks so a fresh create() reaches the
+    // prisma.gift.create site without tripping earlier validations.
+    prisma.user.findUnique.mockResolvedValue({
+      qiftUsername: 'sender_handle',
+    });
+    prisma.user.findFirst.mockResolvedValue({ id: RECEIVER_ID });
+    prisma.address.findFirst.mockResolvedValue({ id: 'addr_1' });
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        GiftsService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: NotificationsService, useValue: notifications },
+        {
+          provide: BlocksService,
+          useValue: {
+            isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+          },
+        },
+      ],
+    }).compile();
+    service = module.get<GiftsService>(GiftsService);
+  });
+
+  function makeBody(
+    overrides: Partial<{
+      receiverUsername: string;
+      productName: string;
+      storeName: string;
+      productId: string;
+      storeId: string;
+      messageText: string;
+      isAnonymous: boolean;
+      isSurprise: boolean;
+    }> = {},
+  ) {
+    return {
+      receiverUsername: 'receiver_handle',
+      productName: 'باقة جوري',
+      storeName: 'باقات الرياض',
+      ...overrides,
+    };
+  }
+
+  function makeCreatedGiftRow(extra: Record<string, unknown> = {}) {
+    return {
+      id: 'gift_1',
+      senderId: SENDER_ID,
+      receiverId: RECEIVER_ID,
+      productName: 'باقة جوري',
+      storeName: 'باقات الرياض',
+      productId: null,
+      storeId: null,
+      status: 'pending_address',
+      isAnonymous: false,
+      isSurprise: false,
+      idempotencyKey: null,
+      idempotencyRequestHash: null,
+      sender: {
+        id: SENDER_ID,
+        qiftUsername: 'sender_handle',
+        fullName: null,
+      },
+      receiver: {
+        id: RECEIVER_ID,
+        qiftUsername: 'receiver_handle',
+        fullName: null,
+      },
+      address: null,
+      ...extra,
+    };
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('opt-out: no Idempotency-Key', () => {
+    it('returns { replayed: false } and persists NULL key + hash', async () => {
+      prisma.gift.create.mockResolvedValue(makeCreatedGiftRow());
+
+      const result = await service.create(makeBody(), SENDER_ID);
+
+      expect(result.replayed).toBe(false);
+      expect(result.gift).toBeDefined();
+      // Pre-check is skipped — no findFirst call for idempotency.
+      expect(prisma.gift.findFirst).not.toHaveBeenCalled();
+      // Persisted data has NULL for both columns (compound unique
+      // permits multiple NULLs).
+      const createArg = prisma.gift.create.mock.calls[0][0] as {
+        data: {
+          idempotencyKey: string | null;
+          idempotencyRequestHash: string | null;
+        };
+      };
+      expect(createArg.data.idempotencyKey).toBeNull();
+      expect(createArg.data.idempotencyRequestHash).toBeNull();
+    });
+
+    it('empty-string key is treated as no key (opt-out)', async () => {
+      prisma.gift.create.mockResolvedValue(makeCreatedGiftRow());
+
+      await service.create(makeBody(), SENDER_ID, '   ');
+
+      expect(prisma.gift.findFirst).not.toHaveBeenCalled();
+      const createArg = prisma.gift.create.mock.calls[0][0] as {
+        data: { idempotencyKey: string | null };
+      };
+      expect(createArg.data.idempotencyKey).toBeNull();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('first call with a key persists key + hash', () => {
+    it('persists the trimmed key and a SHA-256 request hash; returns replayed=false', async () => {
+      prisma.gift.create.mockResolvedValue(
+        makeCreatedGiftRow({
+          idempotencyKey: 'key-abc',
+          idempotencyRequestHash: 'expected-hash-stub',
+        }),
+      );
+
+      const result = await service.create(makeBody(), SENDER_ID, '  key-abc  ');
+
+      expect(result.replayed).toBe(false);
+      const createArg = prisma.gift.create.mock.calls[0][0] as {
+        data: { idempotencyKey: string; idempotencyRequestHash: string };
+      };
+      expect(createArg.data.idempotencyKey).toBe('key-abc');
+      // SHA-256 hex is 64 lowercase chars.
+      expect(createArg.data.idempotencyRequestHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('pre-check runs against (senderId, key)', async () => {
+      prisma.gift.create.mockResolvedValue(makeCreatedGiftRow());
+
+      await service.create(makeBody(), SENDER_ID, 'key-1');
+
+      expect(prisma.gift.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { senderId: SENDER_ID, idempotencyKey: 'key-1' },
+        }),
+      );
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('replay: same (sender, key, payload) → original gift', () => {
+    it('returns the existing gift with replayed=true; does NOT call prisma.gift.create', async () => {
+      // We need the stored hash to MATCH what computeGiftRequestHash
+      // will produce for the same body. Strategy: do one create call
+      // first to capture the hash the service writes; then use that
+      // exact hash on a second findFirst-returns-existing setup.
+      prisma.gift.create.mockResolvedValueOnce(
+        makeCreatedGiftRow({
+          idempotencyKey: 'key-replay',
+          idempotencyRequestHash: 'will-be-replaced',
+        }),
+      );
+      await service.create(makeBody(), SENDER_ID, 'key-replay');
+      const writtenHash = (
+        prisma.gift.create.mock.calls[0][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+
+      // Second call: pre-check finds an existing row with the same
+      // hash. Service returns it with replayed=true.
+      prisma.gift.findFirst.mockResolvedValueOnce(
+        makeCreatedGiftRow({
+          idempotencyKey: 'key-replay',
+          idempotencyRequestHash: writtenHash,
+        }),
+      );
+      const second = await service.create(makeBody(), SENDER_ID, 'key-replay');
+
+      expect(second.replayed).toBe(true);
+      // prisma.gift.create called only ONCE total (during the first
+      // setup call above). The replay call must NOT hit create.
+      expect(prisma.gift.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('hash mismatch: same key, DIFFERENT payload → 409', () => {
+    it('throws ConflictException with code idempotency_key_reused', async () => {
+      // findFirst returns a row with a hash that won't match the
+      // new body's canonical hash. Persistent (not once-only) so
+      // both .rejects assertions below re-trigger the same pre-
+      // check path.
+      prisma.gift.findFirst.mockResolvedValue(
+        makeCreatedGiftRow({
+          idempotencyKey: 'key-conflict',
+          idempotencyRequestHash:
+            '0000000000000000000000000000000000000000000000000000000000000000',
+        }),
+      );
+
+      await expect(
+        service.create(
+          makeBody({ productName: 'totally different product' }),
+          SENDER_ID,
+          'key-conflict',
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        service.create(
+          makeBody({ productName: 'totally different product' }),
+          SENDER_ID,
+          'key-conflict',
+        ),
+      ).rejects.toThrow('Idempotency-Key reused');
+
+      // gift.create never called — pre-check short-circuited.
+      expect(prisma.gift.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('namespace isolation: same key value, different senders', () => {
+    it('does NOT collide; the pre-check filters by senderId', async () => {
+      // Sender A creates with key-shared.
+      prisma.gift.create.mockResolvedValueOnce(
+        makeCreatedGiftRow({
+          id: 'gift_a',
+          senderId: 'user_A',
+          idempotencyKey: 'key-shared',
+        }),
+      );
+      // Sender B does NOT see sender A's gift in the pre-check.
+      // findFirst returns null because where: {senderId: 'user_B',
+      // idempotencyKey: 'key-shared'} does not match A's row.
+      // (Default mock for findFirst already returns null.)
+      prisma.gift.create.mockResolvedValueOnce(
+        makeCreatedGiftRow({
+          id: 'gift_b',
+          senderId: 'user_B',
+          idempotencyKey: 'key-shared',
+        }),
+      );
+
+      await service.create(makeBody(), 'user_A', 'key-shared');
+      await service.create(makeBody(), 'user_B', 'key-shared');
+
+      // Both senders triggered a real create. No replay.
+      expect(prisma.gift.create).toHaveBeenCalledTimes(2);
+      // Each findFirst pre-check used the sender's own ID.
+      const findCalls = prisma.gift.findFirst.mock.calls.map(
+        (c) => (c[0] as { where: { senderId: string } }).where.senderId,
+      );
+      expect(findCalls).toEqual(['user_A', 'user_B']);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('concurrent retry race: prisma.gift.create rejects with P2002', () => {
+    // Three cases:
+    //   1. Hash matches winner    → replayed=true returned
+    //   2. Hash mismatches winner → 409 idempotency_key_reused
+    //   3. Non-P2002 Prisma error → propagated as-is
+
+    it('hash match path: replayed=true returned', async () => {
+      // Phase 1: capture canonical hash for makeBody() via a normal
+      // create call.
+      prisma.gift.create.mockResolvedValueOnce(
+        makeCreatedGiftRow({ idempotencyKey: 'key-warmup' }),
+      );
+      await service.create(makeBody(), SENDER_ID, 'key-warmup');
+      const canonicalHash = (
+        prisma.gift.create.mock.calls[0][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+
+      // Phase 2: race scenario. Pre-check sees nothing, create
+      // rejects with P2002, refetch returns winner with matching
+      // hash.
+      const p2002 = new Prisma.PrismaClientKnownRequestError(
+        'Unique constraint failed',
+        { code: 'P2002', clientVersion: 'test' },
+      );
+      prisma.gift.findFirst.mockResolvedValueOnce(null);
+      prisma.gift.create.mockRejectedValueOnce(p2002);
+      prisma.gift.findFirst.mockResolvedValueOnce(
+        makeCreatedGiftRow({
+          id: 'gift_winner',
+          idempotencyKey: 'key-race',
+          idempotencyRequestHash: canonicalHash,
+        }),
+      );
+
+      const result = await service.create(makeBody(), SENDER_ID, 'key-race');
+
+      expect(result.replayed).toBe(true);
+      expect((result.gift as { id: string }).id).toBe('gift_winner');
+    });
+
+    it('hash mismatch path on race winner: throws 409', async () => {
+      const p2002 = new Prisma.PrismaClientKnownRequestError(
+        'Unique constraint failed',
+        { code: 'P2002', clientVersion: 'test' },
+      );
+      prisma.gift.findFirst.mockResolvedValueOnce(null);
+      prisma.gift.create.mockRejectedValueOnce(p2002);
+      // The winner has a DIFFERENT canonical hash (e.g., it was
+      // submitted with a different payload).
+      prisma.gift.findFirst.mockResolvedValueOnce(
+        makeCreatedGiftRow({
+          idempotencyKey: 'key-race-conflict',
+          idempotencyRequestHash:
+            '0000000000000000000000000000000000000000000000000000000000000000',
+        }),
+      );
+
+      await expect(
+        service.create(makeBody(), SENDER_ID, 'key-race-conflict'),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('non-P2002 Prisma errors are propagated as-is', async () => {
+      // A different Prisma error code must NOT be misinterpreted
+      // as an idempotency race. P2025 (RecordNotFound) is a typical
+      // example.
+      const p2025 = new Prisma.PrismaClientKnownRequestError(
+        'Record not found',
+        { code: 'P2025', clientVersion: 'test' },
+      );
+      prisma.gift.findFirst.mockResolvedValueOnce(null);
+      prisma.gift.create.mockRejectedValueOnce(p2025);
+
+      await expect(
+        service.create(makeBody(), SENDER_ID, 'key-other-error'),
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('key validation', () => {
+    it('throws BadRequest(invalid_idempotency_key) for keys > 255 chars', async () => {
+      const tooLong = 'x'.repeat(256);
+
+      await expect(
+        service.create(makeBody(), SENDER_ID, tooLong),
+      ).rejects.toThrow('invalid_idempotency_key');
+
+      expect(prisma.gift.findFirst).not.toHaveBeenCalled();
+      expect(prisma.gift.create).not.toHaveBeenCalled();
+    });
+
+    it('255-char key is accepted (boundary)', async () => {
+      const exactly255 = 'x'.repeat(255);
+      prisma.gift.create.mockResolvedValue(
+        makeCreatedGiftRow({ idempotencyKey: exactly255 }),
+      );
+
+      await expect(
+        service.create(makeBody(), SENDER_ID, exactly255),
+      ).resolves.toBeDefined();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('hash function is canonical (same payload → same hash)', () => {
+    it('hash is stable across input-property ordering', async () => {
+      // Two distinct objects with the same canonical content should
+      // produce the same hash regardless of key declaration order.
+      prisma.gift.create.mockResolvedValueOnce(makeCreatedGiftRow());
+      prisma.gift.create.mockResolvedValueOnce(makeCreatedGiftRow());
+
+      const body1 = {
+        receiverUsername: 'r',
+        productName: 'p',
+        storeName: 's',
+        isAnonymous: true,
+        isSurprise: false,
+      };
+      const body2 = {
+        // Same content, different key order, equivalent values.
+        isSurprise: false,
+        storeName: 's',
+        isAnonymous: true,
+        productName: 'p',
+        receiverUsername: 'r',
+      };
+
+      await service.create(body1, 'sender_h1', 'k1');
+      await service.create(body2, 'sender_h2', 'k2');
+
+      const hash1 = (
+        prisma.gift.create.mock.calls[0][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+      const hash2 = (
+        prisma.gift.create.mock.calls[1][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+      expect(hash1).toBe(hash2);
+    });
+
+    it('hash differs when payload differs', async () => {
+      prisma.gift.create.mockResolvedValueOnce(makeCreatedGiftRow());
+      prisma.gift.create.mockResolvedValueOnce(makeCreatedGiftRow());
+
+      await service.create(makeBody({ productName: 'A' }), SENDER_ID, 'k-a');
+      await service.create(makeBody({ productName: 'B' }), SENDER_ID, 'k-b');
+
+      const hashA = (
+        prisma.gift.create.mock.calls[0][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+      const hashB = (
+        prisma.gift.create.mock.calls[1][0] as {
+          data: { idempotencyRequestHash: string };
+        }
+      ).data.idempotencyRequestHash;
+      expect(hashA).not.toBe(hashB);
+    });
   });
 });
