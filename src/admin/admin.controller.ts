@@ -39,8 +39,17 @@ export class AdminController {
   // ── Users ────────────────────────────────────────────────────────
 
   @Get('users')
-  listUsers(@Query('q') q?: string) {
-    return this.admin.listUsers(q);
+  listUsers(
+    @Query('q') q?: string,
+    // `?includeDisabled=1` surfaces soft-deleted rows so the
+    // operator can find restore candidates. Default remains
+    // "active only" — the regular browse view stays free of
+    // disabled noise.
+    @Query('includeDisabled') includeDisabled?: string,
+  ) {
+    return this.admin.listUsers(q, {
+      includeDisabled: includeDisabled === '1' || includeDisabled === 'true',
+    });
   }
 
   // Week 2 hardening — state-changing role assignment requires the
@@ -57,6 +66,37 @@ export class AdminController {
     @Req() req: AuthedRequest,
   ) {
     return this.admin.setUserRole(req.user.userId, id, body?.role ?? '');
+  }
+
+  // Soft-delete (disable) a user. Sets User.deletedAt = now() so
+  // the row is filtered from search, login, public profile, and
+  // the default admin browse list — but the record is preserved
+  // for restore + regulatory audit.
+  //
+  // Permission: `user.suspend` (super_admin + trust_safety).
+  // Self-disable is rejected at the service layer (another admin
+  // must do it — same posture as setUserRole self-demote).
+  //
+  // Audit trail: every disable writes an AuditLog row with the
+  // actor + target ids and the priorRole at disable time.
+  @Patch('users/:id/disable')
+  @RequireOpsPermission('user.suspend')
+  disableUser(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.admin.softDeleteUser(req.user.userId, id);
+  }
+
+  // Restore a soft-deleted user. Clears `deletedAt` so the row
+  // becomes active again with every other column (phone, email,
+  // role, etc.) preserved exactly as it was at disable time.
+  //
+  // Permission: `user.restore` (new — super_admin + trust_safety).
+  // Restoring an already-active user is rejected as
+  // `user_not_disabled` rather than silently succeeding so a
+  // misclick doesn't look like a successful operation.
+  @Patch('users/:id/restore')
+  @RequireOpsPermission('user.restore')
+  restoreUser(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.admin.restoreUser(req.user.userId, id);
   }
 
   // ── Stores ───────────────────────────────────────────────────────

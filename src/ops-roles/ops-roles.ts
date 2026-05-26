@@ -95,6 +95,7 @@ export const OPS_PERMISSIONS = [
   'user.read',
   'user.set_role',
   'user.suspend',
+  'user.restore',
   'user.assign_ops_role',
   // Finance.
   'finance.read_payouts',
@@ -148,6 +149,7 @@ const PERMISSIONS_BY_ROLE: Record<
   trust_safety: [
     'user.read',
     'user.suspend',
+    'user.restore',
     'report.read',
     'report.resolve',
     'store.set_status',
@@ -199,6 +201,7 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'user.read',
   'user.set_role',
   'user.suspend',
+  'user.restore',
   'user.assign_ops_role',
   'finance.read_payouts',
   'finance.record_payout_event',

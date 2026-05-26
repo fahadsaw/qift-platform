@@ -345,12 +345,70 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    // Pre-normalize phone self-heal.
+    //
+    // normalizePhone() was introduced after the very first wave of
+    // closed-beta accounts (registrations 2026-05-05..05-07). Those
+    // rows persist `User.phone` in whatever shape the frontend sent
+    // — typically `0501234567` or `+966 50 123 4567` — instead of
+    // the canonical `+966501234567` every later row uses. The
+    // exact-match phone-search filter (`User.phone = e164`) cannot
+    // see those rows, so legitimate searchers come up empty.
+    //
+    // Repair on login is the safest channel: only active users who
+    // can already authenticate trigger the rewrite, no batch
+    // migration touches dormant rows, and the unique-constraint on
+    // `phone` makes the write self-validating (a P2002 collision
+    // means a second account already holds the canonical form —
+    // we leave the malformed row in place and surface that case
+    // to an admin via the existing AdminGuard / search surface).
+    //
+    // The repair is silent — no observable change to the login
+    // response shape — and idempotent (subsequent logins are no-ops
+    // because the stored value is already canonical).
+    const repaired = await this.repairUserPhoneIfNeeded(
+      user.id,
+      user.phone,
+    );
     const accessToken = await this.signToken(user.id, user.qiftUsername);
 
     return {
       accessToken,
-      user: this.sanitize(user),
+      user: this.sanitize({ ...user, phone: repaired ?? user.phone }),
     };
+  }
+
+  // Self-heal pre-normalize phones. Returns the repaired E.164 when
+  // a rewrite happened, or null otherwise (already canonical OR
+  // a collision blocked the update).
+  private async repairUserPhoneIfNeeded(
+    userId: string,
+    currentPhone: string,
+  ): Promise<string | null> {
+    if (!currentPhone) return null;
+    const canonical = normalizePhone(currentPhone);
+    // normalizePhone returns null when the input isn't coercible
+    // to a valid E.164. Don't try to "fix" rows that aren't
+    // recognisable — surface them via admin tooling instead.
+    if (!canonical) return null;
+    // Already canonical — most rows take this branch.
+    if (canonical === currentPhone) return null;
+    try {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { phone: canonical },
+      });
+      return canonical;
+    } catch (err) {
+      // P2002 = unique constraint violation. A different account
+      // already holds the canonical form — leaving this row
+      // alone is the safe choice; an admin investigation can
+      // reconcile the duplicate.
+      if ((err as { code?: string }).code === 'P2002') return null;
+      // Anything else is unexpected; don't fail login over an
+      // optional repair.
+      return null;
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────
