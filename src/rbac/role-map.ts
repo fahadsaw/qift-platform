@@ -132,6 +132,13 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     'admin.access',
     'user.read',
     'user.suspend',
+    // user.restore mirrors the user.suspend grant set — the
+    // operator who can disable should be able to restore. Pre-
+    // existing gap from the backend/identity-and-admin-controls
+    // commit C2 (the permission was added to ops-roles.ts but not
+    // mirrored here, where OpsRoleGuard's flag-ON path actually
+    // reads). Fixed alongside the user.purge addition below.
+    'user.restore',
     'report.read',
     'report.resolve',
     'store.set_status',

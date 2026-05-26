@@ -63,6 +63,7 @@ export const ADMIN_PERMISSIONS = [
   'user.set_role',
   'user.suspend',
   'user.restore',
+  'user.purge',
   'user.assign_ops_role',
 
   'diagnostics.read',

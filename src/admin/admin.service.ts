@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -244,13 +245,21 @@ export class AdminService {
   ): Promise<AdminUserRow> {
     const target = await this.prisma.user.findUnique({
       where: { id: targetUserId },
-      select: { id: true, deletedAt: true },
+      select: { id: true, deletedAt: true, purgedAt: true },
     });
     if (!target) {
       throw new NotFoundException('User not found');
     }
     if (!target.deletedAt) {
       throw new BadRequestException('user_not_disabled');
+    }
+    // Purged users cannot be restored — PII has been anonymised
+    // and identity-PII tables have been hard-deleted in the same
+    // transaction. Surface this loudly so a misclick on a
+    // "Restore" button doesn't suggest the row is in a salvageable
+    // state.
+    if (target.purgedAt) {
+      throw new BadRequestException('user_purged_irreversible');
     }
     const updated = await this.prisma.user.update({
       where: { id: targetUserId },
@@ -265,6 +274,252 @@ export class AdminService {
       targetId: targetUserId,
     });
     return updated;
+  }
+
+  // Permanently delete (purge) a user account.
+  //
+  // Distinct from softDeleteUser — purge is the GDPR-style "right
+  // to be forgotten with regulatory preservation" pattern:
+  //
+  //   1. Identity-PII columns on the User row are anonymised:
+  //      - phone        → '__purged__:<id>'   (sentinel; releases @unique)
+  //      - email        → null                (releases @unique; nullable)
+  //      - qiftUsername → '__purged__:<id>'   (sentinel; releases @unique)
+  //      - fullName, bio, avatarUrl, defaultAddress, passwordHash → null
+  //      - preferred* / favorite* / allergies / giftNote → null
+  //      - preferencesVisibility → null
+  //      - phoneVerifiedAt / emailVerifiedAt → null
+  //      - allowPhoneDiscovery / allowEmailDiscovery → false
+  //      - profileVisibility → 'private'
+  //      - deletedAt + purgedAt → now()
+  //
+  //   2. Identity-PII tables (where every row IS personal data with
+  //      no regulatory retention value) are HARD-DELETED in the
+  //      same transaction:
+  //          Address, SocialAccount, PushSubscription,
+  //          NotificationPreferences, Wish, Post,
+  //          GiftPostAppreciation, Follow (both directions),
+  //          Block (both directions), Notification (received),
+  //          OccasionReminder, GiftAttempt (both directions).
+  //
+  //   3. Transactional / financial / audit tables (regulatory
+  //      retention trumps PII removal) are PRESERVED with the FK
+  //      still pointing at the tombstone:
+  //          Gift, Order, GiftSession, MerchantOrder,
+  //          RefundRequest, GiftPost, Report, Invite,
+  //          Occasion (owned + related), AuditLog.
+  //
+  // PRE-PURGE GUARDS (refused before the transaction starts):
+  //
+  //   - Viewer = target            → 403 cannot_purge_self
+  //   - Target is admin            → 403 cannot_purge_admin
+  //   - Target owns ≥ 1 store      → 409 user_owns_stores
+  //   - Target has any in-flight   → 409 user_has_inflight_gifts
+  //     gift (sender OR receiver,
+  //     status not in delivered /
+  //     cancelled / refunded)
+  //   - Confirmation mismatch       → 400 confirmation_mismatch
+  //     (typed value ≠ qiftUsername)
+  //
+  // RE-REGISTRATION AFTER PURGE
+  //   - Same phone           → /auth/register findFirst({ phone }) returns null
+  //                            (tombstone holds the sentinel) → register succeeds
+  //   - Same email           → same (tombstone holds null)
+  //   - Same qiftUsername    → same (tombstone holds sentinel)
+  //   - Same Snap handle     → SocialAccount row was hard-deleted → linking succeeds
+  //
+  // AUDIT TRAIL
+  //   AuditLog row `admin.user.purge` is written. Metadata includes
+  //   `{ priorRole }` ONLY — never the prior phone/email/username
+  //   strings (those are exactly the PII the purge releases; storing
+  //   them in audit metadata would defeat the operation). The
+  //   userId + actorId pairing + timestamp are sufficient for the
+  //   regulator's "who purged whom and when" question.
+  async purgeUser(
+    viewerUserId: string,
+    targetUserId: string,
+    confirmUsername: string,
+  ): Promise<{ id: string; purgedAt: Date }> {
+    if (viewerUserId === targetUserId) {
+      throw new ForbiddenException('cannot_purge_self');
+    }
+    const target = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: {
+        id: true,
+        qiftUsername: true,
+        role: true,
+        deletedAt: true,
+        purgedAt: true,
+        _count: { select: { ownedStores: true } },
+      },
+    });
+    if (!target) {
+      throw new NotFoundException('User not found');
+    }
+    if (target.purgedAt) {
+      // Idempotent — second purge on the same tombstone is a no-op.
+      // Return the existing purgedAt so the caller still gets a
+      // success-shaped response.
+      return { id: target.id, purgedAt: target.purgedAt };
+    }
+    if (target.role === 'admin') {
+      throw new ForbiddenException('cannot_purge_admin');
+    }
+    if (target._count.ownedStores > 0) {
+      throw new ConflictException('user_owns_stores');
+    }
+    // Type the trimmed confirmation against the literal stored
+    // username. Case-sensitive (qiftUsername is case-sensitive at
+    // the DB layer — see schema header comments).
+    if ((confirmUsername ?? '').trim() !== target.qiftUsername) {
+      throw new BadRequestException('confirmation_mismatch');
+    }
+    // In-flight gift gate. A gift is "in flight" when its status is
+    // anything other than delivered / cancelled / refunded — i.e.
+    // an admin would lose track of an active fulfilment by
+    // purging the related user. We check sender AND receiver
+    // sides because the user could be either.
+    const TERMINAL_GIFT_STATUSES = ['delivered', 'cancelled', 'refunded'];
+    const inflight = await this.prisma.gift.count({
+      where: {
+        OR: [{ senderId: targetUserId }, { receiverId: targetUserId }],
+        status: { notIn: TERMINAL_GIFT_STATUSES },
+      },
+    });
+    if (inflight > 0) {
+      throw new ConflictException('user_has_inflight_gifts');
+    }
+
+    const now = new Date();
+    // Sentinel value for the @unique columns. Includes the user id
+    // so multiple purges produce distinct sentinels — no
+    // collisions in the unique constraint. The `__purged__:` prefix
+    // makes the row visibly anonymised in any tooling that opens
+    // the DB directly.
+    const sentinel = `__purged__:${targetUserId}`;
+
+    const priorRole = target.role;
+
+    // Single transaction. Identity-PII delete + tombstone update
+    // must commit together — a half-applied purge would leave the
+    // row searchable AND have orphaned PII rows. The deletes are
+    // ordered narrowest → widest so a DB error mid-way still
+    // produces a meaningful partial-success error in the audit
+    // log (we DON'T audit on rollback; the transaction either
+    // commits everything or nothing).
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Hard-delete identity-PII tables. Order doesn't matter
+      // for correctness (every relation here is independently
+      // keyed) but we group similar concerns together for
+      // readability.
+
+      // Direct user-owned content.
+      await tx.address.deleteMany({ where: { userId: targetUserId } });
+      await tx.socialAccount.deleteMany({ where: { userId: targetUserId } });
+      await tx.pushSubscription.deleteMany({ where: { userId: targetUserId } });
+      // NotificationPreferences is one-to-one with User; deleteMany
+      // is safe even when the row is absent.
+      await tx.notificationPreferences.deleteMany({
+        where: { userId: targetUserId },
+      });
+      await tx.wish.deleteMany({ where: { userId: targetUserId } });
+      await tx.post.deleteMany({ where: { userId: targetUserId } });
+      await tx.giftPostAppreciation.deleteMany({
+        where: { userId: targetUserId },
+      });
+
+      // Social graph (releases follow + block PII).
+      await tx.follow.deleteMany({
+        where: {
+          OR: [{ followerId: targetUserId }, { followingId: targetUserId }],
+        },
+      });
+      await tx.block.deleteMany({
+        where: {
+          OR: [{ blockerId: targetUserId }, { blockedId: targetUserId }],
+        },
+      });
+
+      // Notification + reminder PII (inbox + future reminder
+      // schedule belonging to the user).
+      await tx.notification.deleteMany({ where: { userId: targetUserId } });
+      await tx.occasionReminder.deleteMany({
+        where: { userId: targetUserId },
+      });
+
+      // GiftAttempt — pre-checkout failed-send PII. Both sides.
+      await tx.giftAttempt.deleteMany({
+        where: {
+          OR: [{ senderId: targetUserId }, { receiverId: targetUserId }],
+        },
+      });
+
+      // OpsRoleAssignment — clear any ops grants on this user.
+      // (Refused above if role === 'admin', so this should be a
+      // no-op for the typical path, but a misconfigured ops grant
+      // on a non-admin user is still cleared here.)
+      await tx.opsRoleAssignment.deleteMany({
+        where: { userId: targetUserId },
+      });
+
+      // 2. Anonymise the User row. Sentinel values on @unique
+      // columns release identity for re-registration; every other
+      // PII column is nulled.
+      await tx.user.update({
+        where: { id: targetUserId },
+        data: {
+          phone: sentinel,
+          email: null,
+          qiftUsername: sentinel,
+          passwordHash: null,
+          fullName: null,
+          bio: null,
+          avatarUrl: null,
+          defaultAddress: null,
+          phoneVerifiedAt: null,
+          emailVerifiedAt: null,
+          allowPhoneDiscovery: false,
+          allowEmailDiscovery: false,
+          profileVisibility: 'private',
+          // Preference PII.
+          preferredClothingSize: null,
+          preferredShoeSize: null,
+          preferredRingSize: null,
+          preferredPerfume: null,
+          favoriteColors: null,
+          favoriteCategories: null,
+          favoriteBrands: null,
+          allergies: null,
+          giftNote: null,
+          preferencesVisibility: Prisma.JsonNull,
+          // Mark both sentinels. deletedAt makes every existing
+          // soft-delete filter exclude the row; purgedAt
+          // distinguishes from a normal disable.
+          deletedAt: now,
+          purgedAt: now,
+        },
+      });
+    });
+
+    // Audit-log row AFTER commit so we never log a phantom action
+    // that the transaction then rolled back.
+    this.recordAuditTODO({
+      actorUserId: viewerUserId,
+      actorType: 'admin',
+      action: 'admin.user.purge',
+      targetType: 'user',
+      targetId: targetUserId,
+      // Metadata is deliberately PII-free. priorRole is
+      // operationally useful (post-mortem: "did we just purge an
+      // admin's account?") and is not personal data. We do NOT
+      // include the prior phone / email / username — those are
+      // the exact values the purge releases; storing them in the
+      // audit log would defeat the operation.
+      metadata: { priorRole },
+    });
+
+    return { id: target.id, purgedAt: now };
   }
 
   // --- Stores ------------------------------------------------------
@@ -1447,6 +1702,13 @@ const ADMIN_USER_SELECT = {
   // when present so operators don't accidentally treat a disabled
   // row as active.
   deletedAt: true,
+  // Permanent-deletion timestamp. Non-null = purged — distinct
+  // from soft-delete (which is reversible). The frontend renders a
+  // permanent "Purged" chip and refuses the restore action when
+  // this is set. When non-null, every PII column on this row is
+  // already anonymised (phone + qiftUsername are sentinels;
+  // email + fullName are null).
+  purgedAt: true,
 } as const;
 
 const ADMIN_STORE_SELECT = {
