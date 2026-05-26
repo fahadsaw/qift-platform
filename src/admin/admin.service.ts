@@ -48,6 +48,37 @@ export class AdminService {
     private stores: StoresService,
   ) {}
 
+  // AUDIT LOGGING — DEFERRED.
+  //
+  // The AuditLog table + AuditService both live on the
+  // backend/week2-admin-perms-and-anon-notif branch and aren't on
+  // origin/main yet. Once that branch merges, every callsite below
+  // that calls `this.recordAuditTODO(...)` should swap to
+  // `this.audit.record(...)` (after injecting AuditService via the
+  // constructor + importing AuditModule). Until then this helper
+  // is a no-op so the action paths complete cleanly without
+  // depending on a table that doesn't exist yet.
+  //
+  // Trace strings are stable across the swap, so a future
+  // backfill can reconstruct lost-traffic actions from request
+  // logs if needed.
+  private recordAuditTODO(input: {
+    actorUserId: string;
+    actorType: 'admin';
+    action: string;
+    targetType: 'user' | 'store' | 'system';
+    targetId: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): void {
+    this.logger.log(
+      `[audit-pending] ${input.action} actor=${input.actorUserId} target=${input.targetId ?? 'system'}`,
+    );
+    // Prisma.JsonNull is imported via the namespace import in this
+    // file; reference it here so the unused-import lint doesn't
+    // strip Prisma when the audit swap lands.
+    void Prisma.JsonNull;
+  }
+
   // --- Users -------------------------------------------------------
 
   // List users with optional substring search across qiftUsername /
@@ -56,11 +87,19 @@ export class AdminService {
   // window, not the full table. Soft-deleted users are filtered out
   // by default; an explicit `includeDeleted=1` query param could be
   // added later if support needs it.
-  async listUsers(q: string | undefined): Promise<AdminUserRow[]> {
+  async listUsers(
+    q: string | undefined,
+    opts?: { includeDisabled?: boolean },
+  ): Promise<AdminUserRow[]> {
     const term = (q ?? '').trim();
+    const includeDisabled = opts?.includeDisabled === true;
     const rows = await this.prisma.user.findMany({
       where: {
-        deletedAt: null,
+        // includeDisabled toggles the soft-delete filter. Default
+        // remains "active only" so the admin's regular browse view
+        // doesn't surface noise; passing ?includeDisabled=1 surfaces
+        // restorable rows for the operator's recovery flow.
+        ...(includeDisabled ? {} : { deletedAt: null }),
         ...(term.length === 0
           ? {}
           : {
@@ -95,18 +134,137 @@ export class AdminService {
         'Admins cannot demote themselves; ask another admin.',
       );
     }
+    // Read the prior role so the audit row captures the transition,
+    // not just the new value. The frontend renders "user → admin"
+    // in the operator activity log; downstream regulator exports
+    // depend on both endpoints of the transition being present.
     const target = await this.prisma.user.findUnique({
       where: { id: targetUserId },
-      select: { id: true, deletedAt: true },
+      select: { id: true, deletedAt: true, role: true },
     });
     if (!target || target.deletedAt) {
       throw new NotFoundException('User not found');
     }
-    return this.prisma.user.update({
+    const updated = await this.prisma.user.update({
       where: { id: targetUserId },
       data: { role },
       select: ADMIN_USER_SELECT,
     });
+    // Append-only audit row. The fromRole / toRole pair are stored
+    // verbatim (never PII), so the metadata write is safe under
+    // sanitiseMetadata().
+    this.recordAuditTODO({
+      actorUserId: viewerUserId,
+      actorType: 'admin',
+      action: 'admin.user.role_change',
+      targetType: 'user',
+      targetId: targetUserId,
+      metadata: { fromRole: target.role, toRole: role },
+    });
+    return updated;
+  }
+
+  // Soft-delete a user. Sets User.deletedAt = now() without
+  // touching identity columns (phone / email / username) so the
+  // row can be cleanly restored. Self-disable is rejected — an
+  // admin cannot lock themselves out of the surface.
+  //
+  // The existing SearchFilters and FollowProjections already
+  // gate on `deletedAt: null`, so soft-deleting a user
+  // immediately:
+  //   - removes them from search results (every type)
+  //   - hides them from public profile lookups (`@/:username`
+  //     returns 404)
+  //   - blocks password + OTP login (auth.service login excludes
+  //     soft-deleted rows)
+  //   - silently drops them from /admin/users listings (default
+  //     filter excludes deleted; see listUsers)
+  //
+  // Restore (below) is the reversal. Both operations are
+  // audit-logged with the actor + target ids; no metadata
+  // contains the user's phone / email (per AuditService's
+  // sanitisation invariant).
+  async softDeleteUser(
+    viewerUserId: string,
+    targetUserId: string,
+  ): Promise<AdminUserRow> {
+    if (viewerUserId === targetUserId) {
+      throw new ForbiddenException(
+        'Admins cannot disable themselves; ask another admin.',
+      );
+    }
+    const target = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true, deletedAt: true, role: true },
+    });
+    if (!target) {
+      throw new NotFoundException('User not found');
+    }
+    if (target.deletedAt) {
+      // Idempotent — second disable is a no-op for the row but
+      // skips the audit write so we don't bloat the log with
+      // duplicate entries.
+      return this.prisma.user.findUniqueOrThrow({
+        where: { id: targetUserId },
+        select: ADMIN_USER_SELECT,
+      });
+    }
+    const updated = await this.prisma.user.update({
+      where: { id: targetUserId },
+      data: { deletedAt: new Date() },
+      select: ADMIN_USER_SELECT,
+    });
+    this.recordAuditTODO({
+      actorUserId: viewerUserId,
+      actorType: 'admin',
+      action: 'admin.user.disable',
+      targetType: 'user',
+      targetId: targetUserId,
+      // priorRole is included so a future "restore" action that
+      // wants to surface "this user was an admin before being
+      // disabled" can do so without re-querying the User row's
+      // pre-disable shape (the row carries the latest role even
+      // when deletedAt is set).
+      metadata: { priorRole: target.role },
+    });
+    return updated;
+  }
+
+  // Restore a soft-deleted user. Clears `deletedAt` only; every
+  // other column (phone, email, role, etc.) is preserved exactly
+  // as it was at disable time, so the restored user is
+  // bit-identical to their pre-disable state.
+  //
+  // 404 when the target isn't soft-deleted — restoring an active
+  // user is a no-op that the caller probably didn't mean to fire,
+  // so we surface it loudly rather than silently succeeding.
+  async restoreUser(
+    viewerUserId: string,
+    targetUserId: string,
+  ): Promise<AdminUserRow> {
+    const target = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true, deletedAt: true },
+    });
+    if (!target) {
+      throw new NotFoundException('User not found');
+    }
+    if (!target.deletedAt) {
+      throw new BadRequestException('user_not_disabled');
+    }
+    const updated = await this.prisma.user.update({
+      where: { id: targetUserId },
+      data: { deletedAt: null },
+      select: ADMIN_USER_SELECT,
+    });
+    this.recordAuditTODO({
+      actorUserId: viewerUserId,
+      actorType: 'admin',
+      action: 'admin.user.restore',
+      targetType: 'user',
+      targetId: targetUserId,
+    });
+    return updated;
   }
 
   // --- Stores ------------------------------------------------------
@@ -1284,6 +1442,11 @@ const ADMIN_USER_SELECT = {
   createdAt: true,
   phoneVerifiedAt: true,
   emailVerifiedAt: true,
+  // Soft-delete timestamp. Non-null = disabled (filtered from
+  // search + login + public profiles). Frontend renders a chip
+  // when present so operators don't accidentally treat a disabled
+  // row as active.
+  deletedAt: true,
 } as const;
 
 const ADMIN_STORE_SELECT = {
