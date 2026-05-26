@@ -148,6 +148,37 @@ model User {
   // they were involved in. Soft-deleting (setting this column) preserves
   // history; the API filters live users via `where deletedAt is null`.
   deletedAt   DateTime?
+  // Permanent-deletion sentinel.
+  //
+  // Distinct from `deletedAt` — purge is the GDPR-style "right to be
+  // forgotten with regulatory preservation" pattern:
+  //   - PII columns on this row are anonymized: `phone` and
+  //     `qiftUsername` are rewritten to deterministic sentinels
+  //     (`__purged__:<id>`) so the @unique constraints don't block
+  //     re-registration with the original values. `email` and every
+  //     other PII column are nulled.
+  //   - Identity-PII tables tied to this user (Address,
+  //     SocialAccount, PushSubscription, Wish, Post, Follow, Block,
+  //     Notification, NotificationPreferences, OccasionReminder,
+  //     GiftPostAppreciation, GiftAttempt) are hard-deleted in the
+  //     same transaction.
+  //   - Transactional / financial / audit tables (Gift, Order,
+  //     GiftSession, MerchantOrder, RefundRequest, GiftPost, Report,
+  //     Invite, AuditLog) are PRESERVED with the FK still pointing
+  //     at this tombstone — regulatory retention (ZATCA financial,
+  //     trust+safety record) trumps PII removal.
+  //
+  // `deletedAt` is also set at purge time, so every existing
+  // soft-delete filter (auth.service.login, /users/search, public
+  // profile, admin user list default) excludes purged rows for free.
+  // `purgedAt` distinguishes "soft-delete (reversible)" from
+  // "purge (irreversible)" — the admin UI uses this to render a
+  // permanent "Purged" chip and refuse the restore action.
+  //
+  // Only super_admin can write this column (gated by the
+  // `user.purge` ops-permission; trust_safety has user.suspend but
+  // NOT user.purge — too irreversible for that role).
+  purgedAt    DateTime?
 
   addresses             Address[]
   socialAccounts        SocialAccount[]

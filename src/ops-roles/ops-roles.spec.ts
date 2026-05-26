@@ -87,7 +87,7 @@ describe('isOpsRole', () => {
 });
 
 describe('OPS_PERMISSIONS', () => {
-  it('contains exactly the 17 expected identifiers', () => {
+  it('contains exactly the 19 expected identifiers', () => {
     expect([...OPS_PERMISSIONS]).toEqual([
       'store.review',
       'store.set_plan',
@@ -97,6 +97,8 @@ describe('OPS_PERMISSIONS', () => {
       'user.read',
       'user.set_role',
       'user.suspend',
+      'user.restore',
+      'user.purge',
       'user.assign_ops_role',
       'finance.read_payouts',
       'finance.record_payout_event',
@@ -204,6 +206,10 @@ describe('permissionsFor — single role behaviour (pre-refactor parity)', () =>
       new Set<OpsPermission>([
         'user.read',
         'user.suspend',
+        // user.restore mirrors user.suspend — the operator who
+        // can disable can also restore. user.purge is super_admin
+        // only, NOT trust_safety.
+        'user.restore',
         'report.read',
         'report.resolve',
         'store.set_status',

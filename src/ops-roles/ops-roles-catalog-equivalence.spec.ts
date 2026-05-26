@@ -119,12 +119,19 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       expect(OPS_ROLES.length).toBe(8);
     });
 
-    it('OPS_PERMISSIONS contains exactly 17 documented permission identifiers', () => {
+    it('OPS_PERMISSIONS contains exactly 19 documented permission identifiers', () => {
       // Same freeze-point reasoning as above. Adding a new
       // OpsPermission requires updating both ops-roles.ts
       // (PERMISSIONS_BY_ROLE + SUPER_ADMIN_ALL) and role-map.ts
       // (ROLE_PERMISSIONS entries for every relevant role).
-      expect(OPS_PERMISSIONS.length).toBe(17);
+      //
+      // Count history:
+      //   17 — original Week-2 catalog (PR B-3).
+      //   18 — `user.restore` added with the disable/restore endpoints
+      //        (backend/identity-and-admin-controls commit C2).
+      //   19 — `user.purge` added with the permanent-deletion
+      //        endpoint (this PR). Granted ONLY to super_admin.
+      expect(OPS_PERMISSIONS.length).toBe(19);
     });
   });
 });

@@ -555,6 +555,24 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         opsPermission: 'user.set_role',
       },
       {
+        method: 'disableUser',
+        path: 'users/:id/disable',
+        httpMethod: 'PATCH',
+        opsPermission: 'user.suspend',
+      },
+      {
+        method: 'restoreUser',
+        path: 'users/:id/restore',
+        httpMethod: 'PATCH',
+        opsPermission: 'user.restore',
+      },
+      {
+        method: 'purgeUser',
+        path: 'users/:id/purge',
+        httpMethod: 'PATCH',
+        opsPermission: 'user.purge',
+      },
+      {
         method: 'setStoreStatus',
         path: 'stores/:id/status',
         httpMethod: 'PATCH',
@@ -714,6 +732,15 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             // to mock against.
             'user.set_role': ['super_admin'],
             'user.suspend': ['trust_safety'],
+            // user.restore mirrors user.suspend grant set per the
+            // backend/identity-and-admin-controls commit C2 — the
+            // same operators who can disable can restore.
+            'user.restore': ['trust_safety'],
+            // user.purge is super_admin-ONLY. No subordinate ops
+            // role holds it; the only valid grantee in the test
+            // matrix is super_admin (covered by the dedicated
+            // super_admin chain test elsewhere in this spec).
+            'user.purge': ['super_admin'],
             'user.assign_ops_role': [],
             'finance.read_payouts': ['finance'],
             'finance.record_payout_event': ['finance'],

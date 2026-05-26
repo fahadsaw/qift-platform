@@ -96,6 +96,11 @@ export const OPS_PERMISSIONS = [
   'user.set_role',
   'user.suspend',
   'user.restore',
+  // Permanent account deletion. Granted ONLY to super_admin —
+  // trust_safety has suspend + restore but NOT purge. Purge
+  // anonymises PII on the User row + hard-deletes identity-PII
+  // tables; it's irreversible by design.
+  'user.purge',
   'user.assign_ops_role',
   // Finance.
   'finance.read_payouts',
@@ -202,6 +207,7 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'user.set_role',
   'user.suspend',
   'user.restore',
+  'user.purge',
   'user.assign_ops_role',
   'finance.read_payouts',
   'finance.record_payout_event',

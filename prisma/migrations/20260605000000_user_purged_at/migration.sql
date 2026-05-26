@@ -1,0 +1,18 @@
+-- Phase 1C — permanent account deletion / purge.
+--
+-- Adds a `purgedAt` sentinel column to User. The column is:
+--   - additive (nullable, no backfill required)
+--   - reversible (drop column on rollback)
+--   - distinct from `deletedAt` so the admin UI can render a
+--     permanent "Purged" chip and refuse the Restore action that
+--     soft-deleted rows still allow.
+--
+-- The purge OPERATION itself (anonymise PII on the User row,
+-- hard-delete identity-PII tables, preserve transactional + audit
+-- tables) is implemented in apps/api/src/admin/admin.service.ts
+-- via a single Prisma transaction. This migration is the schema
+-- companion only — no row touches happen here.
+--
+-- See `purgedAt` doc-block on the User model in schema.prisma for
+-- the full anonymisation + retention contract.
+ALTER TABLE "User" ADD COLUMN "purgedAt" TIMESTAMP(3);

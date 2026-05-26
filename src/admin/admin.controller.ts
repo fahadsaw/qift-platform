@@ -99,6 +99,40 @@ export class AdminController {
     return this.admin.restoreUser(req.user.userId, id);
   }
 
+  // Permanently delete (purge) a user account. Distinct from
+  // /disable: this is the GDPR-style "right to be forgotten with
+  // regulatory preservation" pattern. See admin.service.ts
+  // purgeUser() for the full anonymisation + retention contract.
+  //
+  // Permission: `user.purge` — NEW, super_admin ONLY. Body
+  // requires `confirmUsername` matching the target's current
+  // qiftUsername exactly; the frontend forces the operator to
+  // type the value, the backend re-checks because a tampered
+  // client could bypass the UI gate.
+  //
+  // Pre-purge guards (in order, see service for exact codes):
+  //   viewer == target          → 403 cannot_purge_self
+  //   target.role == 'admin'    → 403 cannot_purge_admin
+  //   target owns ≥ 1 store     → 409 user_owns_stores
+  //   target has in-flight gifts→ 409 user_has_inflight_gifts
+  //   confirmUsername mismatch  → 400 confirmation_mismatch
+  //
+  // Idempotent: a second purge on an already-purged row returns
+  // the existing purgedAt without re-running the transaction.
+  @Patch('users/:id/purge')
+  @RequireOpsPermission('user.purge')
+  purgeUser(
+    @Param('id') id: string,
+    @Body() body: { confirmUsername?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.admin.purgeUser(
+      req.user.userId,
+      id,
+      body?.confirmUsername ?? '',
+    );
+  }
+
   // ── Stores ───────────────────────────────────────────────────────
 
   @Get('stores')
