@@ -95,6 +95,10 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     'diagnostics.run_seed',
     'report.read',
     'analytics.read',
+    // Closed-beta gate administration (mirror of the
+    // PERMISSIONS_BY_ROLE.operations_manager grant in ops-roles.ts).
+    // super_admin holds this implicitly via ALL_ADMIN_PERMISSIONS.
+    'beta.manage',
   ],
 
   // Mirrors apps/api/src/ops-roles/ops-roles.ts `finance` permission

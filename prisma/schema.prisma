@@ -1883,3 +1883,105 @@ model Invite {
   // mint in the last 24h".
   @@index([createdByUserId, createdAt])
 }
+
+// ───────────────────────────────────────────────────────────────────
+// CLOSED BETA GATE
+//
+// These three models back the closed-beta registration gate. They are
+// DELIBERATELY NAMED `Beta*` to avoid collision with the gift `Invite`
+// model above — that one is the recipient-facing "join Qift to receive
+// your gift" link; THESE govern *who may register at all* while the
+// platform is in closed beta.
+//
+// The gate is master-switched by the BETA_GATE_ENABLED env var (off in
+// code, on in production). When OFF, none of these tables are consulted
+// — registration is fully open. When ON, /auth/register admits a new
+// account ONLY if one of:
+//   1. the email / email-domain / phone is on the allowlist, OR
+//   2. a valid (non-disabled, non-expired, non-exhausted) BetaInviteCode
+//      is supplied, OR
+//   3. the requester is bypassing via super_admin (handled at a higher
+//      layer, not here).
+//
+// EXISTING ACCOUNTS ARE NEVER AFFECTED: the gate runs only on the
+// *new-user* branch of register(), after the existing-user login
+// early-return. A returning user logs in regardless of gate state.
+//
+// `createdBy` / `userId` are plain String columns (user ids), NOT Prisma
+// relations, on purpose: the gate is an operational side-table that
+// should not add inbound relation fields to the already-large User
+// model, and an admin who is later purged should not cascade-delete the
+// audit of which codes they minted.
+// ───────────────────────────────────────────────────────────────────
+
+// A redeemable closed-beta invite code. `usedCount` is incremented
+// atomically inside the same transaction as the user.create it admits,
+// guarded by a conditional updateMany (usedCount < maxUses) so two
+// concurrent redemptions of the last slot cannot both succeed.
+model BetaInviteCode {
+  id          String    @id @default(cuid())
+  // The redeemable code. Stored normalised (trimmed, uppercased) so
+  // lookup is exact and case-insensitive at the application layer.
+  code        String    @unique
+  // Operator-facing free-text label ("Q1 press list", "Founder
+  // friends"). Never shown to the registrant.
+  label       String?
+  // Null = unlimited uses. Otherwise the hard cap; redemption is
+  // refused once usedCount reaches this value.
+  maxUses     Int?
+  usedCount   Int       @default(0)
+  // Null = never expires. Otherwise the code is invalid once now()
+  // passes this instant (checked at decision time AND defensively in
+  // the redemption WHERE).
+  expiresAt   DateTime?
+  // Set when an operator disables the code. A disabled code is
+  // invalid regardless of remaining uses / expiry. Soft-disable
+  // (not delete) preserves the redemption audit trail.
+  disabledAt  DateTime?
+  // User id of the operator who minted the code (audit).
+  createdBy   String
+  createdAt   DateTime  @default(now())
+
+  redemptions BetaInviteRedemption[]
+
+  // "list active codes" filters on disabledAt; "find by code" uses
+  // the unique index above.
+  @@index([disabledAt])
+}
+
+// One row per (code, user) successful redemption. The @@unique guard
+// makes redemption idempotent — a retried register cannot double-count
+// the same user against a code.
+model BetaInviteRedemption {
+  id         String         @id @default(cuid())
+  codeId     String
+  code       BetaInviteCode @relation(fields: [codeId], references: [id], onDelete: Cascade)
+  // The user admitted by this redemption. Plain String (not a
+  // relation) for the same reason as BetaInviteCode.createdBy.
+  userId     String
+  redeemedAt DateTime       @default(now())
+
+  @@unique([codeId, userId])
+  @@index([codeId])
+}
+
+// An allowlist entry. `kind` discriminates the match strategy:
+//   'email'        — exact lowercased email match
+//   'email_domain' — match any email whose domain equals `value`
+//   'phone'        — exact normalised E.164 phone match
+// `value` is always pre-normalised by the admin endpoint before insert
+// (lowercased email/domain; E.164 phone), so the registration-time
+// lookup is a plain equality probe with no per-row transformation.
+model BetaAllowlistEntry {
+  id        String   @id @default(cuid())
+  kind      String   // 'email' | 'email_domain' | 'phone'
+  value     String   // normalised match value
+  label     String?
+  createdBy String
+  createdAt DateTime @default(now())
+
+  // One entry per (kind, value); the same index serves the
+  // registration-time equality lookup.
+  @@unique([kind, value])
+  @@index([kind, value])
+}

@@ -6,6 +6,7 @@ import { AuthService } from './auth.service';
 import { JwtStrategy, getJwtSecret } from './jwt.strategy';
 import { PrismaService } from '../prisma/prisma.service';
 import { OtpModule } from '../otp/otp.module';
+import { BetaAccessModule } from '../beta-access/beta-access.module';
 
 // JWT secret is env-driven so production can rotate per environment.
 // Local dev keeps the historical literal as a fallback so a fresh
@@ -26,6 +27,11 @@ import { OtpModule } from '../otp/otp.module';
       signOptions: { expiresIn: '7d' },
     }),
     OtpModule,
+    // Closed Beta Gate — AuthService.register consults
+    // BetaAccessService.decideRegistration before admitting a new
+    // account. Existing-user logins are NOT gated (the check runs only
+    // on the new-user branch).
+    BetaAccessModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, PrismaService],
