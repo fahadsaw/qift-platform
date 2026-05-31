@@ -73,6 +73,14 @@ export const ADMIN_PERMISSIONS = [
   'report.resolve',
 
   'analytics.read',
+
+  // Closed-beta gate administration. Holders may create / disable
+  // beta invite codes, manage the registration allowlist, and read
+  // redemption counts via /admin#beta. Held by super_admin (via the
+  // ALL_ADMIN_PERMISSIONS bundle) and operations_manager. Mirrored
+  // into ops-roles.ts OPS_PERMISSIONS so the @RequireOpsPermission
+  // decorator on the beta controller can reference it.
+  'beta.manage',
 ] as const;
 
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];

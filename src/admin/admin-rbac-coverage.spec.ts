@@ -754,6 +754,7 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             'report.read': ['operations_manager', 'support', 'trust_safety'],
             'report.resolve': ['trust_safety'],
             'analytics.read': ['operations_manager', 'analytics_viewer'],
+            'beta.manage': ['operations_manager'],
           };
           const grantee = granteeRoleByPerm[opsPermission][0];
           // Sanity: every mutation route here has at least one

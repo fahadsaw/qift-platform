@@ -25,6 +25,7 @@ import { MailService } from '../mail/mail.service';
 import { InvitesService } from '../invites/invites.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { OtpService } from '../otp/otp.service';
+import { BetaAccessService } from '../beta-access/beta-access.service';
 
 type MockPrisma = {
   user: { findFirst: jest.Mock };
@@ -67,6 +68,15 @@ describe('AuthService — login (F2: soft-deleted rejection)', () => {
         {
           provide: OtpService,
           useValue: { send: jest.fn(), verify: jest.fn() },
+        },
+        // Closed Beta Gate dep. login() never touches it; stub-and-
+        // forget so Nest can instantiate AuthService.
+        {
+          provide: BetaAccessService,
+          useValue: {
+            decideRegistration: jest.fn(),
+            applyRedemption: jest.fn(),
+          },
         },
       ],
     }).compile();
@@ -286,6 +296,13 @@ describe('AuthService — forgot-password flow (Week 2)', () => {
         { provide: InvitesService, useValue: {} },
         { provide: NotificationsService, useValue: {} },
         { provide: OtpService, useValue: otp },
+        {
+          provide: BetaAccessService,
+          useValue: {
+            decideRegistration: jest.fn(),
+            applyRedemption: jest.fn(),
+          },
+        },
       ],
     }).compile();
     service = module.get<AuthService>(AuthService);
@@ -457,6 +474,13 @@ describe('AuthService — reset-password flow (Week 2)', () => {
         { provide: InvitesService, useValue: {} },
         { provide: NotificationsService, useValue: {} },
         { provide: OtpService, useValue: otp },
+        {
+          provide: BetaAccessService,
+          useValue: {
+            decideRegistration: jest.fn(),
+            applyRedemption: jest.fn(),
+          },
+        },
       ],
     }).compile();
     service = module.get<AuthService>(AuthService);

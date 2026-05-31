@@ -114,6 +114,10 @@ export const OPS_PERMISSIONS = [
   'report.resolve',
   // Analytics.
   'analytics.read',
+  // Closed-beta gate administration. Gates /admin/beta/* (create /
+  // disable invite codes, manage allowlist, read redemption counts).
+  // Granted to super_admin + operations_manager only.
+  'beta.manage',
 ] as const satisfies readonly Permission[];
 
 export type OpsPermission = (typeof OPS_PERMISSIONS)[number];
@@ -136,6 +140,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'diagnostics.run_seed',
     'report.read',
     'analytics.read',
+    'beta.manage',
   ],
   finance: [
     'finance.read_payouts',
@@ -217,4 +222,5 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'report.read',
   'report.resolve',
   'analytics.read',
+  'beta.manage',
 ];

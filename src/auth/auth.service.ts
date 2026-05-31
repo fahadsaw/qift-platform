@@ -20,6 +20,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 import { OtpService } from '../otp/otp.service';
 import { normalizePhone } from './phone-normalize';
+import { BetaAccessService } from '../beta-access/beta-access.service';
 
 export type RegisterInput = {
   fullName?: string;
@@ -40,6 +41,12 @@ export type RegisterInput = {
   // (phone stays unverified until a future flow proves it). When
   // 'phone', the historic behaviour applies.
   channel?: 'phone' | 'email';
+  // Closed Beta Gate — optional invite code. Consulted ONLY when the
+  // BETA_GATE_ENABLED master switch is on AND this is a NEW-user
+  // registration (existing-user logins ignore it). Distinct from the
+  // gift `Invite` system's token; see src/beta-access/. When the gate
+  // is off, this field is ignored entirely.
+  betaCode?: string;
 };
 
 export type LoginInput = {
@@ -92,6 +99,10 @@ export class AuthService {
     // send-side rate limit, and the single-use delete-on-success
     // semantics are all inherited automatically.
     private otp: OtpService,
+    // Closed Beta Gate — register() consults this to decide whether a
+    // NEW account may be created (and to redeem an invite code
+    // atomically). No-op when BETA_GATE_ENABLED is off.
+    private betaAccess: BetaAccessService,
   ) {}
 
   // POST /auth/register — register OR login via phone OR email OTP.
@@ -206,6 +217,23 @@ export class AuthService {
       };
     }
 
+    // --- 3b. Closed Beta Gate ------------------------------------------
+    // ONLY new registrations are gated, and only after OTP verify +
+    // after the existing-user login branch above (so returning users
+    // always log in, regardless of gate state). When BETA_GATE_ENABLED
+    // is off, this returns { mode: 'open' } with no DB hit. Otherwise it
+    // throws a 403 ({ code: 'beta_required' | 'beta_code_invalid' |
+    // 'beta_code_expired' | 'beta_code_exhausted' }) unless the
+    // email/phone is allowlisted or a valid code is supplied. The OTP
+    // row is intentionally still un-consumed at this point, so a gate
+    // rejection doesn't burn the code — the user can re-submit with a
+    // valid invite code without re-requesting an OTP.
+    const betaDecision = await this.betaAccess.decideRegistration({
+      email,
+      phone,
+      betaCode: body.betaCode,
+    });
+
     // --- 4. Register path ----------------------------------------------
     // Note: `email` was already canonicalised at the top of register()
     // because the email-channel verify step needed it. Re-using that
@@ -284,17 +312,28 @@ export class AuthService {
     // chip on the proven channel and an unobtrusive "Verify" prompt
     // on the other.
     const verifiedAt = new Date();
-    const user = await this.prisma.user.create({
-      data: {
-        fullName,
-        qiftUsername,
-        phone,
-        email,
-        passwordHash,
-        defaultAddress,
-        phoneVerifiedAt: channel === 'phone' ? verifiedAt : null,
-        emailVerifiedAt: channel === 'email' ? verifiedAt : null,
-      },
+    // User creation + beta-code redemption commit together. If the code
+    // was exhausted in the race window since decideRegistration (two
+    // signups draining the last slot), applyRedemption throws and the
+    // whole transaction rolls back — no half-admitted account, and the
+    // OTP below stays un-consumed so the user can retry with another
+    // code. When the gate is off / allowlist path, applyRedemption is a
+    // no-op and this is a plain single-statement create.
+    const user = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          fullName,
+          qiftUsername,
+          phone,
+          email,
+          passwordHash,
+          defaultAddress,
+          phoneVerifiedAt: channel === 'phone' ? verifiedAt : null,
+          emailVerifiedAt: channel === 'email' ? verifiedAt : null,
+        },
+      });
+      await this.betaAccess.applyRedemption(tx, betaDecision, created.id);
+      return created;
     });
 
     // Consume the OTP only after the user row is committed, so a username
