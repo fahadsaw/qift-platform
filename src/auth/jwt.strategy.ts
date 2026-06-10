@@ -1,16 +1,48 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 
 // Single source of truth for the JWT signing secret. Sign (AuthModule)
 // and verify (this strategy) MUST use the same value, so we route both
-// through here. Reads JWT_SECRET from env; falls back to the historical
-// literal so local dev keeps working without configuration. In
-// production, JWT_SECRET MUST be set to a long random string —
-// rotating it invalidates every issued token, which is the expected
+// through here.
+//
+// FAIL-SAFE CONTRACT
+//   - JWT_SECRET set (non-blank)        → use it, any environment.
+//   - missing + NODE_ENV === 'production' → THROW. Both call sites run
+//     at module init (JwtModule.register + the strategy constructor),
+//     so the throw aborts boot — a production deploy can never come up
+//     signing tokens with the publicly-known dev literal, which would
+//     make every account forgeable. Railway sets NODE_ENV=production
+//     by default, so the guard fires on our deploy target.
+//   - missing + anything else            → historical dev fallback, so
+//     a fresh checkout still boots with zero configuration. A loud
+//     warn (suppressed under jest) makes the fallback visible in dev
+//     logs in case a misconfigured staging box ever runs without
+//     NODE_ENV.
+//
+// Rotating the secret invalidates every issued token — expected
 // behaviour for a security boundary.
 export function getJwtSecret(): string {
-  return process.env.JWT_SECRET?.trim() || 'qift-secret';
+  const fromEnv = process.env.JWT_SECRET?.trim();
+  if (fromEnv) return fromEnv;
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'JWT_SECRET is not set — refusing to boot in production. ' +
+        'The development fallback secret is public (it lives in this ' +
+        'repo), so booting with it would make every session token ' +
+        'forgeable. Set JWT_SECRET to a long random string (e.g. ' +
+        '`openssl rand -base64 48`) in the environment and redeploy.',
+    );
+  }
+
+  if (process.env.NODE_ENV !== 'test') {
+    new Logger('JwtSecret').warn(
+      'JWT_SECRET is not set — using the insecure development fallback. ' +
+        'Fine for local dev; never for anything internet-facing.',
+    );
+  }
+  return 'qift-secret';
 }
 
 @Injectable()
