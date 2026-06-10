@@ -16,9 +16,16 @@
 //   6. Preserve all existing exception messages: `invalid_code`,
 //      `expired_code`, and `target and code are required`. The new
 //      message `otp_locked` is the only addition.
+//   7. (PR 3) Reject with `otp_locked` when the TARGET's summed
+//      wrong attempts across all rows in the sliding window reach
+//      MAX_TARGET_ATTEMPTS (=10), BEFORE any row lookup. This is the
+//      resend-safe layer: a fresh row from /otp/send starts at
+//      attempts=0, but the window sum still counts the burned rows.
+//   8. (PR 3) Codes are 6 digits (space 10,000 → 1,000,000).
 //
-// The /otp/send rate limiter (5 sends per target per 5 minutes) is
-// out of scope for this spec — F1 is purely the verify-side fix.
+// The /otp/send rate limiter (5 sends per target per 5 minutes) and
+// the per-IP guard (common/ip-rate-limit.guard.ts) are out of scope
+// for this spec.
 
 import { Test, type TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
@@ -31,6 +38,9 @@ type MockPrisma = {
     findFirst: jest.Mock;
     update: jest.Mock;
     delete: jest.Mock;
+    // PR 3 — verify() sums window attempts across the target's rows
+    // before any row lookup (resend-safe lockout).
+    aggregate: jest.Mock;
   };
 };
 
@@ -82,6 +92,9 @@ describe('OtpService — verify (F1: per-row attempt cap + lockout)', () => {
         findFirst: jest.fn(),
         update: jest.fn().mockResolvedValue({}),
         delete: jest.fn().mockResolvedValue({}),
+        // Default: no prior attempts in the window — the per-target
+        // lockout stays out of the way of every pre-existing test.
+        aggregate: jest.fn().mockResolvedValue({ _sum: { attempts: 0 } }),
       },
     };
 
@@ -323,6 +336,90 @@ describe('OtpService — verify (F1: per-row attempt cap + lockout)', () => {
       // attempt; 0 deletes (success never ran).
       expect(prisma.otp.update).toHaveBeenCalledTimes(5);
       expect(prisma.otp.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('PR 3 — resend-safe target-window lockout', () => {
+    it('window sum >= MAX_TARGET_ATTEMPTS → otp_locked BEFORE any row lookup', async () => {
+      prisma.otp.aggregate.mockResolvedValue({ _sum: { attempts: 10 } });
+
+      await expect(
+        service.verify({ target: TARGET_PHONE, code: '123456' }),
+      ).rejects.toThrow('otp_locked');
+
+      // The lockout is decided from the aggregate alone — no row
+      // fetch, no increment, no delete.
+      expect(prisma.otp.findFirst).not.toHaveBeenCalled();
+      expect(prisma.otp.update).not.toHaveBeenCalled();
+      expect(prisma.otp.delete).not.toHaveBeenCalled();
+    });
+
+    it('RESEND DOES NOT RESET THE BUDGET: fresh row (attempts=0) but window sum at cap → still locked', async () => {
+      // The attack this layer kills: burn 5 attempts on row A,
+      // request a fresh code (row B, attempts=0), keep guessing.
+      // Row B looks innocent; the window sum across A+B does not.
+      prisma.otp.aggregate.mockResolvedValue({ _sum: { attempts: 10 } });
+      prisma.otp.findFirst.mockResolvedValue(
+        makeOtpRow({ id: 'fresh-after-resend', attempts: 0 }),
+      );
+
+      await expect(
+        service.verify({ target: TARGET_PHONE, code: '123456' }),
+      ).rejects.toThrow('otp_locked');
+      expect(prisma.otp.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('window sum just under the cap → verification proceeds normally', async () => {
+      prisma.otp.aggregate.mockResolvedValue({ _sum: { attempts: 9 } });
+      prisma.otp.findFirst.mockResolvedValue(makeOtpRow({ code: '654321' }));
+
+      await expect(
+        service.verify({ target: TARGET_PHONE, code: '654321' }),
+      ).resolves.toEqual({ ok: true });
+    });
+
+    it('aggregate _sum null (no rows in window) → treated as zero', async () => {
+      prisma.otp.aggregate.mockResolvedValue({ _sum: { attempts: null } });
+      prisma.otp.findFirst.mockResolvedValue(makeOtpRow({ code: '654321' }));
+
+      await expect(
+        service.verify({ target: TARGET_PHONE, code: '654321' }),
+      ).resolves.toEqual({ ok: true });
+    });
+
+    it('window is scoped to the target and a recent createdAt cutoff', async () => {
+      prisma.otp.aggregate.mockResolvedValue({ _sum: { attempts: 0 } });
+      prisma.otp.findFirst.mockResolvedValue(makeOtpRow({ code: '654321' }));
+
+      await service.verify({ target: TARGET_PHONE, code: '654321' });
+
+      const arg = prisma.otp.aggregate.mock.calls[0][0] as {
+        where: { target: string; createdAt: { gte: Date } };
+      };
+      expect(arg.where.target).toBe(TARGET_PHONE);
+      // Cutoff sits in the past, within ~16 minutes of now (15-min
+      // window + slack for test execution time).
+      const ageMs = Date.now() - arg.where.createdAt.gte.getTime();
+      expect(ageMs).toBeGreaterThan(14 * 60 * 1000);
+      expect(ageMs).toBeLessThan(16 * 60 * 1000);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  describe('PR 3 — 6-digit codes', () => {
+    it('generateCode emits exactly 6 digits, no leading-zero truncation', () => {
+      // Private method, intentionally reached via cast: the public
+      // surface (send) buries the code inside transport dispatch.
+      const gen = (
+        service as unknown as { generateCode: () => string }
+      ).generateCode.bind(service);
+
+      for (let i = 0; i < 200; i++) {
+        const code = gen();
+        expect(code).toMatch(/^\d{6}$/);
+        expect(Number(code)).toBeGreaterThanOrEqual(100000);
+      }
     });
   });
 });
