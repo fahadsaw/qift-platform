@@ -204,4 +204,49 @@ describe('UsersService.searchUsers — social handle hardening', () => {
       expect(call.take).toBe(1);
     });
   });
+
+  // ── Verified Phase 1 — matchedHandleVerified signal ──────────────
+  describe('matchedHandleVerified (Verified Phase 1)', () => {
+    it('marks an OAuth/OTP-proven handle as verified', async () => {
+      prisma.socialAccount.findMany.mockResolvedValue([
+        {
+          platform: 'instagram',
+          verificationLevel: 'oauth_verified',
+          user: {
+            id: 'u1',
+            qiftUsername: 'sara',
+            fullName: 'Sara',
+            avatarUrl: null,
+          },
+        },
+      ]);
+
+      const rows = await service.searchUsers('viewer', 'sara_ig', 'instagram');
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].matchedHandleVerified).toBe(true);
+      // The handle itself still never echoes back.
+      expect(rows[0].matchedValue).toBe('');
+    });
+
+    it('marks a manually-typed handle as unverified', async () => {
+      prisma.socialAccount.findMany.mockResolvedValue([
+        {
+          platform: 'instagram',
+          verificationLevel: 'unverified',
+          user: {
+            id: 'u2',
+            qiftUsername: 'noura',
+            fullName: 'Noura',
+            avatarUrl: null,
+          },
+        },
+      ]);
+
+      const rows = await service.searchUsers('viewer', 'noura_ig', 'instagram');
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].matchedHandleVerified).toBe(false);
+    });
+  });
 });

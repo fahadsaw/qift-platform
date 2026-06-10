@@ -848,6 +848,14 @@ export class UsersService {
       avatarUrl: string | null;
       matchedField: string;
       matchedValue: string;
+      // Verified Phase 1 — present ONLY on social-handle matches.
+      // True when the matched handle's verificationLevel is anything
+      // other than 'unverified' (i.e. OTP- or OAuth-proven). Tells
+      // the searcher whether the handle→account link was PROVEN or
+      // merely self-typed — the exact trust gap impersonation lives
+      // in. Reveals nothing new about the account: the searcher
+      // already supplied the handle and already got the match.
+      matchedHandleVerified?: boolean;
     };
 
     // Block filter — exclude users I blocked AND users who blocked me.
@@ -1022,6 +1030,10 @@ export class UsersService {
       },
       select: {
         platform: true,
+        // Verified Phase 1 — prefer verificationLevel over the
+        // legacy boolean (per the schema doc-block); both are kept
+        // in sync by writers.
+        verificationLevel: true,
         user: { select: PUBLIC_PROJECTION },
       },
       take: 1,
@@ -1033,6 +1045,7 @@ export class UsersService {
       // Echoing would let an attacker probe variants (e.g. test
       // capitalisations) and learn which exact form is stored.
       matchedValue: '',
+      matchedHandleVerified: a.verificationLevel !== 'unverified',
     }));
   }
 
