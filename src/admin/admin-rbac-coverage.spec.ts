@@ -754,6 +754,10 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             'report.read': ['operations_manager', 'support', 'trust_safety'],
             'report.resolve': ['trust_safety'],
             'analytics.read': ['operations_manager', 'analytics_viewer'],
+            // audit.read — the audit-log viewer (PR 11). Granted to
+            // operations_manager + trust_safety (+ super_admin via
+            // the ALL bundle).
+            'audit.read': ['operations_manager', 'trust_safety'],
             'beta.manage': ['operations_manager'],
           };
           const grantee = granteeRoleByPerm[opsPermission][0];
