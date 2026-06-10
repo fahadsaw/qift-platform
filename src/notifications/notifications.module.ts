@@ -9,6 +9,7 @@ import {
 } from './notification-preferences.controller';
 import { OccasionReminderWorker } from './occasion-reminder-worker.service';
 import { DigestWorker } from './digest-worker.service';
+import { NotificationWorkerScheduler } from './worker-scheduler.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PushModule } from '../push/push.module';
 
@@ -48,6 +49,9 @@ import { PushModule } from '../push/push.module';
     NotificationPreferencesService,
     OccasionReminderWorker,
     DigestWorker,
+    // Occasions Activation — hourly tick over the two workers,
+    // triple-gated by env flags (see worker-scheduler.service.ts).
+    NotificationWorkerScheduler,
     PrismaService,
   ],
   // Workers exported so AdminModule can inject them for the

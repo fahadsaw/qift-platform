@@ -90,6 +90,16 @@ export function isDigestWorkerEnabled(): boolean {
   return read('QIFT_DIGEST_WORKER_ENABLED');
 }
 
+// Occasions Activation — the in-process scheduler that ticks the
+// reminder + digest workers on an interval (the "future scheduler"
+// the worker docs anticipated). Default OFF like every other
+// activation flag: deploying the scheduler changes nothing until
+// the operator opts in, and even then each worker's own activation
+// flag still gates real work — double-gated by design.
+export function isWorkerSchedulerEnabled(): boolean {
+  return read('QIFT_NOTIFICATION_SCHEDULER_ENABLED');
+}
+
 // Global push kill switch. EMERGENCY-STOP semantics: defaults to
 // ENABLED (preserving the existing push-fanout behaviour that has
 // been live since the gift-flow shipped). Set explicitly to
