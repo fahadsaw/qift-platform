@@ -20,6 +20,8 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import { UsersService } from './users.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
+import { OtpService } from '../otp/otp.service';
+import { AuditService } from '../audit/audit.service';
 
 type MockPrisma = {
   user: { findMany: jest.Mock };
@@ -55,6 +57,9 @@ describe('UsersService.searchUsers — email discovery hardening', () => {
         UsersService,
         { provide: PrismaService, useValue: prisma },
         { provide: BlocksService, useValue: blocks },
+        // Change-phone deps (PR 5) — not exercised by this suite.
+        { provide: OtpService, useValue: {} },
+        { provide: AuditService, useValue: { record: jest.fn() } },
       ],
     }).compile();
 

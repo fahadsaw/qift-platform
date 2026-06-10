@@ -3,6 +3,8 @@ import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksModule } from '../blocks/blocks.module';
+import { OtpModule } from '../otp/otp.module';
+import { AuditModule } from '../audit/audit.module';
 
 // Centralises UsersService construction in ONE module so every
 // consumer (AppModule for the controller, OrdersModule for the
@@ -19,8 +21,10 @@ import { BlocksModule } from '../blocks/blocks.module';
 //
 // We import BlocksModule here (which exports BlocksService) so the
 // dependency graph resolves cleanly inside this module's scope.
+// OtpModule + AuditModule back the OTP-verified change-phone flow
+// (PR 5) — same shared singletons the auth flow uses.
 @Module({
-  imports: [BlocksModule],
+  imports: [BlocksModule, OtpModule, AuditModule],
   controllers: [UsersController],
   providers: [UsersService, PrismaService],
   exports: [UsersService],
