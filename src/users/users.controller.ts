@@ -107,6 +107,36 @@ export class UsersController {
     return this.usersService.updateProfile(req.user.userId, body);
   }
 
+  // POST /users/me/change-phone/start — begin the OTP-verified phone
+  // change (PR 5). Validates + uniqueness pre-checks the new number,
+  // then dispatches an OTP to it via the shared OtpService. Errors:
+  // 400 invalid_phone / phone_unchanged, 409 phone_taken, plus the
+  // OtpService send errors (otp_rate_limited, sms_unavailable).
+  @Post('me/change-phone/start')
+  changePhoneStart(
+    @Body() body: { newPhone?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.changePhoneStart(req.user.userId, body.newPhone);
+  }
+
+  // POST /users/me/change-phone/confirm — verify the code that
+  // arrived on the NEW number and commit the change. Errors: the
+  // start-step set plus invalid_code / expired_code / otp_locked.
+  // Returns the /users/me envelope so settings re-hydrates in one
+  // round-trip.
+  @Post('me/change-phone/confirm')
+  changePhoneConfirm(
+    @Body() body: { newPhone?: string; code?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.changePhoneConfirm(
+      req.user.userId,
+      body.newPhone,
+      body.code,
+    );
+  }
+
   // PATCH /users/me/email — set or clear the viewer's email address.
   // Stored unverified (no email-OTP flow yet). Returns the same
   // /users/me envelope so the social-accounts page can re-hydrate

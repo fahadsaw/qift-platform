@@ -1985,3 +1985,32 @@ model BetaAllowlistEntry {
   @@unique([kind, value])
   @@index([kind, value])
 }
+
+// Persistent audit trail (PR 5 foundation — platform stabilization).
+//
+// One row per security-relevant action. The shape deliberately
+// matches AdminService.recordAuditTODO's input so the deferred
+// admin call-sites can swap onto AuditService.record mechanically
+// (PR 7). First writer: the self-serve change-phone flow.
+//
+// `actorUserId` / `targetId` are plain TEXT (no FK to User) on
+// purpose — an audit row must survive the purge of the actor or
+// the target; trails that vanish with the account are not trails.
+// PII policy: metadata MAY carry old/new contact values for
+// support forensics (account-takeover disputes need the previous
+// value). The table is admin-read-only; nothing here is ever
+// returned on a public endpoint.
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String
+  actorType   String // 'admin' | 'user' | 'system'
+  action      String // dot-namespaced, e.g. 'user.phone.change'
+  targetType  String // 'user' | 'store' | 'system'
+  targetId    String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([actorUserId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@index([action, createdAt])
+}

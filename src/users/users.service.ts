@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   NotFoundException,
@@ -8,6 +10,9 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
+import { OtpService } from '../otp/otp.service';
+import { AuditService } from '../audit/audit.service';
+import { normalizePhone } from '../auth/phone-normalize';
 import { normalizeHandle } from '../social-accounts/social-accounts.service';
 import { userHasDefaultAddress } from '../addresses/default-address.helper';
 import { matchAddressToStoreZones } from '../stores/delivery-zones';
@@ -43,6 +48,10 @@ export class UsersService {
   constructor(
     private prisma: PrismaService,
     private blocks: BlocksService,
+    // Change-phone flow (PR 5): OTP proves ownership of the NEW
+    // number; every successful change writes an audit row.
+    private otp: OtpService,
+    private audit: AuditService,
   ) {}
 
   // Canonical username normalisation. Used by every endpoint that looks up
@@ -316,6 +325,143 @@ export class UsersService {
       },
     });
     return this.getProfile(viewerId);
+  }
+
+  // ── Change phone (PR 5 — platform stabilization) ───────────────────
+  //
+  // Two-step, OTP-verified change of the account phone:
+  //   1. start   — validate + uniqueness pre-check, then dispatch an
+  //                OTP to the NEW number via the shared OtpService
+  //                (inherits the per-target send limit, the 6-digit
+  //                code, sms_unavailable refusal, everything).
+  //   2. confirm — verify the code against the NEW number (single-use
+  //                + lockout via OtpService.verify), re-check
+  //                uniqueness under the DB constraint, write the new
+  //                phone + a fresh phoneVerifiedAt, and record an
+  //                audit row carrying old → new for account-takeover
+  //                forensics.
+  //
+  // Ownership model: the JWT session is the proof of account
+  // ownership; the OTP is the proof of NEW-number ownership. The old
+  // number is NOT challenged — a user who lost their SIM must still
+  // be able to move to a new one (that's the whole point of the
+  // flow). The audit trail + the admin disable path are the
+  // compensating controls if a hijacked session abuses this.
+
+  async changePhoneStart(userId: string, newPhoneRaw: string | undefined) {
+    const target = normalizePhone((newPhoneRaw ?? '').trim());
+    if (!target) {
+      throw new BadRequestException('invalid_phone');
+    }
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { phone: true },
+    });
+    if (!me) throw new NotFoundException();
+    if (me.phone === target) {
+      throw new BadRequestException('phone_unchanged');
+    }
+    // Pre-check so the user learns about a collision BEFORE an SMS
+    // is burned. The DB unique index (re-checked at confirm) remains
+    // the authoritative gate; this is UX, not security.
+    const taken = await this.prisma.user.findFirst({
+      where: { phone: target },
+      select: { id: true },
+    });
+    if (taken) {
+      throw this.phoneTaken();
+    }
+    // Same response shape as /otp/send ({ ok, expiresAt, dispatched,
+    // channel }) so the frontend reuses its OTP-screen handling.
+    return this.otp.send({ target, type: 'phone' });
+  }
+
+  async changePhoneConfirm(
+    userId: string,
+    newPhoneRaw: string | undefined,
+    code: string | undefined,
+  ) {
+    const target = normalizePhone((newPhoneRaw ?? '').trim());
+    if (!target) {
+      throw new BadRequestException('invalid_phone');
+    }
+    if (!code?.trim()) {
+      throw new BadRequestException('invalid_code');
+    }
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { phone: true },
+    });
+    if (!me) throw new NotFoundException();
+    if (me.phone === target) {
+      throw new BadRequestException('phone_unchanged');
+    }
+    // Cheap uniqueness re-check BEFORE the verify so a lost race
+    // doesn't burn the user's single-use code.
+    const taken = await this.prisma.user.findFirst({
+      where: { phone: target },
+      select: { id: true },
+    });
+    if (taken) {
+      throw this.phoneTaken();
+    }
+
+    // Throws invalid_code / expired_code / otp_locked — propagated
+    // verbatim; the frontend maps them exactly like the register
+    // flow does. Deletes the row on success (single-use).
+    await this.otp.verify({ target, code });
+
+    try {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          phone: target,
+          // The OTP we just verified IS the ownership proof for the
+          // new number — stamp it fresh.
+          phoneVerifiedAt: new Date(),
+        },
+      });
+    } catch (err) {
+      // P2002 = somebody claimed the number between our pre-check
+      // and the update. Surface the same stable code as the
+      // pre-check path.
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        throw this.phoneTaken();
+      }
+      throw err;
+    }
+
+    // Best-effort by contract (AuditService swallows + logs its own
+    // failures): the change has committed; bookkeeping must not
+    // unwind it. Old + new values are intentional — account-takeover
+    // disputes need the previous number.
+    await this.audit.record({
+      actorUserId: userId,
+      actorType: 'user',
+      action: 'user.phone.change',
+      targetType: 'user',
+      targetId: userId,
+      metadata: { from: me.phone, to: target },
+    });
+
+    return this.getProfile(userId);
+  }
+
+  // 409 with the same { statusCode, code, message } envelope the
+  // register flow emits for phone_taken — the frontend already
+  // knows how to render this code.
+  private phoneTaken(): HttpException {
+    return new HttpException(
+      {
+        statusCode: HttpStatus.CONFLICT,
+        code: 'phone_taken',
+        message: 'رقم الهاتف مستخدم',
+      },
+      HttpStatus.CONFLICT,
+    );
   }
 
   // PATCH /users/me/preferences — wishlist preferences MVP. All
