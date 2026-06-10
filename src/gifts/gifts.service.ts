@@ -24,7 +24,10 @@ import {
   type GiftLike,
 } from './gift-visibility';
 import { getDefaultAddressForUser } from '../addresses/default-address.helper';
-import { matchAddressToStoreZones } from '../stores/delivery-zones';
+import {
+  matchAddressToStoreZones,
+  normaliseCity,
+} from '../stores/delivery-zones';
 export type { GiftStatus } from './gift-status';
 
 // Categories whose products spoil or are time-sensitive, and
@@ -845,17 +848,30 @@ export class GiftsService {
     assertTransition(gift.status, 'address_confirmed');
 
     let chosenAddressId: string | null = null;
+    let chosenAddressCountry: string | null = null;
+    let chosenAddressRegion: string | null = null;
     let chosenAddressCity: string | null = null;
     let chosenAddressDistrict: string | null = null;
     if (addressId) {
       const owned = await this.prisma.address.findFirst({
         where: { id: addressId, userId: viewerUserId },
-        select: { id: true, city: true, district: true },
+        // country + region feed the wildcard gates in the coverage
+        // matcher (PR 4) — a { country:'SA' } zone needs the
+        // address's country to say yes.
+        select: {
+          id: true,
+          country: true,
+          region: true,
+          city: true,
+          district: true,
+        },
       });
       if (!owned) {
         throw new BadRequestException('العنوان غير موجود أو لا يخصك');
       }
       chosenAddressId = owned.id;
+      chosenAddressCountry = owned.country;
+      chosenAddressRegion = owned.region;
       chosenAddressCity = owned.city;
       chosenAddressDistrict = owned.district;
     } else {
@@ -864,14 +880,15 @@ export class GiftsService {
         throw new BadRequestException('لا يوجد عنوان افتراضي لتأكيده');
       }
       chosenAddressId = def.id;
-      // Re-query for the city/district fields needed by the
-      // coverage matcher. The shared helper only returns `id` so
-      // we don't widen its contract for callers that don't need
-      // the address details.
+      // Re-query for the fields needed by the coverage matcher.
+      // The shared helper only returns `id` so we don't widen its
+      // contract for callers that don't need the address details.
       const defFull = await this.prisma.address.findUnique({
         where: { id: def.id },
-        select: { city: true, district: true },
+        select: { country: true, region: true, city: true, district: true },
       });
+      chosenAddressCountry = defFull?.country ?? null;
+      chosenAddressRegion = defFull?.region ?? null;
       chosenAddressCity = defFull?.city ?? null;
       chosenAddressDistrict = defFull?.district ?? null;
     }
@@ -908,7 +925,12 @@ export class GiftsService {
       }
       if (store && isFastDelivery) {
         const match = matchAddressToStoreZones(
-          { city: chosenAddressCity, district: chosenAddressDistrict },
+          {
+            country: chosenAddressCountry,
+            region: chosenAddressRegion,
+            city: chosenAddressCity,
+            district: chosenAddressDistrict,
+          },
           { city: store.city, deliveryZones: store.deliveryZones },
           true,
         );
@@ -1197,12 +1219,8 @@ async function canDeliverFastInline(
   });
   return rows.some((row) => normaliseCity(row.city) === target);
 }
-
-function normaliseCity(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[ً-ْٰ]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
+// PR 4: the local normaliseCity copy here folded FEWER Arabic
+// variants than the authoritative one in stores/delivery-zones.ts
+// (no teh-marbuta/hamza/alef-maksura folds, no definite-article
+// strip) — so this quick check could disagree with the real
+// matcher on the same address. It now imports the shared function.

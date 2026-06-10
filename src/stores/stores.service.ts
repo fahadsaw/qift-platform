@@ -159,8 +159,13 @@ export type UpdateStoreInput = {
 
 // Wire-shape for one coverage zone. Mirrors DeliveryZone in
 // lib/deliveryZones.ts (frontend) so the matcher reads the same
-// payload the merchant submits.
+// payload the merchant submits. PR 4 (Coverage 2b): country +
+// region wildcard fields accepted and persisted — previously the
+// sanitizer silently dropped any row without a `city`, destroying
+// "all of Saudi Arabia"-style coverage at save time.
 export type DeliveryZoneInput = {
+  country?: string;
+  region?: string;
   city?: string;
   districts?: string[];
   note?: string;
@@ -637,30 +642,55 @@ export class StoresService {
   }
 }
 
-// Sanitise a list of zone inputs from the wire. Drops entries with
-// empty `city`, trims strings, and normalises the optional fields
-// so a buggy client can't corrupt the JSON column. Returns the
-// canonical array shape the matchAddressToZones helper expects.
+// Sanitise a list of zone inputs from the wire. Trims strings and
+// normalises the optional fields so a buggy client can't corrupt
+// the JSON column. Returns the canonical array shape the
+// matchAddressToStoreZones helper expects.
+//
+// PR 4 (Coverage 2b): a row survives when it carries ANY scope —
+// country, region, city, or districts. The previous rule (drop
+// everything without a `city`) silently deleted wildcard rows at
+// save time, leaving merchants who picked "all of Saudi Arabia"
+// with single-city legacy-fallback coverage. Country codes are
+// canonicalised to uppercase ISO on write; the matcher compares
+// case-insensitively anyway.
 function sanitizeZones(input: unknown): {
-  city: string;
+  country?: string;
+  region?: string;
+  city?: string;
   districts?: string[];
   note?: string;
 }[] {
   if (!Array.isArray(input)) return [];
-  const out: { city: string; districts?: string[]; note?: string }[] = [];
+  const out: {
+    country?: string;
+    region?: string;
+    city?: string;
+    districts?: string[];
+    note?: string;
+  }[] = [];
   for (const raw of input) {
     if (!raw || typeof raw !== 'object') continue;
     const z = raw as Record<string, unknown>;
+    const country =
+      typeof z.country === 'string' ? z.country.trim().toUpperCase() : '';
+    const region = typeof z.region === 'string' ? z.region.trim() : '';
     const city = typeof z.city === 'string' ? z.city.trim() : '';
-    if (!city) continue;
     const districts = Array.isArray(z.districts)
       ? (z.districts as unknown[])
           .map((d) => (typeof d === 'string' ? d.trim() : ''))
           .filter((d): d is string => d.length > 0)
       : undefined;
     const note = typeof z.note === 'string' ? z.note.trim() : undefined;
+
+    const hasScope =
+      !!country || !!region || !!city || !!(districts && districts.length);
+    if (!hasScope) continue;
+
     out.push({
-      city,
+      ...(country ? { country } : {}),
+      ...(region ? { region } : {}),
+      ...(city ? { city } : {}),
       ...(districts && districts.length > 0 ? { districts } : {}),
       ...(note ? { note } : {}),
     });

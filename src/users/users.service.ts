@@ -10,7 +10,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { BlocksService } from '../blocks/blocks.service';
 import { normalizeHandle } from '../social-accounts/social-accounts.service';
 import { userHasDefaultAddress } from '../addresses/default-address.helper';
-import { matchAddressToStoreZones } from '../stores/delivery-zones';
+import {
+  matchAddressToStoreZones,
+  normaliseCity,
+} from '../stores/delivery-zones';
 
 // Whitelist of fields that are safe to ship over the wire. `passwordHash`
 // is never included so it cannot leak through any user endpoint.
@@ -1303,13 +1306,19 @@ export class UsersService {
     );
     const addresses = await this.prisma.address.findMany({
       where: { userId: receiverId },
-      select: { city: true, district: true },
+      // country + region feed the wildcard gates (PR 4).
+      select: { country: true, region: true, city: true, district: true },
     });
     if (addresses.length === 0) return false;
     if (!isFastDelivery) return true;
     return addresses.some((a) => {
       const match = matchAddressToStoreZones(
-        { city: a.city, district: a.district },
+        {
+          country: a.country,
+          region: a.region,
+          city: a.city,
+          district: a.district,
+        },
         { city: store.city, deliveryZones: store.deliveryZones },
         true,
       );
@@ -1329,17 +1338,11 @@ const FAST_DELIVERY_CATEGORIES: ReadonlySet<string> = new Set([
   'perishable',
 ]);
 
-// Lower-case, collapse whitespace, strip Arabic diacritics so that
-// "الرياض  " matches "الرياض" matches "ٱلرياض". Same algorithm has to be
-// used on both sides of the equality check.
-function normaliseCity(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[ً-ْٰ]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
+// PR 4: the local normaliseCity copy that used to live here folded
+// FEWER Arabic variants than the authoritative one in
+// stores/delivery-zones.ts — canDeliverFast could disagree with the
+// real coverage matcher on the same address (e.g. جده vs جدة). The
+// shared function is imported at the top of the file instead.
 
 // Per-country mobile-MSISDN length. The number stored in `User.phone`
 // is the E.164 form `+<dial><local>`, so the total digit count we

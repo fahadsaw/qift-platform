@@ -145,6 +145,9 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
           where: { userId: gift.receiverId },
           select: {
             id: true,
+            // country + region feed the wildcard gates (PR 4).
+            country: true,
+            region: true,
             city: true,
             district: true,
             isDefault: true,
@@ -174,7 +177,12 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
         } else {
           for (const a of candidates) {
             const match = matchAddressToStoreZones(
-              { city: a.city, district: a.district },
+              {
+                country: a.country,
+                region: a.region,
+                city: a.city,
+                district: a.district,
+              },
               { city: store.city, deliveryZones: store.deliveryZones },
               true,
             );
