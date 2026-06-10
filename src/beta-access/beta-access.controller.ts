@@ -69,13 +69,13 @@ export class BetaAccessController {
   }
 
   @Patch('codes/:id/disable')
-  disableCode(@Param('id') id: string) {
-    return this.beta.setCodeDisabled(id, true);
+  disableCode(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.beta.setCodeDisabled(req.user.userId, id, true);
   }
 
   @Patch('codes/:id/enable')
-  enableCode(@Param('id') id: string) {
-    return this.beta.setCodeDisabled(id, false);
+  enableCode(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.beta.setCodeDisabled(req.user.userId, id, false);
   }
 
   // ── Allowlist ──────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ export class BetaAccessController {
   }
 
   @Delete('allowlist/:id')
-  removeAllowlistEntry(@Param('id') id: string) {
-    return this.beta.removeAllowlistEntry(id);
+  removeAllowlistEntry(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.beta.removeAllowlistEntry(req.user.userId, id);
   }
 }

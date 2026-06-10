@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StoresModule } from '../stores/stores.module';
 import { OpsRolesModule } from '../ops-roles/ops-roles.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AuditModule } from '../audit/audit.module';
 
 // AdminModule. Pulls StoresModule for the v2 review endpoints
 // (storeDetail / reviewStore reuse the same canonical projection
@@ -21,8 +22,10 @@ import { NotificationsModule } from '../notifications/notifications.module';
 // workers themselves still gate on QIFT_OCCASION_REMINDER_FIRING_
 // ENABLED / QIFT_DIGEST_WORKER_ENABLED unless the operator
 // passes forceDryRun.
+// AuditModule (PR 7): AdminService persists every state-changing
+// admin action to the AuditLog table.
 @Module({
-  imports: [StoresModule, OpsRolesModule, NotificationsModule],
+  imports: [StoresModule, OpsRolesModule, NotificationsModule, AuditModule],
   controllers: [AdminController, AdminWorkersController],
   providers: [AdminService, AdminGuard, PrismaService],
 })

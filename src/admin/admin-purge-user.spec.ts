@@ -148,7 +148,12 @@ function buildService() {
   // purgeUser doesn't touch it; pass a minimal stub so the
   // service constructs.
   const stores = {} as unknown as ConstructorParameters<typeof AdminService>[1];
-  const service = new AdminService(prisma, stores);
+  // PR 7 — the persistent audit trail; purge asserts the row shape
+  // elsewhere, here a recording stub keeps construction honest.
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+  } as unknown as ConstructorParameters<typeof AdminService>[2];
+  const service = new AdminService(prisma, stores, audit);
   return { service, mocks };
 }
 
