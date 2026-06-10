@@ -5,6 +5,7 @@ import { OpsRolesModule } from '../ops-roles/ops-roles.module';
 import { AuditModule } from '../audit/audit.module';
 import { BetaAccessService } from './beta-access.service';
 import { BetaAccessController } from './beta-access.controller';
+import { BetaStatusController } from './beta-status.controller';
 
 // Closed Beta Gate module.
 //
@@ -18,9 +19,11 @@ import { BetaAccessController } from './beta-access.controller';
 // codebase has no global PrismaModule, so each feature module that uses
 // these registers them directly (same pattern as AdminModule).
 // AuditModule (PR 7): code + allowlist mutations persist to AuditLog.
+// BetaStatusController (PR 8): public { gateEnabled } probe for the
+// register page — no guard, no sensitive payload.
 @Module({
   imports: [OpsRolesModule, AuditModule],
-  controllers: [BetaAccessController],
+  controllers: [BetaAccessController, BetaStatusController],
   providers: [BetaAccessService, AdminGuard, PrismaService],
   exports: [BetaAccessService],
 })
