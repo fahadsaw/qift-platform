@@ -467,6 +467,122 @@ export class UsersService {
     );
   }
 
+  // ── Change email (PR 6 — platform stabilization) ───────────────────
+  //
+  // Mirror of the change-phone flow, email channel. The OTP proves
+  // ownership of the NEW address; success stamps emailVerifiedAt
+  // (this IS the email-OTP flow the updateEmail doc-comment was
+  // waiting for). Also works as "add email with proof" when the
+  // account has no email yet. The legacy PATCH /users/me/email
+  // (unverified set / clear) stays for the social-accounts surface;
+  // settings routes through here so the address lands verified.
+
+  async changeEmailStart(userId: string, newEmailRaw: string | undefined) {
+    const target = this.normalizeEmailForChange(newEmailRaw);
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (!me) throw new NotFoundException();
+    if ((me.email ?? '').toLowerCase() === target) {
+      throw new BadRequestException('email_unchanged');
+    }
+    // Pre-check so a collision surfaces BEFORE an email is burned.
+    const taken = await this.prisma.user.findFirst({
+      where: { email: target, id: { not: userId } },
+      select: { id: true },
+    });
+    if (taken) {
+      throw this.emailTaken();
+    }
+    // Same response shape as /otp/send; inherits the per-target send
+    // limit, email_unavailable refusal, the 6-digit code, all of it.
+    return this.otp.send({ target, type: 'email' });
+  }
+
+  async changeEmailConfirm(
+    userId: string,
+    newEmailRaw: string | undefined,
+    code: string | undefined,
+  ) {
+    const target = this.normalizeEmailForChange(newEmailRaw);
+    if (!code?.trim()) {
+      throw new BadRequestException('invalid_code');
+    }
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (!me) throw new NotFoundException();
+    if ((me.email ?? '').toLowerCase() === target) {
+      throw new BadRequestException('email_unchanged');
+    }
+    // Cheap uniqueness re-check BEFORE the verify so a lost race
+    // doesn't burn the user's single-use code.
+    const taken = await this.prisma.user.findFirst({
+      where: { email: target, id: { not: userId } },
+      select: { id: true },
+    });
+    if (taken) {
+      throw this.emailTaken();
+    }
+
+    // Throws invalid_code / expired_code / otp_locked — propagated
+    // verbatim. Deletes the row on success (single-use).
+    await this.otp.verify({ target, code });
+
+    try {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          email: target,
+          // The OTP we just verified IS the ownership proof.
+          emailVerifiedAt: new Date(),
+        },
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        throw this.emailTaken();
+      }
+      throw err;
+    }
+
+    await this.audit.record({
+      actorUserId: userId,
+      actorType: 'user',
+      action: 'user.email.change',
+      targetType: 'user',
+      targetId: userId,
+      metadata: { from: me.email, to: target },
+    });
+
+    return this.getProfile(userId);
+  }
+
+  // Shared validation for both change-email steps. Throws the same
+  // codes updateEmail uses so frontends branch consistently.
+  private normalizeEmailForChange(raw: string | undefined): string {
+    const lower = (raw ?? '').trim().toLowerCase();
+    if (!lower || lower.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lower)) {
+      throw new BadRequestException('invalid_email');
+    }
+    return lower;
+  }
+
+  private emailTaken(): HttpException {
+    return new HttpException(
+      {
+        statusCode: HttpStatus.CONFLICT,
+        code: 'email_taken',
+        message: 'البريد الإلكتروني مستخدم',
+      },
+      HttpStatus.CONFLICT,
+    );
+  }
+
   // PATCH /users/me/preferences — wishlist preferences MVP. All
   // fields optional, all lengths capped at 200 (seems generous for
   // a size string or comma-separated taste list). Comma-separated
