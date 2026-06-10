@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuditService } from '../audit/audit.service';
 import { normalizePhone } from '../auth/phone-normalize';
 import { isBetaGateEnabled } from './beta-gate-flag';
 import {
@@ -30,7 +31,11 @@ export type BetaRegistrationDecision =
 
 @Injectable()
 export class BetaAccessService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    // PR 7 — every admin mutation on the gate persists to AuditLog.
+    private audit: AuditService,
+  ) {}
 
   isGateEnabled(): boolean {
     return isBetaGateEnabled();
@@ -211,8 +216,9 @@ export class BetaAccessService {
       expiresAt = d;
     }
 
+    let created;
     try {
-      return await this.prisma.betaInviteCode.create({
+      created = await this.prisma.betaInviteCode.create({
         data: {
           code,
           label: input.label?.trim() || null,
@@ -227,19 +233,37 @@ export class BetaAccessService {
       }
       throw err;
     }
+    await this.audit.record({
+      actorUserId: createdBy,
+      actorType: 'admin',
+      action: 'admin.beta.code_create',
+      targetType: 'system',
+      targetId: created.id,
+      metadata: { label: created.label, maxUses, expiresAt },
+    });
+    return created;
   }
 
-  async setCodeDisabled(id: string, disabled: boolean) {
+  async setCodeDisabled(actorUserId: string, id: string, disabled: boolean) {
     const existing = await this.prisma.betaInviteCode.findUnique({
       where: { id },
     });
     if (!existing) {
       throw new NotFoundException('beta_code_not_found');
     }
-    return this.prisma.betaInviteCode.update({
+    const updated = await this.prisma.betaInviteCode.update({
       where: { id },
       data: { disabledAt: disabled ? new Date() : null },
     });
+    await this.audit.record({
+      actorUserId,
+      actorType: 'admin',
+      action: disabled ? 'admin.beta.code_disable' : 'admin.beta.code_enable',
+      targetType: 'system',
+      targetId: id,
+      metadata: { label: existing.label },
+    });
+    return updated;
   }
 
   listAllowlist() {
@@ -259,8 +283,9 @@ export class BetaAccessService {
     if (!value) {
       throw new BadRequestException('beta_allowlist_value_invalid');
     }
+    let created;
     try {
-      return await this.prisma.betaAllowlistEntry.create({
+      created = await this.prisma.betaAllowlistEntry.create({
         data: {
           kind: input.kind,
           value,
@@ -274,9 +299,21 @@ export class BetaAccessService {
       }
       throw err;
     }
+    // The allowlist value (email/domain/phone) is stored in the
+    // audit metadata for forensics — the table is admin-read-only,
+    // same posture as the change-phone old→new values.
+    await this.audit.record({
+      actorUserId: createdBy,
+      actorType: 'admin',
+      action: 'admin.beta.allowlist_add',
+      targetType: 'system',
+      targetId: created.id,
+      metadata: { kind: input.kind, value },
+    });
+    return created;
   }
 
-  async removeAllowlistEntry(id: string) {
+  async removeAllowlistEntry(actorUserId: string, id: string) {
     const existing = await this.prisma.betaAllowlistEntry.findUnique({
       where: { id },
     });
@@ -284,6 +321,14 @@ export class BetaAccessService {
       throw new NotFoundException('beta_allowlist_not_found');
     }
     await this.prisma.betaAllowlistEntry.delete({ where: { id } });
+    await this.audit.record({
+      actorUserId,
+      actorType: 'admin',
+      action: 'admin.beta.allowlist_remove',
+      targetType: 'system',
+      targetId: id,
+      metadata: { kind: existing.kind, value: existing.value },
+    });
     return { ok: true };
   }
 

@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuditService } from '../audit/audit.service';
 import {
   hasOpsPermission,
   isOpsRole,
@@ -22,7 +23,12 @@ import {
 // inert because the AdminGuard upstream would reject them).
 @Injectable()
 export class OpsRolesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    // PR 7 — grant/revoke are privilege changes; both persist to
+    // the AuditLog (record() is best-effort and never throws).
+    private audit: AuditService,
+  ) {}
 
   // Read the role codes a user holds. Always returns an empty
   // array on lookup miss — no exception, no auth-leak.
@@ -83,12 +89,23 @@ export class OpsRolesService {
       },
       update: { grantedBy: granterId, grantedAt: new Date() },
     });
+    await this.audit.record({
+      actorUserId: granterId,
+      actorType: 'admin',
+      action: 'admin.ops_role.grant',
+      targetType: 'user',
+      targetId: targetUserId,
+      metadata: { role },
+    });
     return { role };
   }
 
   // Admin revoke. Idempotent — silently no-ops when the row
   // doesn't exist so a double-click can't 404 the operator.
+  // `revokerId` (PR 7) attributes the audit row; an idempotent
+  // no-op revoke writes no audit entry.
   async revoke(
+    revokerId: string,
     targetUserId: string,
     role: string,
   ): Promise<{ revoked: boolean }> {
@@ -98,6 +115,16 @@ export class OpsRolesService {
     const result = await this.prisma.opsRoleAssignment.deleteMany({
       where: { userId: targetUserId, role },
     });
+    if (result.count > 0) {
+      await this.audit.record({
+        actorUserId: revokerId,
+        actorType: 'admin',
+        action: 'admin.ops_role.revoke',
+        targetType: 'user',
+        targetId: targetUserId,
+        metadata: { role },
+      });
+    }
     return { revoked: result.count > 0 };
   }
 

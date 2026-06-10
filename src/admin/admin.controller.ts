@@ -146,8 +146,12 @@ export class AdminController {
   // analytics_viewer) can no longer flip store visibility.
   @Patch('stores/:id/status')
   @RequireOpsPermission('store.set_status')
-  setStoreStatus(@Param('id') id: string, @Body() body: { status?: string }) {
-    return this.admin.setStoreStatus(id, body?.status ?? '');
+  setStoreStatus(
+    @Param('id') id: string,
+    @Body() body: { status?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.admin.setStoreStatus(req.user.userId, id, body?.status ?? '');
   }
 
   // Onboarding-v2 review action with operator note. Distinct from the
@@ -188,8 +192,12 @@ export class AdminController {
   // apps/api/src/stores/merchant-plans.ts for the capability map.
   @Patch('stores/:id/plan')
   @RequireOpsPermission('store.set_plan')
-  setStorePlan(@Param('id') id: string, @Body() body: { plan?: string }) {
-    return this.admin.setStorePlan(id, body?.plan ?? '');
+  setStorePlan(
+    @Param('id') id: string,
+    @Body() body: { plan?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.admin.setStorePlan(req.user.userId, id, body?.plan ?? '');
   }
 
   // Marketplace featured toggle. Drives the /stores "Featured"
@@ -199,8 +207,13 @@ export class AdminController {
   setStoreFeatured(
     @Param('id') id: string,
     @Body() body: { featured?: boolean },
+    @Req() req: AuthedRequest,
   ) {
-    return this.admin.setStoreFeatured(id, body?.featured === true);
+    return this.admin.setStoreFeatured(
+      req.user.userId,
+      id,
+      body?.featured === true,
+    );
   }
 
   // ── Ops roles (RBAC) ──────────────────────────────────────
@@ -229,8 +242,12 @@ export class AdminController {
 
   @Patch('users/:id/ops-roles/revoke')
   @RequireOpsPermission('user.assign_ops_role')
-  revokeOpsRole(@Param('id') id: string, @Body() body: { role?: string }) {
-    return this.opsRoles.revoke(id, body?.role ?? '');
+  revokeOpsRole(
+    @Param('id') id: string,
+    @Body() body: { role?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.opsRoles.revoke(req.user.userId, id, body?.role ?? '');
   }
 
   // Documents uploaded with the merchant application. Listed for

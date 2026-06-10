@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuditService } from '../audit/audit.service';
 import { StoresService } from '../stores/stores.service';
 
 // Admin-only service. Every method is reachable through routes
@@ -47,38 +48,12 @@ export class AdminService {
     // + the rich owner detail projection). Single source of truth for
     // the merchant-application transition graph.
     private stores: StoresService,
+    // PR 7 — the persistent audit trail (replaces the deferred
+    // recordAuditTODO no-op logger; the AuditLog table landed with
+    // the change-phone PR). record() is best-effort by contract: it
+    // never throws, so an audit hiccup can't unwind an admin action.
+    private audit: AuditService,
   ) {}
-
-  // AUDIT LOGGING — DEFERRED.
-  //
-  // The AuditLog table + AuditService both live on the
-  // backend/week2-admin-perms-and-anon-notif branch and aren't on
-  // origin/main yet. Once that branch merges, every callsite below
-  // that calls `this.recordAuditTODO(...)` should swap to
-  // `this.audit.record(...)` (after injecting AuditService via the
-  // constructor + importing AuditModule). Until then this helper
-  // is a no-op so the action paths complete cleanly without
-  // depending on a table that doesn't exist yet.
-  //
-  // Trace strings are stable across the swap, so a future
-  // backfill can reconstruct lost-traffic actions from request
-  // logs if needed.
-  private recordAuditTODO(input: {
-    actorUserId: string;
-    actorType: 'admin';
-    action: string;
-    targetType: 'user' | 'store' | 'system';
-    targetId: string | null;
-    metadata?: Record<string, unknown> | null;
-  }): void {
-    this.logger.log(
-      `[audit-pending] ${input.action} actor=${input.actorUserId} target=${input.targetId ?? 'system'}`,
-    );
-    // Prisma.JsonNull is imported via the namespace import in this
-    // file; reference it here so the unused-import lint doesn't
-    // strip Prisma when the audit swap lands.
-    void Prisma.JsonNull;
-  }
 
   // --- Users -------------------------------------------------------
 
@@ -154,7 +129,7 @@ export class AdminService {
     // Append-only audit row. The fromRole / toRole pair are stored
     // verbatim (never PII), so the metadata write is safe under
     // sanitiseMetadata().
-    this.recordAuditTODO({
+    await this.audit.record({
       actorUserId: viewerUserId,
       actorType: 'admin',
       action: 'admin.user.role_change',
@@ -215,7 +190,7 @@ export class AdminService {
       data: { deletedAt: new Date() },
       select: ADMIN_USER_SELECT,
     });
-    this.recordAuditTODO({
+    await this.audit.record({
       actorUserId: viewerUserId,
       actorType: 'admin',
       action: 'admin.user.disable',
@@ -266,7 +241,7 @@ export class AdminService {
       data: { deletedAt: null },
       select: ADMIN_USER_SELECT,
     });
-    this.recordAuditTODO({
+    await this.audit.record({
       actorUserId: viewerUserId,
       actorType: 'admin',
       action: 'admin.user.restore',
@@ -504,7 +479,7 @@ export class AdminService {
 
     // Audit-log row AFTER commit so we never log a phantom action
     // that the transaction then rolled back.
-    this.recordAuditTODO({
+    await this.audit.record({
       actorUserId: viewerUserId,
       actorType: 'admin',
       action: 'admin.user.purge',
@@ -543,22 +518,33 @@ export class AdminService {
   }
 
   async setStoreStatus(
+    viewerUserId: string,
     storeId: string,
     status: string,
   ): Promise<AdminStoreRow> {
     if (!ALLOWED_STORE_STATUSES.has(status)) {
       throw new BadRequestException('Invalid store status');
     }
+    // Prior status read so the audit row captures the transition.
     const existing = await this.prisma.store.findUnique({
       where: { id: storeId },
-      select: { id: true },
+      select: { id: true, status: true },
     });
     if (!existing) throw new NotFoundException('Store not found');
-    return this.prisma.store.update({
+    const updated = await this.prisma.store.update({
       where: { id: storeId },
       data: { status },
       select: ADMIN_STORE_SELECT,
     });
+    await this.audit.record({
+      actorUserId: viewerUserId,
+      actorType: 'admin',
+      action: 'admin.store.status_change',
+      targetType: 'store',
+      targetId: storeId,
+      metadata: { fromStatus: existing.status, toStatus: status },
+    });
+    return updated;
   }
 
   // Onboarding-v2 review with operator note. Delegates to
@@ -580,7 +566,18 @@ export class AdminService {
     ) {
       throw new BadRequestException('Invalid review action');
     }
-    return this.stores.review(adminUserId, storeId, action, reason);
+    const result = await this.stores.review(adminUserId, storeId, action, reason);
+    // Reason text is operator-authored review feedback (not user
+    // PII) — keeping it makes the audit row self-explanatory.
+    await this.audit.record({
+      actorUserId: adminUserId,
+      actorType: 'admin',
+      action: 'admin.store.review',
+      targetType: 'store',
+      targetId: storeId,
+      metadata: { reviewAction: action, reason },
+    });
+    return result;
   }
 
   // Owner-or-admin detail projection. Routes through the same
@@ -594,15 +591,37 @@ export class AdminService {
   // Admin-only plan assignment. Wraps StoresService.setPlan so the
   // admin module owns the route surface; the underlying validation
   // (plan in the allowed set, store exists) lives in StoresService.
-  async setStorePlan(storeId: string, plan: string) {
-    return this.stores.setPlan(storeId, plan);
+  async setStorePlan(viewerUserId: string, storeId: string, plan: string) {
+    const result = await this.stores.setPlan(storeId, plan);
+    await this.audit.record({
+      actorUserId: viewerUserId,
+      actorType: 'admin',
+      action: 'admin.store.plan_change',
+      targetType: 'store',
+      targetId: storeId,
+      metadata: { plan },
+    });
+    return result;
   }
 
   // Marketplace featured toggle. Idempotent — re-applying the
   // same value is a no-op write at the DB level (Prisma update
   // is safe on equal data).
-  async setStoreFeatured(storeId: string, featured: boolean) {
-    return this.stores.setFeatured(storeId, featured);
+  async setStoreFeatured(
+    viewerUserId: string,
+    storeId: string,
+    featured: boolean,
+  ) {
+    const result = await this.stores.setFeatured(storeId, featured);
+    await this.audit.record({
+      actorUserId: viewerUserId,
+      actorType: 'admin',
+      action: 'admin.store.featured_change',
+      targetType: 'store',
+      targetId: storeId,
+      metadata: { featured },
+    });
+    return result;
   }
 
   // Verification documents uploaded with the merchant application.

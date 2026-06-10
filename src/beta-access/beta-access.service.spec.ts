@@ -99,7 +99,12 @@ describe('BetaAccessService', () => {
         update: jest.fn().mockImplementation(({ data }) => ({ id: 'code-1', ...data })),
       },
     };
-    service = new BetaAccessService(prisma as unknown as PrismaService);
+    service = new BetaAccessService(
+      prisma as unknown as PrismaService,
+      // PR 7 — audit stub; admin-mutation rows are pinned implicitly
+      // by it never throwing.
+      { record: jest.fn().mockResolvedValue(undefined) } as never,
+    );
   });
 
   afterEach(() => {
@@ -422,21 +427,21 @@ describe('BetaAccessService', () => {
   describe('setCodeDisabled (admin)', () => {
     it('404s for an unknown id', async () => {
       prisma.betaInviteCode.findUnique.mockResolvedValue(null);
-      await expect(service.setCodeDisabled('missing', true)).rejects.toThrow(
+      await expect(service.setCodeDisabled('admin-1', 'missing', true)).rejects.toThrow(
         'beta_code_not_found',
       );
     });
 
     it('stamps disabledAt when disabling, clears it when enabling', async () => {
       prisma.betaInviteCode.findUnique.mockResolvedValue(codeRow());
-      await service.setCodeDisabled('code-1', true);
+      await service.setCodeDisabled('admin-1', 'code-1', true);
       let arg = prisma.betaInviteCode.update.mock.calls[0][0] as {
         data: { disabledAt: Date | null };
       };
       expect(arg.data.disabledAt).toBeInstanceOf(Date);
 
       prisma.betaInviteCode.update.mockClear();
-      await service.setCodeDisabled('code-1', false);
+      await service.setCodeDisabled('admin-1', 'code-1', false);
       arg = prisma.betaInviteCode.update.mock.calls[0][0] as {
         data: { disabledAt: Date | null };
       };
@@ -522,14 +527,14 @@ describe('BetaAccessService', () => {
   describe('removeAllowlistEntry (admin)', () => {
     it('404s for an unknown id', async () => {
       prisma.betaAllowlistEntry.findUnique.mockResolvedValue(null);
-      await expect(service.removeAllowlistEntry('missing')).rejects.toThrow(
+      await expect(service.removeAllowlistEntry('admin-1', 'missing')).rejects.toThrow(
         'beta_allowlist_not_found',
       );
     });
 
     it('deletes an existing entry', async () => {
       prisma.betaAllowlistEntry.findUnique.mockResolvedValue({ id: 'al-1' });
-      const res = await service.removeAllowlistEntry('al-1');
+      const res = await service.removeAllowlistEntry('admin-1', 'al-1');
       expect(prisma.betaAllowlistEntry.delete).toHaveBeenCalledWith({
         where: { id: 'al-1' },
       });
