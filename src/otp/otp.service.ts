@@ -22,20 +22,38 @@ export type OtpType = 'phone' | 'email';
 export type SendOtpInput = { target?: string; type?: OtpType };
 export type VerifyOtpInput = { target?: string; code?: string };
 
-const CODE_LENGTH = 4;
+// PR 3 (platform stabilization): 6 digits, up from 4. Code space
+// grows 10,000 → 1,000,000, which combined with the attempt caps
+// below puts a brute-force success inside one TTL window at ~1e-5.
+// The frontend OtpInput length ships in the paired qift-ui-v2 PR —
+// merge order: backend first, frontend immediately after (in-flight
+// 4-digit codes expire within the 5-minute TTL either way).
+const CODE_LENGTH = 6;
 const TTL_MINUTES = 5;
 
 // Week 1 security hardening (F1) — per-OTP-row verify-attempt cap.
-// With CODE_LENGTH=4 the code space is 10,000, which is trivially
-// brute-forceable inside the 5-minute TTL window without a lockout.
 // We use the existing `Otp.attempts` column (already in the schema
 // with default 0): every wrong-code attempt increments it; once it
 // reaches MAX_VERIFY_ATTEMPTS the row is dead and verify rejects
-// with `otp_locked` BEFORE comparing the code. The send-side rate
-// limit (5 sends per 5 minutes per target) still caps how many
-// fresh OTP rows an attacker can generate, so the effective
-// attack budget is bounded.
+// with `otp_locked` BEFORE comparing the code.
 const MAX_VERIFY_ATTEMPTS = 5;
+
+// PR 3 — resend-safe lockout. The per-row cap alone resets every
+// time a fresh OTP is requested (new row, attempts=0), so an
+// attacker alternating guess-bursts with resends got a fresh budget
+// each time. This cap aggregates wrong attempts across ALL of a
+// target's rows in a sliding window — send() never deletes prior
+// rows, so the history (and the lockout) survives resends. It is
+// DB-backed, which also makes it replica-safe where the in-memory
+// send limiter is per-process. A successful verify deletes its row
+// (single-use), naturally releasing that row's attempts — correct,
+// since the budget exists to stop guessing, not to punish success.
+// 10 wrong guesses / 15 min against a 1,000,000-code space keeps
+// the attack math negligible while leaving honest fat-fingering
+// (2-3 typos per code, even across a resend) comfortably inside
+// the budget.
+const MAX_TARGET_ATTEMPTS = 10;
+const TARGET_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 
 // Email-shape sanity check. The full RFC is a tarpit; this catches
 // obvious typos (no @, no dot in domain) without rejecting valid
@@ -277,6 +295,27 @@ export class OtpService {
       ? rawTarget.toLowerCase()
       : (normalizePhone(rawTarget) ?? rawTarget);
 
+    // PR 3 — resend-safe lockout, checked BEFORE the row lookup.
+    // Sums wrong attempts across every row this target accumulated
+    // in the window; requesting a fresh code does NOT reset it (the
+    // old rows keep their counts). Same `otp_locked` the per-row cap
+    // throws, so frontends need no new error handling. Recovery is
+    // simply waiting out the window.
+    const windowed = await this.prisma.otp.aggregate({
+      _sum: { attempts: true },
+      where: {
+        target,
+        createdAt: { gte: new Date(Date.now() - TARGET_ATTEMPT_WINDOW_MS) },
+      },
+    });
+    if ((windowed._sum.attempts ?? 0) >= MAX_TARGET_ATTEMPTS) {
+      this.logger.warn(
+        `[otp:verify-failed] target=${target} reason=target-locked ` +
+          `windowAttempts=${windowed._sum.attempts}`,
+      );
+      throw new BadRequestException('otp_locked');
+    }
+
     const otp = await this.prisma.otp.findFirst({
       where: { target },
       orderBy: { createdAt: 'desc' },
@@ -295,7 +334,9 @@ export class OtpService {
     // attacker who has burned MAX_VERIFY_ATTEMPTS on this row cannot
     // bypass the cap by submitting one more guess. The user-facing
     // recovery path is to request a fresh OTP via /otp/send (the
-    // new row starts at attempts=0).
+    // new row starts at attempts=0) — but the target-window cap
+    // above still counts the burned rows, so resends only help an
+    // honest user, never extend an attacker's budget.
     if (otp.attempts >= MAX_VERIFY_ATTEMPTS) {
       this.logger.warn(
         `[otp:verify-failed] target=${target} reason=locked attempts=${otp.attempts}`,
