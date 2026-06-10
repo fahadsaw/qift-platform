@@ -118,6 +118,11 @@ export const OPS_PERMISSIONS = [
   // disable invite codes, manage allowlist, read redemption counts).
   // Granted to super_admin + operations_manager only.
   'beta.manage',
+  // Audit-trail read access. Gates GET /admin/audit-log (PR 11 —
+  // the read-only viewer over AuditLog). Metadata rows can carry
+  // old/new contact values for takeover forensics, so this is held
+  // by super_admin + operations_manager + trust_safety only.
+  'audit.read',
 ] as const satisfies readonly Permission[];
 
 export type OpsPermission = (typeof OPS_PERMISSIONS)[number];
@@ -141,6 +146,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'report.read',
     'analytics.read',
     'beta.manage',
+    'audit.read',
   ],
   finance: [
     'finance.read_payouts',
@@ -163,6 +169,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'report.read',
     'report.resolve',
     'store.set_status',
+    'audit.read',
   ],
   fulfillment_ops: ['store.read_detail', 'diagnostics.read'],
   analytics_viewer: ['analytics.read'],
@@ -223,4 +230,5 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'report.resolve',
   'analytics.read',
   'beta.manage',
+  'audit.read',
 ];

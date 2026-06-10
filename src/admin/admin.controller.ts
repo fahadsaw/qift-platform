@@ -54,6 +54,29 @@ export class AdminController {
     return { roles, permissions: [...permissionsFor(roles)] };
   }
 
+  // GET /admin/audit-log — read-only audit viewer (PR 11). Newest
+  // first; filter by exact actor id, action prefix, target type;
+  // page older with ?before=<ISO timestamp>. Gated by audit.read
+  // (super_admin / operations_manager / trust_safety) because
+  // metadata can carry contact-change forensics.
+  @Get('audit-log')
+  @RequireOpsPermission('audit.read')
+  listAuditLog(
+    @Query('actor') actor?: string,
+    @Query('action') action?: string,
+    @Query('targetType') targetType?: string,
+    @Query('before') before?: string,
+    @Query('take') take?: string,
+  ) {
+    return this.admin.listAuditLog({
+      actor,
+      action,
+      targetType,
+      before,
+      take: take ? Number(take) : undefined,
+    });
+  }
+
   // ── Users ────────────────────────────────────────────────────────
 
   @Get('users')

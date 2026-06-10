@@ -99,6 +99,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     // PERMISSIONS_BY_ROLE.operations_manager grant in ops-roles.ts).
     // super_admin holds this implicitly via ALL_ADMIN_PERMISSIONS.
     'beta.manage',
+    // Audit-trail viewer (PR 11) — mirror of ops-roles.ts.
+    'audit.read',
   ],
 
   // Mirrors apps/api/src/ops-roles/ops-roles.ts `finance` permission
@@ -146,6 +148,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     'report.read',
     'report.resolve',
     'store.set_status',
+    // Audit-trail viewer (PR 11) — mirror of ops-roles.ts.
+    'audit.read',
   ],
 
   fulfillment_ops: ['admin.access', 'store.read_detail', 'diagnostics.read'],
