@@ -13,6 +13,7 @@ import { AdminService } from './admin.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { AdminGuard } from './admin.guard';
 import { OpsRolesService } from '../ops-roles/ops-roles.service';
+import { permissionsFor } from '../ops-roles/ops-roles';
 import {
   OpsRoleGuard,
   RequireOpsPermission,
@@ -35,6 +36,23 @@ export class AdminController {
     private readonly admin: AdminService,
     private readonly opsRoles: OpsRolesService,
   ) {}
+
+  // ── Self ─────────────────────────────────────────────────────────
+
+  // GET /admin/me/ops-roles — self-introspection for the admin UI
+  // (PR 10, permission-aware rendering). Returns the viewer's ops
+  // roles AND the server-computed effective permission set, so the
+  // frontend never re-derives role→permission mappings from its own
+  // catalog copy (catalog drift between the two would silently show
+  // or hide the wrong buttons). No @RequireOpsPermission: any admin
+  // may ask what THEY can do — this reveals nothing about others.
+  // Purely advisory for rendering; every mutation stays guarded
+  // server-side regardless of what the UI shows.
+  @Get('me/ops-roles')
+  async myOpsRoles(@Req() req: AuthedRequest) {
+    const roles = await this.opsRoles.getUserRoles(req.user.userId);
+    return { roles, permissions: [...permissionsFor(roles)] };
+  }
 
   // ── Users ────────────────────────────────────────────────────────
 
