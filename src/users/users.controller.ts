@@ -137,10 +137,38 @@ export class UsersController {
     );
   }
 
+  // POST /users/me/change-email/start — begin the OTP-verified email
+  // change (PR 6, mirror of change-phone). Errors: 400 invalid_email
+  // / email_unchanged, 409 email_taken, plus OtpService send errors
+  // (otp_rate_limited, email_unavailable).
+  @Post('me/change-email/start')
+  changeEmailStart(
+    @Body() body: { newEmail?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.changeEmailStart(req.user.userId, body.newEmail);
+  }
+
+  // POST /users/me/change-email/confirm — verify the code that
+  // arrived at the NEW address and commit; stamps emailVerifiedAt.
+  @Post('me/change-email/confirm')
+  changeEmailConfirm(
+    @Body() body: { newEmail?: string; code?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.usersService.changeEmailConfirm(
+      req.user.userId,
+      body.newEmail,
+      body.code,
+    );
+  }
+
   // PATCH /users/me/email — set or clear the viewer's email address.
-  // Stored unverified (no email-OTP flow yet). Returns the same
-  // /users/me envelope so the social-accounts page can re-hydrate
-  // without a follow-up call.
+  // Stored UNVERIFIED; the OTP-verified path is
+  // POST /users/me/change-email/* above (PR 6). This legacy route
+  // stays for the social-accounts surface and for clearing the
+  // address. Returns the same /users/me envelope so the
+  // social-accounts page can re-hydrate without a follow-up call.
   @Patch('me/email')
   updateEmail(
     @Body() body: { email?: string | null },
