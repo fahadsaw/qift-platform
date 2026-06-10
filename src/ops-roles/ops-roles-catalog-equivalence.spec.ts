@@ -119,7 +119,7 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       expect(OPS_ROLES.length).toBe(8);
     });
 
-    it('OPS_PERMISSIONS contains exactly 20 documented permission identifiers', () => {
+    it('OPS_PERMISSIONS contains exactly 21 documented permission identifiers', () => {
       // Same freeze-point reasoning as above. Adding a new
       // OpsPermission requires updating both ops-roles.ts
       // (PERMISSIONS_BY_ROLE + SUPER_ADMIN_ALL) and role-map.ts
@@ -131,9 +131,12 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       //        (backend/identity-and-admin-controls commit C2).
       //   19 — `user.purge` added with the permanent-deletion
       //        endpoint. Granted ONLY to super_admin.
-      //   20 — `beta.manage` added with the Closed Beta Gate (this
-      //        PR). Granted to super_admin + operations_manager.
-      expect(OPS_PERMISSIONS.length).toBe(20);
+      //   20 — `beta.manage` added with the Closed Beta Gate.
+      //        Granted to super_admin + operations_manager.
+      //   21 — `audit.read` added with the audit-log viewer (PR 11).
+      //        Granted to super_admin + operations_manager +
+      //        trust_safety.
+      expect(OPS_PERMISSIONS.length).toBe(21);
     });
   });
 });

@@ -2002,12 +2002,23 @@ model BetaAllowlistEntry {
 // returned on a public endpoint.
 model AuditLog {
   id          String   @id @default(cuid())
-  actorUserId String
+  // Nullable to match production reality: the table predated the
+  // migration history (created by the week2-era audit experiment)
+  // and carries legacy rows with NULL actors. New writers ALWAYS
+  // set it — AuditService.record requires actorUserId — but a
+  // reader (the PR 11 viewer) must be able to deserialise the
+  // legacy rows. See migration 20260611000000_audit_log_align.
+  actorUserId String?
   actorType   String // 'admin' | 'user' | 'system'
   action      String // dot-namespaced, e.g. 'user.phone.change'
   targetType  String // 'user' | 'store' | 'system'
   targetId    String?
   metadata    Json?
+  // Legacy week2-era columns that exist on the production table.
+  // Unused by current writers; modelled so introspection/diff stays
+  // clean and a future risk layer can re-adopt them.
+  ipHash        String?
+  userAgentHash String?
   createdAt   DateTime @default(now())
 
   @@index([actorUserId, createdAt])

@@ -55,6 +55,45 @@ export class AdminService {
     private audit: AuditService,
   ) {}
 
+  // --- Audit log (PR 11 — read-only viewer) -----------------------
+
+  // Filtered, newest-first page over AuditLog. Cursorless "load
+  // older" pagination via `before` (createdAt upper bound) — audit
+  // browsing is a recency activity, offset math isn't worth it.
+  // `action` matches by prefix so 'admin.store' covers the whole
+  // family. take is clamped to [1, 100].
+  //
+  // Metadata is returned verbatim: rows can carry old/new contact
+  // values by design (takeover forensics) and the route is gated by
+  // the audit.read permission (super_admin / operations_manager /
+  // trust_safety). Never surface this payload on a non-admin route.
+  async listAuditLog(query: {
+    actor?: string;
+    action?: string;
+    targetType?: string;
+    before?: string;
+    take?: number;
+  }) {
+    const take = Math.min(Math.max(query.take ?? 50, 1), 100);
+    const before = query.before ? new Date(query.before) : null;
+    const beforeValid = before !== null && !Number.isNaN(before.getTime());
+    const rows = await this.prisma.auditLog.findMany({
+      where: {
+        ...(query.actor?.trim() ? { actorUserId: query.actor.trim() } : {}),
+        ...(query.action?.trim()
+          ? { action: { startsWith: query.action.trim() } }
+          : {}),
+        ...(query.targetType?.trim()
+          ? { targetType: query.targetType.trim() }
+          : {}),
+        ...(beforeValid ? { createdAt: { lt: before } } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+    });
+    return { rows, take };
+  }
+
   // --- Users -------------------------------------------------------
 
   // List users with optional substring search across qiftUsername /

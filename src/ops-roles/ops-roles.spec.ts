@@ -87,7 +87,7 @@ describe('isOpsRole', () => {
 });
 
 describe('OPS_PERMISSIONS', () => {
-  it('contains exactly the 20 expected identifiers', () => {
+  it('contains exactly the 21 expected identifiers', () => {
     expect([...OPS_PERMISSIONS]).toEqual([
       'store.review',
       'store.set_plan',
@@ -109,6 +109,7 @@ describe('OPS_PERMISSIONS', () => {
       'report.resolve',
       'analytics.read',
       'beta.manage',
+      'audit.read',
     ]);
   });
 
@@ -166,6 +167,7 @@ describe('permissionsFor — single role behaviour (pre-refactor parity)', () =>
         'report.read',
         'analytics.read',
         'beta.manage',
+        'audit.read',
       ]),
     );
   });
@@ -215,6 +217,7 @@ describe('permissionsFor — single role behaviour (pre-refactor parity)', () =>
         'report.read',
         'report.resolve',
         'store.set_status',
+        'audit.read',
       ]),
     );
   });
