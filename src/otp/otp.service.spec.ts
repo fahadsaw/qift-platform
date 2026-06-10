@@ -25,7 +25,6 @@ import { BadRequestException } from '@nestjs/common';
 import { OtpService } from './otp.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
-import { RiskSignalService } from '../risk-signals/risk-signal.service';
 
 type MockPrisma = {
   otp: {
@@ -90,10 +89,16 @@ describe('OtpService — verify (F1: per-row attempt cap + lockout)', () => {
       providers: [
         OtpService,
         { provide: PrismaService, useValue: prisma },
-        // MailService + RiskSignalService aren't consulted by
-        // verify(); stub-and-forget.
+        // MailService isn't consulted by verify(); stub-and-forget.
+        //
+        // NOTE (suite-repair): this spec previously imported a
+        // RiskSignalService from ../risk-signals/ — a module that was
+        // never committed, which made the whole suite fail to LOAD on
+        // main (zero OTP coverage ran in CI). OtpService's real
+        // constructor is (PrismaService, MailService); the phantom
+        // provider is gone. If a risk-signal layer lands later it
+        // arrives WITH its module, not ahead of it.
         { provide: MailService, useValue: {} },
-        { provide: RiskSignalService, useValue: { record: jest.fn() } },
       ],
     }).compile();
     service = module.get<OtpService>(OtpService);
