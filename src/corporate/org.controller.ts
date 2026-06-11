@@ -1,7 +1,9 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  Param,
   Post,
   Req,
   UseGuards,
@@ -56,5 +58,40 @@ export class OrgController {
   @RequireOrgRole('admin')
   submit(@Req() req: AuthedRequest) {
     return this.orgs.submitOrg(req.user.userId, req.orgContext!.orgId);
+  }
+
+  // ── Seat management (PR 7a) — OWNER-ONLY, all three routes. ──────
+  // Seats decide who can spend the company's money (maker) and who
+  // signs it off (checker); granting them is the owner's call alone.
+
+  @Get(':orgId/members')
+  @RequireOrgRole('owner')
+  listMembers(@Req() req: AuthedRequest) {
+    return this.orgs.listMembers(req.orgContext!.orgId);
+  }
+
+  // Seat a colleague by @qiftUsername with role admin | approver |
+  // viewer. 'owner' is never grantable.
+  @Post(':orgId/members')
+  @RequireOrgRole('owner')
+  addMember(
+    @Body() body: { qiftUsername?: string; role?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.orgs.addMember(
+      req.user.userId,
+      req.orgContext!.orgId,
+      body ?? {},
+    );
+  }
+
+  @Delete(':orgId/members/:seatId')
+  @RequireOrgRole('owner')
+  revokeMember(@Param('seatId') seatId: string, @Req() req: AuthedRequest) {
+    return this.orgs.revokeMember(
+      req.user.userId,
+      req.orgContext!.orgId,
+      seatId,
+    );
   }
 }
