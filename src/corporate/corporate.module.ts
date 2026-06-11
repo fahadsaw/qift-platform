@@ -24,6 +24,8 @@ import { ClaimService } from './claim.service';
 import { ClaimController } from './claim.controller';
 import { ClaimExportService } from './claim-export.service';
 import { ReportService } from './report.service';
+import { StoreBusinessService } from './store-business.service';
+import { StoreBusinessAdminController } from './store-business-admin.controller';
 
 // Corporate Foundation module (PR 1: org spine, PR 2: roster,
 // PR 3: campaigns).
@@ -64,6 +66,7 @@ import { ReportService } from './report.service';
     RosterController,
     CampaignController,
     ClaimController,
+    StoreBusinessAdminController,
   ],
   providers: [
     OrgService,
@@ -77,6 +80,7 @@ import { ReportService } from './report.service';
     ClaimService,
     ClaimExportService,
     ReportService,
+    StoreBusinessService,
     OrgRoleGuard,
     AdminGuard,
     PrismaService,
