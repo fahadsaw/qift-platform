@@ -27,6 +27,19 @@ import { AuditService } from '../audit/audit.service';
 // lateness of ~6h is invisible while keeping the sweep cheap.
 const SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+// Campaign states that PROTECT a contact from purging (PR 3): a
+// contact selected into a submitted/approved/in-flight campaign must
+// not vanish from under it mid-wave. Draft campaigns deliberately do
+// NOT protect — an abandoned draft must never pin roster PII past
+// its retention deadline. Once the campaign reaches a terminal state
+// (completed / cancelled), protection lapses and the next sweep
+// collects the row.
+const PURGE_PROTECTING_CAMPAIGN_STATES = [
+  'pending_approval',
+  'approved',
+  'dispatching',
+] as const;
+
 @Injectable()
 export class RosterPurgeService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RosterPurgeService.name);
@@ -64,7 +77,16 @@ export class RosterPurgeService implements OnModuleInit, OnModuleDestroy {
   async runOnce(): Promise<{ deleted: number }> {
     try {
       const result = await this.prisma.corporateContact.deleteMany({
-        where: { purgeAfter: { lt: new Date() } },
+        where: {
+          purgeAfter: { lt: new Date() },
+          campaignRecipients: {
+            none: {
+              campaign: {
+                status: { in: [...PURGE_PROTECTING_CAMPAIGN_STATES] },
+              },
+            },
+          },
+        },
       });
       if (result.count > 0) {
         this.logger.log(`Roster purge: deleted ${result.count} expired rows`);
