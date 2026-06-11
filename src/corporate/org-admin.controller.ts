@@ -18,6 +18,7 @@ import { OrgService } from './org.service';
 import type { OrgReviewAction } from './org.service';
 import { ReportService } from './report.service';
 import { ClaimExportService } from './claim-export.service';
+import { CampaignService } from './campaign.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -37,6 +38,7 @@ export class OrgAdminController {
     private readonly orgs: OrgService,
     private readonly reports: ReportService,
     private readonly claimExport: ClaimExportService,
+    private readonly campaigns: CampaignService,
   ) {}
 
   // Review queue. ?status=submitted is the default operator view;
@@ -49,6 +51,16 @@ export class OrgAdminController {
   @Get(':orgId')
   getOrg(@Param('orgId') orgId: string) {
     return this.orgs.adminGetOrg(orgId);
+  }
+
+  // Ops campaign list for one org (admin-screens enabler): the same
+  // counts-only projection the org plane sees — ops picks a campaign
+  // here to open its report or export claim links. An unknown orgId
+  // simply returns [] (org-scoped where clause); the org queue is
+  // the discovery surface, not this.
+  @Get(':orgId/campaigns')
+  listOrgCampaigns(@Param('orgId') orgId: string) {
+    return this.campaigns.listCampaigns(orgId);
   }
 
   // Ops-plane campaign report (PR 6): full per-status granularity —
