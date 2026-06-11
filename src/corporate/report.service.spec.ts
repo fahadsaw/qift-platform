@@ -40,7 +40,7 @@ describe('ReportService', () => {
     giftCampaign: { findFirst: jest.Mock };
     campaignRecipient: { count: jest.Mock };
     dispatchJob: { groupBy: jest.Mock };
-    claimableGift: { groupBy: jest.Mock };
+    claimableGift: { groupBy: jest.Mock; count: jest.Mock };
   };
   let service: ReportService;
 
@@ -51,7 +51,12 @@ describe('ReportService', () => {
       dispatchJob: {
         groupBy: jest.fn().mockResolvedValue(groups({ dispatched: 10 })),
       },
-      claimableGift: { groupBy: jest.fn().mockResolvedValue(groups({})) },
+      claimableGift: {
+        groupBy: jest.fn().mockResolvedValue(groups({})),
+        // Time-aware expiry probe (dry-run fix): rows still
+        // 'pending' whose claim window already lapsed.
+        count: jest.fn().mockResolvedValue(0),
+      },
     };
     service = new ReportService(prisma as unknown as PrismaService);
   });
@@ -90,6 +95,43 @@ describe('ReportService', () => {
       const mixedReport = await service.orgCampaignReport('org-1', 'camp-1');
 
       expect(declinedReport).toEqual(mixedReport);
+    });
+
+    it('UNTOUCHED-EXPIRED claims fold into didNotParticipate, not pending (dry-run fix)', async () => {
+      // 10 issued: 6 claimed, 4 rows still say 'pending' — but 3 of
+      // those passed expiresAt without the link ever being opened
+      // (lazy expiry never ran). The org must see them as
+      // non-participation, not as a forever-pending tail.
+      prisma.claimableGift.groupBy.mockResolvedValue(
+        groups({ claimed: 6, pending: 4 }),
+      );
+      prisma.claimableGift.count.mockResolvedValue(3);
+      const report = await service.orgCampaignReport('org-1', 'camp-1');
+      expect(report.gifts).toEqual({
+        issued: 10,
+        claimed: 6,
+        pending: 1,
+        didNotParticipate: 3,
+      });
+      // The probe is time-anchored on expiresAt.
+      const where = prisma.claimableGift.count.mock.calls[0][0].where;
+      expect(where.status).toBe('pending');
+      expect(where.expiresAt.lt).toBeInstanceOf(Date);
+    });
+
+    it('ops report exposes the same rows as pendingExpired (granularity stays ops-side)', async () => {
+      prisma.giftCampaign.findFirst.mockResolvedValue({
+        ...campaignRow,
+        createdBy: 'maker-1',
+        approvedBy: 'checker-1',
+      });
+      prisma.claimableGift.groupBy.mockResolvedValue(
+        groups({ claimed: 6, pending: 4 }),
+      );
+      prisma.claimableGift.count.mockResolvedValue(3);
+      const report = await service.adminCampaignReport('org-1', 'camp-1');
+      expect(report.pendingExpired).toBe(3);
+      expect(report.claims).toEqual({ claimed: 6, pending: 4 });
     });
 
     it('an unanticipated FUTURE terminal status still folds into the bucket (derived by subtraction)', async () => {

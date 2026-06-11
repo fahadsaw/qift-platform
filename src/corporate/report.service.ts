@@ -51,24 +51,37 @@ export class ReportService {
   constructor(private prisma: PrismaService) {}
 
   private async countsFor(campaignId: string) {
-    const [recipients, jobsByStatus, claimsByStatus] = await Promise.all([
-      this.prisma.campaignRecipient.count({ where: { campaignId } }),
-      this.prisma.dispatchJob.groupBy({
-        by: ['status'],
-        where: { campaignId },
-        _count: { _all: true },
-      }),
-      this.prisma.claimableGift.groupBy({
-        by: ['status'],
-        where: { campaignId },
-        _count: { _all: true },
-      }),
-    ]);
+    const [recipients, jobsByStatus, claimsByStatus, pendingExpired] =
+      await Promise.all([
+        this.prisma.campaignRecipient.count({ where: { campaignId } }),
+        this.prisma.dispatchJob.groupBy({
+          by: ['status'],
+          where: { campaignId },
+          _count: { _all: true },
+        }),
+        this.prisma.claimableGift.groupBy({
+          by: ['status'],
+          where: { campaignId },
+          _count: { _all: true },
+        }),
+        // Dry-run finding: claim expiry is marked LAZILY (a claim
+        // only flips to 'expired' when its link is touched), so a
+        // recipient who never opens the link would sit in 'pending'
+        // forever. Reports must be time-aware: a pending claim past
+        // its expiresAt is not pending, whatever the row says.
+        this.prisma.claimableGift.count({
+          where: {
+            campaignId,
+            status: 'pending',
+            expiresAt: { lt: new Date() },
+          },
+        }),
+      ]);
     const jobs: Record<string, number> = {};
     for (const g of jobsByStatus) jobs[g.status] = g._count._all;
     const claims: Record<string, number> = {};
     for (const g of claimsByStatus) claims[g.status] = g._count._all;
-    return { recipients, jobs, claims };
+    return { recipients, jobs, claims, pendingExpired };
   }
 
   // ── Org plane: aggregate funnel, F7-collapsed ─────────────────────
@@ -83,14 +96,19 @@ export class ReportService {
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
 
-    const { recipients, jobs, claims } = await this.countsFor(campaignId);
+    const { recipients, jobs, claims, pendingExpired } =
+      await this.countsFor(campaignId);
 
     const issued = Object.values(claims).reduce((a, b) => a + b, 0);
     const claimed = claims.claimed ?? 0;
-    const pending = claims.pending ?? 0;
-    // Everything terminal that isn't claimed collapses (F7). Derived
-    // by subtraction so an unanticipated future status can never
-    // leak as its own number on the org plane.
+    // Time-aware: lazily-expired claims (still 'pending' in the row
+    // because nobody touched the link) are NOT pending.
+    const pending = (claims.pending ?? 0) - pendingExpired;
+    // Everything terminal that isn't claimed collapses (F7) — which
+    // now includes the untouched-expired, exactly where "never
+    // opened the link" belongs. Derived by subtraction so an
+    // unanticipated future status can never leak as its own number
+    // on the org plane.
     const didNotParticipate = issued - claimed - pending;
 
     return {
@@ -117,7 +135,10 @@ export class ReportService {
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
 
-    const { recipients, jobs, claims } = await this.countsFor(campaignId);
-    return { campaign, recipients, jobs, claims };
+    const { recipients, jobs, claims, pendingExpired } =
+      await this.countsFor(campaignId);
+    // pendingExpired is the ops-plane view of the same time-aware
+    // rule: rows still marked 'pending' whose window already lapsed.
+    return { campaign, recipients, jobs, claims, pendingExpired };
   }
 }
