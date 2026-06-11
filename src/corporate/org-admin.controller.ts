@@ -17,6 +17,7 @@ import {
 import { OrgService } from './org.service';
 import type { OrgReviewAction } from './org.service';
 import { ReportService } from './report.service';
+import { ClaimExportService } from './claim-export.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -35,6 +36,7 @@ export class OrgAdminController {
   constructor(
     private readonly orgs: OrgService,
     private readonly reports: ReportService,
+    private readonly claimExport: ClaimExportService,
   ) {}
 
   // Review queue. ?status=submitted is the default operator view;
@@ -59,6 +61,25 @@ export class OrgAdminController {
     @Param('campaignId') campaignId: string,
   ) {
     return this.reports.adminCampaignReport(orgId, campaignId);
+  }
+
+  // Claim-link export (PR 7b) — the manual-share distribution list.
+  // POST, not GET: every call ROTATES the pending claims' tokens
+  // (export IS the distribution event; prior links die). Gated by
+  // the class-level org.review permission like everything here, and
+  // audited with counts. Payload: contactName + channel + claimUrl
+  // only — never channel values, never addresses.
+  @Post(':orgId/campaigns/:campaignId/claim-links')
+  exportClaimLinks(
+    @Param('orgId') orgId: string,
+    @Param('campaignId') campaignId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.claimExport.exportCampaignClaimLinks(
+      req.user.userId,
+      orgId,
+      campaignId,
+    );
   }
 
   // action ∈ { approve, reject, request_changes }; reason is required

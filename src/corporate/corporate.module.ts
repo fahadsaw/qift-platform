@@ -22,6 +22,7 @@ import {
 import { ClaimMintService } from './claim-mint.service';
 import { ClaimService } from './claim.service';
 import { ClaimController } from './claim.controller';
+import { ClaimExportService } from './claim-export.service';
 import { ReportService } from './report.service';
 
 // Corporate Foundation module (PR 1: org spine, PR 2: roster,
@@ -74,6 +75,7 @@ import { ReportService } from './report.service';
     { provide: DISPATCH_PROVIDER, useClass: ManualDispatchProvider },
     ClaimMintService,
     ClaimService,
+    ClaimExportService,
     ReportService,
     OrgRoleGuard,
     AdminGuard,
