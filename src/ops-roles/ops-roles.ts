@@ -118,6 +118,11 @@ export const OPS_PERMISSIONS = [
   // disable invite codes, manage allowlist, read redemption counts).
   // Granted to super_admin + operations_manager only.
   'beta.manage',
+  // Corporate org review. Gates /admin/orgs/* (Corporate
+  // Foundation PR 1 — list + approve/reject/request_changes on
+  // Organization applications). Granted to super_admin +
+  // operations_manager.
+  'org.review',
   // Audit-trail read access. Gates GET /admin/audit-log (PR 11 —
   // the read-only viewer over AuditLog). Metadata rows can carry
   // old/new contact values for takeover forensics, so this is held
@@ -147,6 +152,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'analytics.read',
     'beta.manage',
     'audit.read',
+    'org.review',
   ],
   finance: [
     'finance.read_payouts',
@@ -231,4 +237,5 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'analytics.read',
   'beta.manage',
   'audit.read',
+  'org.review',
 ];

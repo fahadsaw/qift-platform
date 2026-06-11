@@ -101,6 +101,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     'beta.manage',
     // Audit-trail viewer (PR 11) — mirror of ops-roles.ts.
     'audit.read',
+    // Corporate org review (CF PR 1) — mirror of ops-roles.ts.
+    'org.review',
   ],
 
   // Mirrors apps/api/src/ops-roles/ops-roles.ts `finance` permission
