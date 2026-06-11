@@ -12,6 +12,12 @@ import { RosterPurgeService } from './roster-purge.service';
 import { RosterController } from './roster.controller';
 import { CampaignService } from './campaign.service';
 import { CampaignController } from './campaign.controller';
+import { DispatchService } from './dispatch.service';
+import { DispatchWorkerService } from './dispatch-worker.service';
+import {
+  DISPATCH_PROVIDER,
+  ManualDispatchProvider,
+} from './dispatch-provider';
 
 // Corporate Foundation module (PR 1: org spine, PR 2: roster,
 // PR 3: campaigns).
@@ -19,11 +25,17 @@ import { CampaignController } from './campaign.controller';
 // /org/*                — org plane (JwtAuthGuard + OrgRoleGuard).
 // /org/:orgId/contacts  — roster import/list/archive (admin seats).
 // /org/:orgId/campaigns — campaign drafting + maker–checker
-//                         approval state machine.
+//                         approval state machine + dispatch (PR 4).
 // /admin/orgs/*         — Qift-ops review surface (triple-guarded,
 //                         org.review permission).
 // RosterPurgeService    — retention sweeper, env-gated DEFAULT OFF
 //                         (QIFT_ROSTER_PURGE_ENABLED='true').
+// DispatchWorkerService — queue processor, env-gated DEFAULT OFF
+//                         (QIFT_DISPATCH_WORKER_ENABLED='true');
+//                         emergency brake QIFT_DISPATCH_PAUSED.
+//                         Provider lane bound to
+//                         ManualDispatchProvider — the MVP never
+//                         auto-sends (manual-share invariant).
 //
 // OpsRolesModule supplies OpsRoleGuard + OpsRolesService for the
 // admin surface; AdminGuard + PrismaService are provided locally
@@ -46,10 +58,13 @@ import { CampaignController } from './campaign.controller';
     RosterService,
     RosterPurgeService,
     CampaignService,
+    DispatchService,
+    DispatchWorkerService,
+    { provide: DISPATCH_PROVIDER, useClass: ManualDispatchProvider },
     OrgRoleGuard,
     AdminGuard,
     PrismaService,
   ],
-  exports: [OrgService, RosterService, CampaignService],
+  exports: [OrgService, RosterService, CampaignService, DispatchService],
 })
 export class CorporateModule {}
