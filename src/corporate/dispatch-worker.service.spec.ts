@@ -10,6 +10,7 @@
 import { DispatchWorkerService, MAX_DISPATCH_ATTEMPTS } from './dispatch-worker.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { DispatchProvider } from './dispatch-provider';
+import type { ClaimMintService } from './claim-mint.service';
 
 type PrismaMock = {
   dispatchJob: { findMany: jest.Mock; updateMany: jest.Mock };
@@ -29,6 +30,7 @@ const job = (over: Record<string, unknown> = {}) => ({
 describe('DispatchWorkerService', () => {
   let prisma: PrismaMock;
   let provider: { name: string; deliver: jest.Mock };
+  let claimMint: { mintForJob: jest.Mock };
   let service: DispatchWorkerService;
   const ORIGINAL_PAUSED = process.env.QIFT_DISPATCH_PAUSED;
   const ORIGINAL_ENABLED = process.env.QIFT_DISPATCH_WORKER_ENABLED;
@@ -48,9 +50,17 @@ describe('DispatchWorkerService', () => {
       giftCampaign: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
     };
     provider = { name: 'mock', deliver: jest.fn().mockResolvedValue({ ok: true }) };
+    claimMint = {
+      mintForJob: jest.fn().mockResolvedValue({
+        ok: true,
+        claimId: 'claim-1',
+        claimUrl: 'https://www.qift.net/claim/tok-x',
+      }),
+    };
     service = new DispatchWorkerService(
       prisma as unknown as PrismaService,
       provider as unknown as DispatchProvider,
+      claimMint as unknown as ClaimMintService,
     );
   });
 
@@ -75,20 +85,41 @@ describe('DispatchWorkerService', () => {
       where: { id: 'job-1', status: 'pending' },
       data: { status: 'processing', attempts: { increment: 1 } },
     });
-    // Phone wins over email; claimUrl is the PR 5 seam (null here).
+    // Phone wins over email; the minted claim URL rides along.
+    expect(claimMint.mintForJob).toHaveBeenCalledWith({
+      jobId: 'job-1',
+      campaignId: 'camp-1',
+      contactId: 'c-1',
+    });
     expect(provider.deliver).toHaveBeenCalledWith({
       jobId: 'job-1',
       campaignId: 'camp-1',
       contactId: 'c-1',
       channel: 'phone',
       channelValue: '+966501234567',
-      claimUrl: null,
+      claimUrl: 'https://www.qift.net/claim/tok-x',
     });
-    // Settle writes no channel value onto the job row.
+    // Settle records the claim ref but no channel value.
     const settle = prisma.dispatchJob.updateMany.mock.calls[1][0];
     expect(settle.data.status).toBe('dispatched');
     expect(settle.data.processedAt).toBeInstanceOf(Date);
+    expect(settle.data.claimRef).toBe('claim-1');
     expect(JSON.stringify(settle.data)).not.toContain('+966');
+  });
+
+  it('mint failure → permanent job failure, provider never called', async () => {
+    prisma.dispatchJob.findMany.mockResolvedValue([job()]);
+    claimMint.mintForJob.mockResolvedValue({
+      ok: false,
+      error: 'campaign_snapshot_missing',
+    });
+    const res = await service.runOnce();
+    expect(res.failed).toBe(1);
+    expect(provider.deliver).not.toHaveBeenCalled();
+    expect(prisma.dispatchJob.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: 'job-1', status: 'processing' },
+      data: { status: 'failed', lastError: 'campaign_snapshot_missing' },
+    });
   });
 
   it('falls back to email when the contact has no phone', async () => {

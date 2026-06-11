@@ -2154,6 +2154,7 @@ model GiftCampaign {
   options    CampaignGiftOption[]
   recipients CampaignRecipient[]
   jobs       DispatchJob[]
+  claims     ClaimableGift[]
 
   @@index([orgId, status])
 }
@@ -2237,4 +2238,74 @@ model DispatchJob {
 
   @@index([status, createdAt])
   @@index([campaignId, status])
+}
+
+// ClaimableGift — the account-less claim record (Corporate
+// Foundation PR 5; Corporate Core v2 §6). The recipient NEVER
+// registers: token possession + OTP to the bound channel is the
+// whole identity.
+//
+//   pending → claimed   (address confirmed — IRREVOCABLE)
+//          → declined   (recipient said no)
+//          → mismatch   ("this isn't me" after the identity echo)
+//          → expired    (claim window lapsed; lazily marked)
+//          → revoked    (reserved for ops intervention)
+//
+// PRIVACY STRUCTURE:
+//   * tokenHash only — the raw claim token never persists.
+//   * The pre-OTP surface (teaser) exposes NOTHING identifying: no
+//     name, no org, no gift (F1 rule — pinned by tests).
+//   * recipientName / channelValue / orgDisplayName / giftSnapshot
+//     are SNAPSHOTS taken at mint so the claim survives roster
+//     purges; they are revealed ONLY after OTP verification.
+//   * contactId is plain TEXT (no FK) — linkage for counters, dead
+//     after purge by design.
+model ClaimableGift {
+  id               String    @id @default(cuid())
+  campaignId       String
+  contactId        String
+  jobId            String?   @unique
+  tokenHash        String    @unique
+  status           String    @default("pending")
+  recipientName    String
+  channel          String // 'phone' | 'email'
+  channelValue     String
+  orgDisplayName   String
+  campaignMessage  String?
+  giftSnapshot     Json
+  sessionTokenHash String?
+  sessionExpiresAt DateTime?
+  otpVerifiedAt    DateTime?
+  claimedAt        DateTime?
+  declinedAt       DateTime?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  campaign GiftCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  address  ClaimAddress?
+
+  @@index([campaignId, status])
+}
+
+// ClaimAddress — where the recipient wants their gift delivered.
+// STRUCTURALLY separate from the consumer Address table AND from
+// everything the org can read: NO API endpoint returns this row to
+// anyone (Corporate Core v2 §6: the company never sees employee
+// addresses; fulfillment is ops-manual in the pilot). Write-only
+// from the claim flow.
+model ClaimAddress {
+  id        String   @id @default(cuid())
+  claimId   String   @unique
+  fullName  String?
+  phone     String
+  country   String
+  region    String?
+  city      String
+  district  String?
+  line1     String
+  notes     String?
+  createdAt DateTime @default(now())
+
+  claim ClaimableGift @relation(fields: [claimId], references: [id], onDelete: Cascade)
 }
