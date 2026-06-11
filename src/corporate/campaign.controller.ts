@@ -16,6 +16,7 @@ import type { OrgContext } from './org-role.guard';
 import { CampaignService } from './campaign.service';
 import type { CampaignDraftInput } from './campaign.service';
 import { DispatchService } from './dispatch.service';
+import { ReportService } from './report.service';
 
 type AuthedRequest = {
   user: { userId: string; qiftUsername: string };
@@ -41,6 +42,7 @@ export class CampaignController {
   constructor(
     private readonly campaigns: CampaignService,
     private readonly dispatch: DispatchService,
+    private readonly reports: ReportService,
   ) {}
 
   @Post()
@@ -202,5 +204,18 @@ export class CampaignController {
       req.orgContext!.orgId,
       campaignId,
     );
+  }
+
+  // ── Reporting (PR 6) ─────────────────────────────────────────────
+
+  // The org-plane funnel report. ANY active seat may read it —
+  // read-only reports are the viewer role's entire purpose. The
+  // payload is aggregate counts only, with the F7 non-participation
+  // collapse applied in ReportService; recipient identity never
+  // appears here.
+  @Get(':campaignId/report')
+  @RequireOrgRole()
+  report(@Param('campaignId') campaignId: string, @Req() req: AuthedRequest) {
+    return this.reports.orgCampaignReport(req.orgContext!.orgId, campaignId);
   }
 }

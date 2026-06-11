@@ -16,6 +16,7 @@ import {
 } from '../ops-roles/ops-role.guard';
 import { OrgService } from './org.service';
 import type { OrgReviewAction } from './org.service';
+import { ReportService } from './report.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -31,7 +32,10 @@ type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 @UseGuards(JwtAuthGuard, AdminGuard, OpsRoleGuard)
 @RequireOpsPermission('org.review')
 export class OrgAdminController {
-  constructor(private readonly orgs: OrgService) {}
+  constructor(
+    private readonly orgs: OrgService,
+    private readonly reports: ReportService,
+  ) {}
 
   // Review queue. ?status=submitted is the default operator view;
   // unknown status values fall back to the unfiltered list.
@@ -43,6 +47,18 @@ export class OrgAdminController {
   @Get(':orgId')
   getOrg(@Param('orgId') orgId: string) {
     return this.orgs.adminGetOrg(orgId);
+  }
+
+  // Ops-plane campaign report (PR 6): full per-status granularity —
+  // ops needs `mismatch` to chase roster errors and `failed` jobs to
+  // unblock dispatch. Counts only; identities never appear even
+  // here. The F7 collapse applies to the ORG plane, not this one.
+  @Get(':orgId/campaigns/:campaignId/report')
+  campaignReport(
+    @Param('orgId') orgId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    return this.reports.adminCampaignReport(orgId, campaignId);
   }
 
   // action ∈ { approve, reject, request_changes }; reason is required
