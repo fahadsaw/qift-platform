@@ -15,6 +15,7 @@ import { OrgRoleGuard, RequireOrgRole } from './org-role.guard';
 import type { OrgContext } from './org-role.guard';
 import { CampaignService } from './campaign.service';
 import type { CampaignDraftInput } from './campaign.service';
+import { DispatchService } from './dispatch.service';
 
 type AuthedRequest = {
   user: { userId: string; qiftUsername: string };
@@ -37,7 +38,10 @@ type AuthedRequest = {
 @Controller('org/:orgId/campaigns')
 @UseGuards(JwtAuthGuard, OrgRoleGuard)
 export class CampaignController {
-  constructor(private readonly campaigns: CampaignService) {}
+  constructor(
+    private readonly campaigns: CampaignService,
+    private readonly dispatch: DispatchService,
+  ) {}
 
   @Post()
   @RequireOrgRole('admin')
@@ -163,6 +167,38 @@ export class CampaignController {
   cancel(@Param('campaignId') campaignId: string, @Req() req: AuthedRequest) {
     return this.campaigns.cancelCampaign(
       req.user.userId,
+      req.orgContext!.orgId,
+      campaignId,
+    );
+  }
+
+  // ── Dispatch (PR 4) ──────────────────────────────────────────────
+
+  // Execute an approved campaign: enqueue one DispatchJob per
+  // recipient. Admin-seat — the maker–checker gate sat at approval;
+  // dispatch executes a decision already signed off.
+  @Post(':campaignId/dispatch')
+  @RequireOrgRole('admin')
+  dispatchCampaign(
+    @Param('campaignId') campaignId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.dispatch.dispatchCampaign(
+      req.user.userId,
+      req.orgContext!.orgId,
+      campaignId,
+    );
+  }
+
+  // Queue-health counts (pending/processing/dispatched/failed) —
+  // operational data, not participation outcomes.
+  @Get(':campaignId/dispatch-status')
+  @RequireOrgRole('admin', 'approver')
+  dispatchStatus(
+    @Param('campaignId') campaignId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.dispatch.getDispatchStatus(
       req.orgContext!.orgId,
       campaignId,
     );

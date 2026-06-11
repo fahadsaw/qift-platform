@@ -2153,6 +2153,7 @@ model GiftCampaign {
   org        Organization         @relation(fields: [orgId], references: [id], onDelete: Cascade)
   options    CampaignGiftOption[]
   recipients CampaignRecipient[]
+  jobs       DispatchJob[]
 
   @@index([orgId, status])
 }
@@ -2197,4 +2198,43 @@ model CampaignRecipient {
 
   @@unique([campaignId, contactId])
   @@index([contactId])
+}
+
+// DispatchJob — one unit of "get this recipient their claimable
+// gift" (Corporate Foundation PR 4; Corporate Core v2 §5).
+//
+//   pending → processing → dispatched
+//                │   └→ pending (retry while attempts < max)
+//                └→ failed (permanent / attempts exhausted)
+//   cancelled — reserved for ops intervention (unused by the MVP
+//               worker; dispatching campaigns are not cancellable).
+//
+// idempotencyKey = campaignId:contactId — a recipient can never
+// receive two jobs for the same wave, no matter how many times
+// dispatch is retried or replayed.
+//
+// contactId is a plain TEXT id (NO FK): jobs are the dispatch
+// LEDGER and must survive contact purges. The row itself carries no
+// PII — channel values are read live from CorporateContact at
+// processing time and never copied here.
+//
+// claimRef is the PR 5 seam: the ClaimableGift id once the claim
+// flow mints one during processing. Null until then.
+model DispatchJob {
+  id             String    @id @default(cuid())
+  campaignId     String
+  contactId      String
+  idempotencyKey String    @unique
+  status         String    @default("pending")
+  attempts       Int       @default(0)
+  lastError      String?
+  claimRef       String?
+  processedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  campaign GiftCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([campaignId, status])
 }
