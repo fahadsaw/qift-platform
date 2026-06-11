@@ -21,7 +21,9 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type AuditRecordInput = {
-  actorUserId: string;
+  // null for system actors (background workers) — there is no human
+  // behind the action. The column is nullable in production already.
+  actorUserId: string | null;
   actorType: 'admin' | 'user' | 'system';
   action: string; // dot-namespaced, e.g. 'user.phone.change'
   targetType: 'user' | 'store' | 'system' | 'organization';

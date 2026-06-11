@@ -2054,7 +2054,8 @@ model Organization {
   reviewedBy    String?
   createdAt     DateTime  @default(now())
 
-  seats OrgUser[]
+  seats    OrgUser[]
+  contacts CorporateContact[]
 
   @@index([status])
 }
@@ -2078,4 +2079,40 @@ model OrgUser {
 
   @@unique([orgId, userId])
   @@index([userId])
+}
+
+// CorporateContact — the company's gift ROSTER (Corporate
+// Foundation PR 2; Corporate Core v2 §3). One row per person the
+// company may gift to. Three structural rules:
+//
+//   1. NO FK to User — EVER. Whether a roster person is also a Qift
+//      consumer is unrepresentable here; employment data and
+//      consumer identity never join (Corporate Core v2 §3.2).
+//   2. NO address fields. Delivery addresses are collected from the
+//      RECIPIENT at claim time (ClaimAddress, PR 5); the company
+//      never supplies them and the import gate rejects CSVs that
+//      try (address-column rejection).
+//   3. Retention-bounded: every row carries purgeAfter; the purge
+//      worker hard-deletes expired rows. Roster data is borrowed,
+//      not owned.
+model CorporateContact {
+  id            String    @id @default(cuid())
+  orgId         String
+  fullName      String
+  email         String?   // lowercased at import
+  phone         String?   // E.164 (normalizePhone) at import
+  department    String?
+  employeeRef   String?   // company's own opaque reference
+  status        String    @default("active") // 'active' | 'archived'
+  importBatchId String?
+  purgeAfter    DateTime
+  archivedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, status])
+  @@index([orgId, email])
+  @@index([orgId, phone])
+  @@index([purgeAfter])
 }

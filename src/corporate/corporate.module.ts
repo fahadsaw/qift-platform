@@ -7,12 +7,18 @@ import { OrgService } from './org.service';
 import { OrgRoleGuard } from './org-role.guard';
 import { OrgController } from './org.controller';
 import { OrgAdminController } from './org-admin.controller';
+import { RosterService } from './roster.service';
+import { RosterPurgeService } from './roster-purge.service';
+import { RosterController } from './roster.controller';
 
-// Corporate Foundation module (PR 1: org spine).
+// Corporate Foundation module (PR 1: org spine, PR 2: roster).
 //
-// /org/*        — org plane (JwtAuthGuard + OrgRoleGuard).
-// /admin/orgs/* — Qift-ops review surface (triple-guarded,
-//                 org.review permission).
+// /org/*                — org plane (JwtAuthGuard + OrgRoleGuard).
+// /org/:orgId/contacts  — roster import/list/archive (admin seats).
+// /admin/orgs/*         — Qift-ops review surface (triple-guarded,
+//                         org.review permission).
+// RosterPurgeService    — retention sweeper, env-gated DEFAULT OFF
+//                         (QIFT_ROSTER_PURGE_ENABLED='true').
 //
 // OpsRolesModule supplies OpsRoleGuard + OpsRolesService for the
 // admin surface; AdminGuard + PrismaService are provided locally
@@ -24,8 +30,15 @@ import { OrgAdminController } from './org-admin.controller';
 // boundary rather than re-implementing it.
 @Module({
   imports: [OpsRolesModule, AuditModule],
-  controllers: [OrgController, OrgAdminController],
-  providers: [OrgService, OrgRoleGuard, AdminGuard, PrismaService],
-  exports: [OrgService],
+  controllers: [OrgController, OrgAdminController, RosterController],
+  providers: [
+    OrgService,
+    RosterService,
+    RosterPurgeService,
+    OrgRoleGuard,
+    AdminGuard,
+    PrismaService,
+  ],
+  exports: [OrgService, RosterService],
 })
 export class CorporateModule {}
