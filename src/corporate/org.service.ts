@@ -37,6 +37,14 @@ const SUBMITTABLE: ReadonlySet<string> = new Set([
 const REVIEW_ACTIONS = ['approve', 'reject', 'request_changes'] as const;
 export type OrgReviewAction = (typeof REVIEW_ACTIONS)[number];
 
+// Roles an owner may GRANT (PR 7a). 'owner' is deliberately absent:
+// there is exactly one owner (minted at org creation) and no API
+// path mints another — which is also what makes self-elevation
+// unrepresentable (you cannot be re-added while seated, and the
+// role you could be re-added with is never 'owner').
+const GRANTABLE_SEAT_ROLES = ['admin', 'approver', 'viewer'] as const;
+export type GrantableSeatRole = (typeof GRANTABLE_SEAT_ROLES)[number];
+
 export type CreateOrgInput = {
   legalName?: string;
   displayName?: string;
@@ -181,6 +189,156 @@ export class OrgService {
       targetId: orgId,
     });
     return updated;
+  }
+
+  // ── Seat management (PR 7a; owner-only at the controller) ────────
+
+  // Active seats with their usernames. OrgUser.userId is plain TEXT
+  // (no FK — purge survivability), so the username join is a manual
+  // second read; a purged user renders with qiftUsername null.
+  async listMembers(orgId: string) {
+    const seats = await this.prisma.orgUser.findMany({
+      where: { orgId, revokedAt: null },
+      select: {
+        id: true,
+        userId: true,
+        role: true,
+        invitedBy: true,
+        acceptedAt: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: seats.map((s) => s.userId) } },
+      select: { id: true, qiftUsername: true },
+    });
+    const usernameById = new Map(users.map((u) => [u.id, u.qiftUsername]));
+    return seats.map((s) => ({
+      ...s,
+      qiftUsername: usernameById.get(s.userId) ?? null,
+    }));
+  }
+
+  // Seat a colleague by @qiftUsername. Owner-only (route guard).
+  // Re-adding a previously revoked member REVIVES their seat with
+  // the new role; an ACTIVE seat conflicts — there is deliberately
+  // no in-place role change, so nobody (including a seated admin
+  // who somehow reached this code) can re-add themselves to a
+  // different role. Role 'owner' is never grantable.
+  async addMember(
+    actorUserId: string,
+    orgId: string,
+    body: { qiftUsername?: string; role?: string },
+  ) {
+    const role = body.role;
+    if (
+      !role ||
+      !(GRANTABLE_SEAT_ROLES as readonly string[]).includes(role)
+    ) {
+      throw new BadRequestException('member_role_invalid');
+    }
+    const username = body.qiftUsername
+      ?.trim()
+      .replace(/^@/, '')
+      .toLowerCase();
+    if (!username) {
+      throw new BadRequestException('member_username_required');
+    }
+    const user = await this.prisma.user.findFirst({
+      where: { qiftUsername: username, deletedAt: null },
+      select: { id: true, qiftUsername: true },
+    });
+    if (!user) throw new NotFoundException('user_not_found');
+
+    const existing = await this.prisma.orgUser.findUnique({
+      where: { orgId_userId: { orgId, userId: user.id } },
+      select: { id: true, revokedAt: true },
+    });
+    if (existing && existing.revokedAt === null) {
+      // Covers self-re-add too: an active seat (any role, owner
+      // included) can never be re-granted — revoke first, by the
+      // owner, then re-add.
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.CONFLICT,
+          code: 'member_already_seated',
+          message: 'This user already holds an active seat',
+        },
+        HttpStatus.CONFLICT,
+      );
+    }
+
+    const seat = existing
+      ? await this.prisma.orgUser.update({
+          where: { id: existing.id },
+          data: {
+            role,
+            revokedAt: null,
+            invitedBy: actorUserId,
+            acceptedAt: new Date(),
+          },
+          select: { id: true, userId: true, role: true, createdAt: true },
+        })
+      : await this.prisma.orgUser.create({
+          data: {
+            orgId,
+            userId: user.id,
+            role,
+            invitedBy: actorUserId,
+            acceptedAt: new Date(),
+          },
+          select: { id: true, userId: true, role: true, createdAt: true },
+        });
+
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'org.member.add',
+      targetType: 'organization',
+      targetId: orgId,
+      metadata: {
+        seatId: seat.id,
+        memberUserId: user.id,
+        role,
+        revived: !!existing,
+      },
+    });
+    return { ...seat, qiftUsername: user.qiftUsername };
+  }
+
+  // Soft-revoke a seat. Keyed (id, orgId, active) — a seat in
+  // another org is indistinguishable from a missing one. The owner
+  // seat is irrevocable (which also means the owner can never
+  // revoke themselves): an org without an owner would be
+  // unreachable.
+  async revokeMember(actorUserId: string, orgId: string, seatId: string) {
+    const seat = await this.prisma.orgUser.findFirst({
+      where: { id: seatId, orgId, revokedAt: null },
+      select: { id: true, userId: true, role: true },
+    });
+    if (!seat) throw new NotFoundException('member_not_found');
+    if (seat.userId === actorUserId) {
+      throw new BadRequestException('cannot_revoke_self');
+    }
+    if (seat.role === 'owner') {
+      throw new BadRequestException('cannot_revoke_owner');
+    }
+    const result = await this.prisma.orgUser.updateMany({
+      where: { id: seatId, orgId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (result.count === 0) throw new NotFoundException('member_not_found');
+
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'org.member.revoke',
+      targetType: 'organization',
+      targetId: orgId,
+      metadata: { seatId, memberUserId: seat.userId, role: seat.role },
+    });
+    return { ok: true };
   }
 
   // ── Admin plane (org.review-gated at the controller) ─────────────
