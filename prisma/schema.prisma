@@ -633,6 +633,10 @@ model Store {
   gifts     Gift[]
   documents StoreDocument[]
   wishes    Wish[]
+  // Qift Business eligibility layer (B1). One profile per store;
+  // NO row = the store never applied. Consumer approval and
+  // business approval are independent decisions by design.
+  businessProfile StoreBusinessProfile?
 
   @@index([ownerId])
 }
@@ -2308,4 +2312,36 @@ model ClaimAddress {
   createdAt DateTime @default(now())
 
   claim ClaimableGift @relation(fields: [claimId], references: [id], onDelete: Cascade)
+}
+
+// StoreBusinessProfile — Qift Business eligibility (B1; Business
+// Marketplace review §3).
+//
+//   (no row) → applied → approved / rejected
+//   approved → suspended → approved (reinstate)
+//   rejected → applied (re-application updates the same row)
+//
+// INDEPENDENCE INVARIANT: consumer approval NEVER implies business
+// approval. A store sells to companies only when BOTH its consumer
+// status is 'approved' AND this profile is 'approved' — the
+// isBusinessEligible() helper in StoreBusinessService is the single
+// seam future supply features (BusinessListing, B2+) must consult.
+//
+// appliedBy / reviewedBy are plain-TEXT user ids (purge
+// survivability — same posture as Organization / GiftCampaign).
+model StoreBusinessProfile {
+  id         String    @id @default(cuid())
+  storeId    String    @unique
+  status     String    @default("applied") // applied | approved | rejected | suspended
+  appliedBy  String?
+  appliedAt  DateTime  @default(now())
+  reviewedAt DateTime?
+  reviewedBy String?
+  reason     String? // rejection / suspension reason, shown to the merchant
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([status])
 }
