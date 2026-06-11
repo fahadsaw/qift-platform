@@ -43,6 +43,18 @@ describe('RosterPurgeService', () => {
     expect(where.purgeAfter.lt.getTime()).toBeLessThanOrEqual(Date.now());
   });
 
+  it('spares contacts attached to active campaigns; drafts do not protect (PR 3)', async () => {
+    await service.runOnce();
+    const { where } = prisma.corporateContact.deleteMany.mock.calls[0][0];
+    expect(where.campaignRecipients).toEqual({
+      none: {
+        campaign: {
+          status: { in: ['pending_approval', 'approved', 'dispatching'] },
+        },
+      },
+    });
+  });
+
   it('audits a count-only system row when something was purged', async () => {
     prisma.corporateContact.deleteMany.mockResolvedValue({ count: 5 });
     await service.runOnce();

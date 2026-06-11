@@ -10,11 +10,16 @@ import { OrgAdminController } from './org-admin.controller';
 import { RosterService } from './roster.service';
 import { RosterPurgeService } from './roster-purge.service';
 import { RosterController } from './roster.controller';
+import { CampaignService } from './campaign.service';
+import { CampaignController } from './campaign.controller';
 
-// Corporate Foundation module (PR 1: org spine, PR 2: roster).
+// Corporate Foundation module (PR 1: org spine, PR 2: roster,
+// PR 3: campaigns).
 //
 // /org/*                — org plane (JwtAuthGuard + OrgRoleGuard).
 // /org/:orgId/contacts  — roster import/list/archive (admin seats).
+// /org/:orgId/campaigns — campaign drafting + maker–checker
+//                         approval state machine.
 // /admin/orgs/*         — Qift-ops review surface (triple-guarded,
 //                         org.review permission).
 // RosterPurgeService    — retention sweeper, env-gated DEFAULT OFF
@@ -30,15 +35,21 @@ import { RosterController } from './roster.controller';
 // boundary rather than re-implementing it.
 @Module({
   imports: [OpsRolesModule, AuditModule],
-  controllers: [OrgController, OrgAdminController, RosterController],
+  controllers: [
+    OrgController,
+    OrgAdminController,
+    RosterController,
+    CampaignController,
+  ],
   providers: [
     OrgService,
     RosterService,
     RosterPurgeService,
+    CampaignService,
     OrgRoleGuard,
     AdminGuard,
     PrismaService,
   ],
-  exports: [OrgService, RosterService],
+  exports: [OrgService, RosterService, CampaignService],
 })
 export class CorporateModule {}
