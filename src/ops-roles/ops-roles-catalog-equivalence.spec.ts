@@ -119,7 +119,7 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       expect(OPS_ROLES.length).toBe(8);
     });
 
-    it('OPS_PERMISSIONS contains exactly 21 documented permission identifiers', () => {
+    it('OPS_PERMISSIONS contains exactly 22 documented permission identifiers', () => {
       // Same freeze-point reasoning as above. Adding a new
       // OpsPermission requires updating both ops-roles.ts
       // (PERMISSIONS_BY_ROLE + SUPER_ADMIN_ALL) and role-map.ts
@@ -136,7 +136,9 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       //   21 — `audit.read` added with the audit-log viewer (PR 11).
       //        Granted to super_admin + operations_manager +
       //        trust_safety.
-      expect(OPS_PERMISSIONS.length).toBe(21);
+      //   22 — `org.review` added with Corporate Foundation PR 1.
+      //        Granted to super_admin + operations_manager.
+      expect(OPS_PERMISSIONS.length).toBe(22);
     });
   });
 });

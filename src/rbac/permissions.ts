@@ -81,6 +81,10 @@ export const ADMIN_PERMISSIONS = [
   // into ops-roles.ts OPS_PERMISSIONS so the @RequireOpsPermission
   // decorator on the beta controller can reference it.
   'beta.manage',
+
+  // Corporate org review (Corporate Foundation PR 1). Gates the
+  // /admin/orgs review queue. Mirrored into ops-roles.ts.
+  'org.review',
 ] as const;
 
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];

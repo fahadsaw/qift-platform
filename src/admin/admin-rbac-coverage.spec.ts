@@ -759,6 +759,12 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             // the ALL bundle).
             'audit.read': ['operations_manager', 'trust_safety'],
             'beta.manage': ['operations_manager'],
+            // org.review — corporate organization review queue
+            // (Corporate Foundation PR 1). operations_manager only
+            // (+ super_admin via the ALL bundle); trust_safety is
+            // deliberately NOT granted — org vetting is an
+            // operations decision, not a moderation one.
+            'org.review': ['operations_manager'],
           };
           const grantee = granteeRoleByPerm[opsPermission][0];
           // Sanity: every mutation route here has at least one

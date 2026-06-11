@@ -24,7 +24,7 @@ export type AuditRecordInput = {
   actorUserId: string;
   actorType: 'admin' | 'user' | 'system';
   action: string; // dot-namespaced, e.g. 'user.phone.change'
-  targetType: 'user' | 'store' | 'system';
+  targetType: 'user' | 'store' | 'system' | 'organization';
   targetId: string | null;
   metadata?: Record<string, unknown> | null;
 };

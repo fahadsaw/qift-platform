@@ -2025,3 +2025,57 @@ model AuditLog {
   @@index([targetType, targetId, createdAt])
   @@index([action, createdAt])
 }
+
+// ── Corporate Foundation (approved scope, PR 1) ─────────────────────
+//
+// Organization — the corporate customer (Corporate Core v2 §2.1).
+// Review lifecycle mirrors Store (draft → submitted → approved /
+// rejected / changes_requested / suspended). `createdBy` /
+// `reviewedBy` are plain TEXT user ids (no FK) per the established
+// audit-table posture: org records must survive a user purge.
+model Organization {
+  id            String    @id @default(cuid())
+  legalName     String
+  displayName   String
+  displayNameAr String?
+  crNumber      String?
+  vatNumber     String?
+  billingEmail  String?
+  billingAddress String?
+  status        String    @default("draft")
+  riskTier      String    @default("new") // 'new' | 'established' | 'strategic'
+  rejectionReason String?
+  // Bounded org settings (wave caps, retention days). JSONB so
+  // additive keys never need a migration; writers sanitize.
+  settings      Json?
+  createdBy     String
+  submittedAt   DateTime?
+  reviewedAt    DateTime?
+  reviewedBy    String?
+  createdAt     DateTime  @default(now())
+
+  seats OrgUser[]
+
+  @@index([status])
+}
+
+// OrgUser — console seats for the 2–5 humans who RUN campaigns.
+// Deliberately NOT the roster: employees never appear here.
+// `userId` is plain TEXT (no FK) for purge-survivability; the
+// OrgRoleGuard joins it against live Users at request time, so a
+// purged user's seat is inert even before it's revoked.
+model OrgUser {
+  id        String    @id @default(cuid())
+  orgId     String
+  userId    String
+  role      String // 'owner' | 'admin' | 'approver' | 'viewer'
+  invitedBy String?
+  acceptedAt DateTime?
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+}
