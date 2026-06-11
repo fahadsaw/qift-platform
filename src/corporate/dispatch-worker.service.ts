@@ -42,6 +42,7 @@ import {
   DISPATCH_PROVIDER,
   type DispatchProvider,
 } from './dispatch-provider';
+import { ClaimMintService } from './claim-mint.service';
 
 const SWEEP_INTERVAL_MS = 60 * 1000;
 const BATCH_SIZE = 25;
@@ -55,6 +56,7 @@ export class DispatchWorkerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private prisma: PrismaService,
     @Inject(DISPATCH_PROVIDER) private provider: DispatchProvider,
+    private claimMint: ClaimMintService,
   ) {}
 
   onModuleInit() {
@@ -149,6 +151,23 @@ export class DispatchWorkerService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
+        // PR 5: mint (or rotate) the claim before delivery. A mint
+        // failure on a finalized claim or a snapshotless campaign is
+        // permanent; ops investigates via dispatch-status.
+        const minted = await this.claimMint.mintForJob({
+          jobId: job.id,
+          campaignId: job.campaignId,
+          contactId: job.contactId,
+        });
+        if (!minted.ok) {
+          failed += 1;
+          await this.prisma.dispatchJob.updateMany({
+            where: { id: job.id, status: 'processing' },
+            data: { status: 'failed', lastError: minted.error },
+          });
+          continue;
+        }
+
         const result = await this.provider.deliver({
           jobId: job.id,
           campaignId: job.campaignId,
@@ -156,14 +175,19 @@ export class DispatchWorkerService implements OnModuleInit, OnModuleDestroy {
           channel,
           channelValue:
             channel === 'phone' ? contact.phone! : contact.email!,
-          claimUrl: null, // PR 5 mints real claim URLs here
+          claimUrl: minted.claimUrl,
         });
 
         if (result.ok) {
           dispatched += 1;
           await this.prisma.dispatchJob.updateMany({
             where: { id: job.id, status: 'processing' },
-            data: { status: 'dispatched', processedAt: new Date(), lastError: null },
+            data: {
+              status: 'dispatched',
+              processedAt: new Date(),
+              lastError: null,
+              claimRef: minted.claimId,
+            },
           });
         } else if (!result.permanent && attemptNo < MAX_DISPATCH_ATTEMPTS) {
           retried += 1;
