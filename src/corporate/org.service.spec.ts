@@ -31,6 +31,7 @@ type PrismaMock = {
   orgUser: {
     create: jest.Mock;
     findMany: jest.Mock;
+    findFirst: jest.Mock;
   };
   $transaction: jest.Mock;
 };
@@ -54,6 +55,7 @@ const orgRow = (over: Record<string, unknown> = {}) => ({
 describe('OrgService', () => {
   let prisma: PrismaMock;
   let audit: { record: jest.Mock };
+  let notifications: { trigger: jest.Mock };
   let service: OrgService;
 
   beforeEach(() => {
@@ -71,15 +73,19 @@ describe('OrgService', () => {
       orgUser: {
         create: jest.fn().mockResolvedValue({ id: 'seat-1' }),
         findMany: jest.fn().mockResolvedValue([]),
+        // Q4 — reviewOrg looks up the owner seat to notify them.
+        findFirst: jest.fn().mockResolvedValue({ userId: 'owner-1' }),
       },
       // The service's createOrg transaction only needs the same two
       // delegates — hand the full mock through as `tx`.
       $transaction: jest.fn().mockImplementation((fn) => fn(prisma)),
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
+    notifications = { trigger: jest.fn().mockResolvedValue(undefined) };
     service = new OrgService(
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,
+      notifications as never,
     );
   });
 
@@ -323,6 +329,31 @@ describe('OrgService', () => {
           ((e as HttpException).getResponse() as { code: string }).code,
         ).toBe('org_not_in_review');
       }
+    });
+
+    it('notifies the OWNER of the decision (Q4) — approve carries the org name', async () => {
+      submitted();
+      await service.reviewOrg('a1', 'org-1', 'approve', null);
+      expect(prisma.orgUser.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orgId: 'org-1', role: 'owner', revokedAt: null },
+        }),
+      );
+      expect(notifications.trigger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'owner-1',
+          type: 'org.review_decision',
+          link: '/org',
+        }),
+      );
+    });
+
+    it('reject / request_changes notifications carry the reason as the body', async () => {
+      submitted();
+      await service.reviewOrg('a1', 'org-1', 'reject', 'CR mismatch');
+      expect(notifications.trigger).toHaveBeenCalledWith(
+        expect.objectContaining({ body: 'CR mismatch' }),
+      );
     });
 
     it('records admin.org.review with action + reason metadata', async () => {

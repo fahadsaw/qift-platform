@@ -76,6 +76,8 @@ describe('OrgService — seat management (PR 7a)', () => {
     service = new OrgService(
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,
+      // Q4 — review-decision notification stub (fire-and-forget).
+      { trigger: jest.fn().mockResolvedValue(undefined) } as never,
     );
   });
 
