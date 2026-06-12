@@ -16,6 +16,10 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import {
+  NotificationsService,
+  NotificationType,
+} from '../notifications/notifications.service';
 
 const ORG_STATUSES = [
   'draft',
@@ -87,6 +91,7 @@ export class OrgService {
   constructor(
     private prisma: PrismaService,
     private audit: AuditService,
+    private notifications: NotificationsService,
   ) {}
 
   // ── Org plane ─────────────────────────────────────────────────────
@@ -427,6 +432,29 @@ export class OrgService {
       targetId: orgId,
       metadata: { reviewAction: action, reason: trimmedReason },
     });
+
+    // Tell the OWNER (audit Q4) — without this, the submitter has
+    // to poll /org for days. Fire-and-forget: a notification
+    // failure must never fail the review itself.
+    const owner = await this.prisma.orgUser.findFirst({
+      where: { orgId, role: 'owner', revokedAt: null },
+      select: { userId: true },
+    });
+    if (owner) {
+      const title =
+        action === 'approve'
+          ? 'تم اعتماد ملف شركتك 🎉'
+          : action === 'reject'
+            ? 'لم يُعتمد ملف شركتك'
+            : 'مطلوب تعديلات على ملف شركتك';
+      void this.notifications.trigger({
+        userId: owner.userId,
+        type: NotificationType.OrgReviewDecision,
+        title,
+        body: action === 'approve' ? updated.displayName : trimmedReason,
+        link: '/org',
+      });
+    }
     return updated;
   }
 }

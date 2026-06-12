@@ -43,6 +43,10 @@ export const NotificationType = {
   // notification per (post, owner) per 24h so a burst of
   // appreciations doesn't generate a burst of pings.
   GiftPostAppreciated: 'gift_post.appreciated',
+  // Org owner: Qift ops decided on your company profile (approved /
+  // rejected / changes requested). Routes to the System category
+  // via categoryForType's default — low-priority, opt-outable.
+  OrgReviewDecision: 'org.review_decision',
 } as const;
 export type NotificationType =
   (typeof NotificationType)[keyof typeof NotificationType];

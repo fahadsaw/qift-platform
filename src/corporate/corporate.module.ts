@@ -4,6 +4,7 @@ import { AdminGuard } from '../admin/admin.guard';
 import { OpsRolesModule } from '../ops-roles/ops-roles.module';
 import { AuditModule } from '../audit/audit.module';
 import { OtpModule } from '../otp/otp.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { OrgService } from './org.service';
 import { OrgRoleGuard } from './org-role.guard';
 import { OrgController } from './org.controller';
@@ -59,7 +60,7 @@ import { StoreBusinessAdminController } from './store-business-admin.controller'
 // claim flow) extend THIS module — they share the OrgRoleGuard tenant
 // boundary rather than re-implementing it.
 @Module({
-  imports: [OpsRolesModule, AuditModule, OtpModule],
+  imports: [OpsRolesModule, AuditModule, OtpModule, NotificationsModule],
   controllers: [
     OrgController,
     OrgAdminController,
