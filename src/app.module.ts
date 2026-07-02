@@ -32,6 +32,7 @@ import { MailModule } from './mail/mail.module';
 import { InvitesModule } from './invites/invites.module';
 import { BetaAccessModule } from './beta-access/beta-access.module';
 import { CorporateModule } from './corporate/corporate.module';
+import { FinancialLedgerModule } from './financial/financial-ledger.module';
 
 @Module({
   imports: [
@@ -65,6 +66,9 @@ import { CorporateModule } from './corporate/corporate.module';
     InvitesModule,
     BetaAccessModule,
     CorporateModule,
+    // Financial ledger substrate (PR 2). Dark-launched: the service is
+    // available for injection but no producer writes to it yet.
+    FinancialLedgerModule,
   ],
   // UsersController + UsersService now live inside UsersModule —
   // imported above. Registering them here would create a duplicate
