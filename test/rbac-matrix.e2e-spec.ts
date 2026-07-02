@@ -515,7 +515,13 @@ describe('RBAC matrix (e2e, both flag states + cross-flag equivalence)', () => {
         .post('/auth/login')
         .send({ identifier: a.identifier, password: a.password });
 
-      if (res.status !== 200) {
+      // POST /auth/login returns 201 Created — NestJS's default for
+      // @Post() routes; the controller deliberately has no @HttpCode
+      // override and 201 is the long-standing production contract the
+      // frontend consumes. Accept either 2xx success shape here; the
+      // REAL login-success gate is the non-empty accessToken checked
+      // just below.
+      if (res.status !== 200 && res.status !== 201) {
         throw new Error(
           `Login failed for ${a.id} (${a.userId}) at /auth/login: ` +
             `status=${res.status} body=${JSON.stringify(res.body)}. ` +
@@ -527,7 +533,7 @@ describe('RBAC matrix (e2e, both flag states + cross-flag equivalence)', () => {
       const token = (res.body as { accessToken?: unknown }).accessToken;
       if (typeof token !== 'string' || token.length === 0) {
         throw new Error(
-          `Login returned 200 but no accessToken in body for ${a.id}: ${JSON.stringify(res.body)}`,
+          `Login succeeded (${res.status}) but no accessToken in body for ${a.id}: ${JSON.stringify(res.body)}`,
         );
       }
       jwts.set(a.id, token);
