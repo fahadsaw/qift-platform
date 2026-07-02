@@ -1,8 +1,10 @@
 import {
   computeTax,
+  computeMerchantGoodsTax,
   SAUDI_VAT_RATE,
   TAX_RULE_VERSION,
   DEFAULT_TAX_TREATMENT,
+  MERCHANT_GOODS_TAX_TREATMENT,
 } from './tax-engine';
 
 describe('TaxEngine (Saudi VAT — agent model)', () => {
@@ -137,6 +139,61 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
       const b = computeTax({ subtotalAmount: 200, platformFeeAmount: 10 });
       expect(a.taxSnapshot).toEqual(b.taxSnapshot);
       expect(a.taxSnapshot.ruleVersion).toBe(TAX_RULE_VERSION);
+    });
+  });
+
+  describe('computeMerchantGoodsTax (the merchant goods leg)', () => {
+    it('computes the MERCHANT VAT on the goods (exclusive default)', () => {
+      // goods 5000: merchant VAT 750; goods total 5750.
+      const t = computeMerchantGoodsTax({ goodsSubtotalAmount: 5000 });
+      expect(t).toMatchObject({
+        taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
+        pricesIncludeVat: false,
+        taxableAmount: 5000,
+        vatRate: SAUDI_VAT_RATE,
+        vatAmount: 750,
+        totalAmount: 5750,
+      });
+    });
+
+    it('extracts merchant VAT when goods prices include VAT', () => {
+      const t = computeMerchantGoodsTax({
+        goodsSubtotalAmount: 5750,
+        pricesIncludeVat: true,
+      });
+      expect(t.taxableAmount).toBe(5000);
+      expect(t.vatAmount).toBe(750);
+      expect(t.totalAmount).toBe(5750); // gross unchanged
+    });
+
+    it('freezes a snapshot naming the merchant as the tax owner', () => {
+      const t = computeMerchantGoodsTax({ goodsSubtotalAmount: 5000 });
+      expect(t.taxSnapshot).toMatchObject({
+        ruleVersion: TAX_RULE_VERSION, // same agent ruleset, no bump
+        vatRate: 0.15,
+        taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
+        pricesIncludeVat: false,
+        taxableBase: 5000,
+        vatAmount: 750,
+      });
+      expect(t.taxSnapshot.notes).toMatch(/merchant/i);
+      expect(t.taxSnapshot.notes).toMatch(/not Qift revenue/i);
+    });
+
+    it('two-invoice split: Qift bills the fee leg only, merchant bills the goods leg', () => {
+      // Campaign of 500 SAR x 10 with a 150 fee. Under the agent model
+      // the company receives TWO invoices:
+      const qift = computeTax({ subtotalAmount: 5000, platformFeeAmount: 150 });
+      const merchant = computeMerchantGoodsTax({ goodsSubtotalAmount: 5000 });
+      // Qift service invoice: fee 150 + VAT 22.5 = 172.5 (fee-only).
+      expect(qift.totalAmount).toBe(172.5);
+      // Merchant goods invoice: goods 5000 + VAT 750 = 5750.
+      expect(merchant.totalAmount).toBe(5750);
+      // The goods never leak into Qift's invoice, and together the two
+      // legs equal the old single principal invoice (5922.5) — the
+      // company's total outlay is unchanged; only attribution moved.
+      expect(qift.taxableAmount).toBe(150);
+      expect(qift.totalAmount + merchant.totalAmount).toBe(5922.5);
     });
   });
 });

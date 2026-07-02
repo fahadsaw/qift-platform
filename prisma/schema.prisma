@@ -2190,6 +2190,64 @@ model CorporateInvoice {
   @@index([issuedAt])
 }
 
+// MerchantInvoice — the GOODS-leg invoice (agent model).
+//
+// Qift is an AGENT, not the seller: the MERCHANT is the legal seller of
+// the goods, so the goods sale (and its VAT) belongs on THIS invoice —
+// the merchant's sale to the company — never on the Qift service
+// invoice (CorporateInvoice, fee-only). Qift GENERATES AND STORES this
+// record on the merchant's behalf (curated pilot merchants have no
+// invoicing systems), but every amount here is MERCHANT revenue, not
+// Qift's. Issued at campaign approval, frozen from the same approval
+// snapshot as the Qift service invoice. No FKs: orgId / campaignId /
+// storeId are plain TEXT so the invoice survives org/campaign/store
+// purges (regulatory retention) — same posture as CorporateInvoice /
+// AuditLog / FinancialLedgerEntry.
+//
+// @@unique([campaignId, storeId]) is the idempotency anchor: one
+// merchant invoice per campaign/store (the MVP campaign has exactly one
+// store). A retried approval never duplicates.
+model MerchantInvoice {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  storeId    String // plain TEXT, no FK — the merchant (legal seller)
+  orgId      String // plain TEXT, no FK (purge-survivable)
+  campaignId String // plain TEXT, no FK (purge-survivable)
+
+  // draft | issued | cancelled | paid | void. Created as 'issued' at
+  // approval; downstream transitions land with settlement.
+  status String @default("issued")
+
+  currency       String @default("SAR")
+  recipientCount Int
+  unitAmount     Float // frozen gift price from the approval snapshot
+
+  // ── The merchant's goods sale ─────────────────────────────────────
+  // goodsSubtotal = unitAmount * recipientCount. VAT here is the
+  // MERCHANT's output VAT on the goods (merchant's VAT registration),
+  // per the agent model — Qift's own VAT applies to its fee only, on
+  // the Qift service invoice.
+  goodsSubtotalAmount Float
+  vatRate             Float // e.g. 0.15
+  vatAmount           Float // merchant VAT on the goods
+  totalAmount         Float // goods total the company owes the merchant
+  pricesIncludeVat    Boolean @default(false)
+  taxTreatment        String // 'merchant_goods_standard'
+  taxSnapshot         Json? // frozen rule: version, rate, treatment, base
+
+  issuedAt    DateTime?
+  cancelledAt DateTime?
+
+  metadata Json?
+
+  @@unique([campaignId, storeId])
+  @@index([storeId])
+  @@index([orgId])
+  @@index([status, createdAt])
+}
+
 // ── Corporate Foundation (approved scope, PR 1) ─────────────────────
 //
 // Organization — the corporate customer (Corporate Core v2 §2.1).

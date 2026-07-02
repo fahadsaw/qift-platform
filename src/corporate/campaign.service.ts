@@ -33,6 +33,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { InvoiceService } from './invoice.service';
+import { MerchantInvoiceService } from './merchant-invoice.service';
 
 // States in which the campaign content (name, message, option,
 // recipients) may still be edited.
@@ -81,6 +82,7 @@ export class CampaignService {
     private prisma: PrismaService,
     private audit: AuditService,
     private invoices: InvoiceService,
+    private merchantInvoices: MerchantInvoiceService,
   ) {}
 
   // Load a campaign strictly inside the caller's org.
@@ -156,7 +158,8 @@ export class CampaignService {
       }
       data.name = name;
     }
-    if (body.occasion !== undefined) data.occasion = body.occasion.trim() || null;
+    if (body.occasion !== undefined)
+      data.occasion = body.occasion.trim() || null;
     if (body.message !== undefined) data.message = body.message.trim() || null;
     return this.prisma.giftCampaign.update({
       where: { id: campaignId },
@@ -185,7 +188,11 @@ export class CampaignService {
       where: { id: productId },
       select: { id: true, isAvailable: true, stockStatus: true },
     });
-    if (!product || !product.isAvailable || product.stockStatus !== 'in_stock') {
+    if (
+      !product ||
+      !product.isAvailable ||
+      product.stockStatus !== 'in_stock'
+    ) {
       throw new BadRequestException('product_unavailable');
     }
     await this.prisma.$transaction([
@@ -361,7 +368,11 @@ export class CampaignService {
 
   // Approve — the SoD-locked transition. Freezes the gift option
   // snapshot in the same transaction as the status flip.
-  async approveCampaign(actorUserId: string, orgId: string, campaignId: string) {
+  async approveCampaign(
+    actorUserId: string,
+    orgId: string,
+    campaignId: string,
+  ) {
     const campaign = await this.loadCampaign(orgId, campaignId);
     if (campaign.status !== 'pending_approval') {
       throw new BadRequestException('campaign_not_pending');
@@ -440,11 +451,35 @@ export class CampaignService {
     // (the invoice can be re-ensured), and the @@unique([campaignId])
     // anchor prevents duplicates on any retry.
     try {
-      await this.invoices.ensureInvoiceForCampaign(orgId, campaignId, actorUserId);
+      await this.invoices.ensureInvoiceForCampaign(
+        orgId,
+        campaignId,
+        actorUserId,
+      );
     } catch (err) {
       this.logger.error(
         `[invoice-failed] campaign=${campaignId} approved but invoice not ` +
           `issued (retryable): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Same commitment point, second leg: the MERCHANT goods invoice
+    // (agent model — the merchant is the legal seller; Qift records the
+    // goods sale on the merchant's behalf). Independently best-effort +
+    // idempotent so a hiccup on one leg never blocks the approval or
+    // the other leg; @@unique([campaignId, storeId]) prevents
+    // duplicates on any retry.
+    try {
+      await this.merchantInvoices.ensureMerchantInvoiceForCampaign(
+        orgId,
+        campaignId,
+        actorUserId,
+      );
+    } catch (err) {
+      this.logger.error(
+        `[merchant-invoice-failed] campaign=${campaignId} approved but ` +
+          `merchant invoice not issued (retryable): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
       );
     }
 

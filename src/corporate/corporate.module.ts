@@ -15,10 +15,7 @@ import { CampaignService } from './campaign.service';
 import { CampaignController } from './campaign.controller';
 import { DispatchService } from './dispatch.service';
 import { DispatchWorkerService } from './dispatch-worker.service';
-import {
-  DISPATCH_PROVIDER,
-  ManualDispatchProvider,
-} from './dispatch-provider';
+import { DISPATCH_PROVIDER, ManualDispatchProvider } from './dispatch-provider';
 import { ClaimMintService } from './claim-mint.service';
 import { ClaimService } from './claim.service';
 import { ClaimController } from './claim.controller';
@@ -27,6 +24,7 @@ import { ReportService } from './report.service';
 import { StoreBusinessService } from './store-business.service';
 import { StoreBusinessAdminController } from './store-business-admin.controller';
 import { InvoiceService } from './invoice.service';
+import { MerchantInvoiceService } from './merchant-invoice.service';
 import { FinancialLedgerModule } from '../financial/financial-ledger.module';
 
 // Corporate Foundation module (PR 1: org spine, PR 2: roster,
@@ -92,6 +90,7 @@ import { FinancialLedgerModule } from '../financial/financial-ledger.module';
     ReportService,
     StoreBusinessService,
     InvoiceService,
+    MerchantInvoiceService,
     OrgRoleGuard,
     AdminGuard,
   ],
@@ -101,6 +100,7 @@ import { FinancialLedgerModule } from '../financial/financial-ledger.module';
     CampaignService,
     DispatchService,
     InvoiceService,
+    MerchantInvoiceService,
   ],
 })
 export class CorporateModule {}
