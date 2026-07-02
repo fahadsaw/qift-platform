@@ -25,6 +25,7 @@ import { StoreBusinessService } from './store-business.service';
 import { StoreBusinessAdminController } from './store-business-admin.controller';
 import { InvoiceService } from './invoice.service';
 import { MerchantInvoiceService } from './merchant-invoice.service';
+import { BillingSummaryService } from './billing-summary.service';
 import { FinancialLedgerModule } from '../financial/financial-ledger.module';
 
 // Corporate Foundation module (PR 1: org spine, PR 2: roster,
@@ -91,6 +92,7 @@ import { FinancialLedgerModule } from '../financial/financial-ledger.module';
     StoreBusinessService,
     InvoiceService,
     MerchantInvoiceService,
+    BillingSummaryService,
     OrgRoleGuard,
     AdminGuard,
   ],
