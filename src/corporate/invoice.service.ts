@@ -29,6 +29,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
 import { FEE_POLICY_VERSION } from '../fees/fee-engine';
+import { computeTax } from '../fees/tax-engine';
 import { computeInvoiceAmounts } from './invoice-amounts';
 
 // The subset of the approval snapshot we read. Only non-PII fields.
@@ -90,6 +91,12 @@ export class InvoiceService {
     }
 
     const amounts = computeInvoiceAmounts(snapshot.price, recipientCount);
+    // Freeze the Saudi VAT v1 snapshot (server-side rule) onto the
+    // invoice. totalAmount below is VAT-inclusive.
+    const tax = computeTax({
+      subtotalAmount: amounts.subtotalAmount,
+      platformFeeAmount: amounts.platformFeeAmount,
+    });
     const now = new Date();
 
     try {
@@ -103,7 +110,18 @@ export class InvoiceService {
           unitAmount: amounts.unitAmount,
           subtotalAmount: amounts.subtotalAmount,
           platformFeeAmount: amounts.platformFeeAmount,
-          totalAmount: amounts.totalAmount,
+          // Tax snapshot (Saudi VAT v1) — frozen for historical correctness.
+          taxableAmount: tax.taxableAmount,
+          vatRate: tax.vatRate,
+          vatAmount: tax.vatAmount,
+          totalBeforeVat: tax.totalBeforeVat,
+          pricesIncludeVat: tax.pricesIncludeVat,
+          taxTreatment: tax.taxTreatment,
+          taxSnapshot: tax.taxSnapshot,
+          // VAT-inclusive amount the company owes.
+          totalAmount: tax.totalAmount,
+          // Accounting export not wired yet — explicit default.
+          accountingExportStatus: 'not_exported',
           issuedAt: now,
           // Non-PII line context only.
           metadata: {
