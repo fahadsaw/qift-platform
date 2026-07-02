@@ -27,10 +27,12 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InvoiceService } from './invoice.service';
 
 // States in which the campaign content (name, message, option,
 // recipients) may still be edited.
@@ -73,9 +75,12 @@ export type CampaignDraftInput = {
 
 @Injectable()
 export class CampaignService {
+  private readonly logger = new Logger(CampaignService.name);
+
   constructor(
     private prisma: PrismaService,
     private audit: AuditService,
+    private invoices: InvoiceService,
   ) {}
 
   // Load a campaign strictly inside the caller's org.
@@ -428,6 +433,21 @@ export class CampaignService {
       targetId: orgId,
       metadata: { campaignId, productId: product.id },
     });
+
+    // Approval IS the commercial commitment point: issue the corporate
+    // invoice from the snapshot we just froze. Best-effort + idempotent —
+    // a failure here must NOT undo an approval that already committed
+    // (the invoice can be re-ensured), and the @@unique([campaignId])
+    // anchor prevents duplicates on any retry.
+    try {
+      await this.invoices.ensureInvoiceForCampaign(orgId, campaignId, actorUserId);
+    } catch (err) {
+      this.logger.error(
+        `[invoice-failed] campaign=${campaignId} approved but invoice not ` +
+          `issued (retryable): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     return updated;
   }
 

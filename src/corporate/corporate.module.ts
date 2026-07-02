@@ -26,6 +26,8 @@ import { ClaimExportService } from './claim-export.service';
 import { ReportService } from './report.service';
 import { StoreBusinessService } from './store-business.service';
 import { StoreBusinessAdminController } from './store-business-admin.controller';
+import { InvoiceService } from './invoice.service';
+import { FinancialLedgerModule } from '../financial/financial-ledger.module';
 
 // Corporate Foundation module (PR 1: org spine, PR 2: roster,
 // PR 3: campaigns).
@@ -59,7 +61,15 @@ import { StoreBusinessAdminController } from './store-business-admin.controller'
 // claim flow) extend THIS module — they share the OrgRoleGuard tenant
 // boundary rather than re-implementing it.
 @Module({
-  imports: [OpsRolesModule, AuditModule, OtpModule, NotificationsModule],
+  imports: [
+    OpsRolesModule,
+    AuditModule,
+    OtpModule,
+    NotificationsModule,
+    // Supplies FinancialLedgerService so invoice issuance can post the
+    // company-receivable ledger entry (PR 4).
+    FinancialLedgerModule,
+  ],
   controllers: [
     OrgController,
     OrgAdminController,
@@ -81,9 +91,16 @@ import { StoreBusinessAdminController } from './store-business-admin.controller'
     ClaimExportService,
     ReportService,
     StoreBusinessService,
+    InvoiceService,
     OrgRoleGuard,
     AdminGuard,
   ],
-  exports: [OrgService, RosterService, CampaignService, DispatchService],
+  exports: [
+    OrgService,
+    RosterService,
+    CampaignService,
+    DispatchService,
+    InvoiceService,
+  ],
 })
 export class CorporateModule {}

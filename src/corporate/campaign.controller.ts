@@ -17,6 +17,7 @@ import { CampaignService } from './campaign.service';
 import type { CampaignDraftInput } from './campaign.service';
 import { DispatchService } from './dispatch.service';
 import { ReportService } from './report.service';
+import { InvoiceService } from './invoice.service';
 
 type AuthedRequest = {
   user: { userId: string; qiftUsername: string };
@@ -43,6 +44,7 @@ export class CampaignController {
     private readonly campaigns: CampaignService,
     private readonly dispatch: DispatchService,
     private readonly reports: ReportService,
+    private readonly invoices: InvoiceService,
   ) {}
 
   @Post()
@@ -65,6 +67,18 @@ export class CampaignController {
   @RequireOrgRole('admin', 'approver')
   detail(@Param('campaignId') campaignId: string, @Req() req: AuthedRequest) {
     return this.campaigns.getCampaign(req.orgContext!.orgId, campaignId);
+  }
+
+  // The corporate invoice for a campaign (PR 4). Issued at approval;
+  // returns null before approval. Amounts + status only — no employee
+  // identity, address, or claim data. admin+approver, matching detail.
+  @Get(':campaignId/invoice')
+  @RequireOrgRole('admin', 'approver')
+  invoice(@Param('campaignId') campaignId: string, @Req() req: AuthedRequest) {
+    return this.invoices.getInvoiceForCampaign(
+      req.orgContext!.orgId,
+      campaignId,
+    );
   }
 
   @Patch(':campaignId')
