@@ -1,0 +1,125 @@
+name: CI
+
+# CI for qift-platform/apps/api (this repository's root == apps/api).
+#
+# Gates every PR and every push to main. This pipeline is the automated
+# safety net the codebase previously lacked — nothing here changes app
+# behaviour; it only builds, type-checks, and tests what already exists.
+#
+# PRODUCTION SAFETY: no production secrets are used. The `build-test`
+# job needs no database at all. The `rbac-e2e` job runs ONLY against the
+# ephemeral Postgres service defined in-job (created and destroyed per
+# run) and is read-only by design — it never touches the real database.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build · full tsc · unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `pnpm build` = `prisma generate && nest build`. prisma generate
+      # only reads the schema; it does not connect to a database.
+      - name: Build (prisma generate + nest build)
+        run: pnpm build
+
+      # Full type-check across the whole project (including tests), not
+      # just the build's rootDir. This catches type regressions the nest
+      # build alone can miss.
+      - name: Full typecheck (tsc --noEmit)
+        run: pnpm exec tsc --noEmit -p tsconfig.json
+
+      # Unit suite (~1,450 cases). Prisma is mocked; no database needed.
+      - name: Unit tests (jest)
+        run: pnpm test
+
+  rbac-e2e:
+    name: RBAC matrix e2e (observed-first — not yet a required gate)
+    runs-on: ubuntu-latest
+    # TODO(ci): once this job has produced ONE confirmed green run,
+    # remove `continue-on-error` and add "RBAC matrix e2e" to the branch
+    # protection required-checks list. It ships observed-first because it
+    # could not be validated on the authoring machine before first push
+    # (no Docker available locally, and the local DATABASE_URL points at
+    # PRODUCTION — which must never be migrated or seeded). The job below
+    # is production-safe regardless: it only ever talks to the ephemeral
+    # Postgres service and the suite is read-only.
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: qift
+          POSTGRES_PASSWORD: qift
+          POSTGRES_DB: qift_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qift"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Ephemeral CI database ONLY — created by the service above and
+      # thrown away when the run ends. NEVER a production connection string.
+      DATABASE_URL: postgresql://qift:qift@localhost:5432/qift_ci
+      # Any non-empty value; the app only refuses to boot without a secret
+      # when NODE_ENV=production, and this is a throwaway test value.
+      JWT_SECRET: ci-only-not-a-secret
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Apply committed migrations to the ephemeral database. `migrate
+      # deploy` never generates or resets — it only replays existing
+      # migrations forward, which is safe against the throwaway service.
+      - name: Apply migrations (ephemeral DB)
+        run: pnpm exec prisma migrate deploy
+
+      # Seeds the 11 rbac-test-* accounts + OpsRoleAssignments + the
+      # default merchant the matrix logs in as. Gated by the explicit
+      # env flag so it only ever creates test fixtures.
+      - name: Seed RBAC test accounts (ephemeral DB)
+        run: QIFT_SEED_RBAC_TEST_ACCOUNTS=true pnpm exec prisma db seed
+
+      # 252 cases: 12 accounts x 7 endpoints x 2 flag states + cross-flag
+      # equivalence. Boots the real AppModule + real Prisma. Read-only.
+      - name: RBAC matrix e2e
+        run: pnpm test:e2e:rbac-matrix
