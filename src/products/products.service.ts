@@ -518,6 +518,10 @@ export class ProductsService {
       select: {
         id: true,
         storeId: true,
+        // Authoritative catalog price — OrdersService uses this as the
+        // item subtotal so a tampered client can't under-price a real
+        // product. (`store` join is still stripped from the return.)
+        price: true,
         isAvailable: true,
         stockStatus: true,
         store: { select: { status: true } },

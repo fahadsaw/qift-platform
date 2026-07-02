@@ -10,6 +10,7 @@ import {
 } from '../notifications/notifications.service';
 import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
 import { assertTransition, type GiftStatus } from '../gifts/gift-status';
+import { QIFT_SERVICE_FEE_RATE } from '../fees/fee-engine';
 import { StoresService } from '../stores/stores.service';
 import {
   SHIPPING_PROVIDERS,
@@ -681,7 +682,8 @@ export class StoreService {
       if (o.giftId) orderByGift.set(o.giftId, o);
     }
 
-    const PLATFORM_FEE_PCT = 0.03; // matches checkout serviceFee target
+    // Single source of truth — same rate the FeeEngine charges at checkout.
+    const PLATFORM_FEE_PCT = QIFT_SERVICE_FEE_RATE;
     let grossRevenue = 0;
     let platformFees = 0;
     let deliveryFees = 0;

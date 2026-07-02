@@ -13,6 +13,12 @@ import { UsersService } from '../users/users.service';
 import { ProductsService } from '../products/products.service';
 import { validateGiftMedia } from '../gifts/gift-visibility';
 import { getDefaultAddressForUser } from '../addresses/default-address.helper';
+import {
+  computeFees,
+  FAST_DELIVERY_FEE,
+  STANDARD_DELIVERY_FEE,
+  type DeliverySpeed,
+} from '../fees/fee-engine';
 
 // `userId` is intentionally not in the input — it's always taken from the
 // JWT viewer in the controller layer.
@@ -20,7 +26,18 @@ export type CreateOrderInput = {
   receiverUsername?: string;
   productName?: string;
   storeName?: string;
+  // Item subtotal. For a real catalog product (productId set) the server
+  // ignores this and uses the authoritative catalog price; it is honoured
+  // only as a fallback for sample/demo flows that carry no productId.
   productPrice?: number;
+  // Delivery-speed FACT. Preferred over the legacy deliveryFee number.
+  deliverySpeed?: DeliverySpeed;
+  // DEPRECATED / IGNORED as authoritative money: serviceFee, deliveryFee
+  // and totalAmount are NO LONGER trusted — the FeeEngine recomputes every
+  // charged amount server-side. deliveryFee is still read, but only to
+  // derive the delivery-speed fact for legacy clients (and only its two
+  // legitimate menu values are accepted); its value is never persisted
+  // as given.
   serviceFee?: number;
   deliveryFee?: number;
   totalAmount?: number;
@@ -108,21 +125,14 @@ export class OrdersService {
       );
     }
 
-    const productPrice = numberOr(body.productPrice);
-    const serviceFee = numberOr(body.serviceFee);
-    const deliveryFee = numberOr(body.deliveryFee);
-    const totalAmount = numberOr(body.totalAmount);
-
-    if (
-      productPrice == null ||
-      serviceFee == null ||
-      deliveryFee == null ||
-      totalAmount == null
-    ) {
-      throw new BadRequestException(
-        'productPrice, serviceFee, deliveryFee and totalAmount must be numbers',
-      );
-    }
+    // Client-supplied money fields (serviceFee, deliveryFee, totalAmount)
+    // are NOT trusted. The FeeEngine recomputes every charged amount below.
+    // We keep a client productPrice only as a fallback item subtotal for
+    // sample/demo flows without a catalog productId; a real product's
+    // catalog price always wins (resolved after checkAvailability).
+    const clientProductPrice = numberOr(body.productPrice);
+    // Resolve the delivery-speed FACT without trusting a raw fee number.
+    const deliverySpeed = resolveDeliverySpeed(body);
 
     if (!validatePaymentProvider(country, paymentProvider)) {
       throw new BadRequestException(
@@ -259,6 +269,22 @@ export class OrdersService {
       );
     }
 
+    // Item subtotal authority: a real catalog product's price wins over
+    // any client-sent number; only sample/demo flows (no productId) fall
+    // back to the client-supplied productPrice.
+    const itemSubtotal = productInfo?.price ?? clientProductPrice;
+    if (itemSubtotal == null || !Number.isFinite(itemSubtotal) || itemSubtotal < 0) {
+      throw new BadRequestException(
+        'productPrice is required (no authoritative catalog price available)',
+      );
+    }
+
+    // Authoritative charge computation. serviceFee, deliveryFee and
+    // totalAmount below all come from the FeeEngine — never from the
+    // client. These four columns are the fee snapshot future ledger /
+    // invoice work will read.
+    const fees = computeFees({ itemSubtotal, deliverySpeed });
+
     const created = await this.prisma.order.create({
       data: {
         userId: viewerUserId,
@@ -273,10 +299,10 @@ export class OrdersService {
         // validation happens at the Gift boundary (does the sender
         // actually have a valid attach context for this occasion?).
         occasionId: body.occasionId?.trim() || null,
-        productPrice,
-        serviceFee,
-        deliveryFee,
-        totalAmount,
+        productPrice: fees.itemSubtotal,
+        serviceFee: fees.serviceFee,
+        deliveryFee: fees.deliveryFee,
+        totalAmount: fees.grandTotal,
         currency,
         country,
         paymentProvider: paymentProvider,
@@ -321,4 +347,22 @@ function numberOr(v: unknown): number | null {
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+// Resolve the delivery-speed FACT for the FeeEngine without ever trusting
+// a raw fee number.
+//   1. Prefer an explicit `deliverySpeed` fact from the client.
+//   2. Fall back to the legacy `deliveryFee` number, but accept ONLY its
+//      two legitimate menu values (STANDARD → same_day, FAST → fast). The
+//      fee itself is then recomputed from the rule, so the number is used
+//      purely to decode the user's menu choice, never as the charge.
+//   3. Anything else (a tampered / arbitrary deliveryFee) is rejected.
+function resolveDeliverySpeed(body: CreateOrderInput): DeliverySpeed {
+  if (body.deliverySpeed === 'fast' || body.deliverySpeed === 'same_day') {
+    return body.deliverySpeed;
+  }
+  const legacy = numberOr(body.deliveryFee);
+  if (legacy == null || legacy === STANDARD_DELIVERY_FEE) return 'same_day';
+  if (legacy === FAST_DELIVERY_FEE) return 'fast';
+  throw new BadRequestException('Invalid delivery option');
 }
