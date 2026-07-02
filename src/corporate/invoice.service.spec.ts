@@ -59,19 +59,38 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
       unitAmount: 500,
       subtotalAmount: 5000,
       platformFeeAmount: 150,
-      totalAmount: 5150,
+      // Saudi VAT v1 (default full_value_standard, exclusive):
+      taxableAmount: 5150,
+      vatRate: 0.15,
+      vatAmount: 772.5,
+      totalBeforeVat: 5150,
+      pricesIncludeVat: false,
+      taxTreatment: 'full_value_standard',
+      totalAmount: 5922.5, // VAT-inclusive
     });
     expect(d.issuedAt).toBeInstanceOf(Date);
     expect(inv).toMatchObject({ id: 'inv-1', status: 'issued' });
   });
 
-  it('posts a company-receivable ledger entry for the total', async () => {
+  it('freezes the tax snapshot + defaults accounting export to not_exported', async () => {
+    const { service, prisma } = build();
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d.taxSnapshot).toMatchObject({
+      ruleVersion: 'sa-vat-v1',
+      vatRate: 0.15,
+      taxTreatment: 'full_value_standard',
+    });
+    expect(d.accountingExportStatus).toBe('not_exported');
+  });
+
+  it('posts a company-receivable ledger entry for the VAT-inclusive total', async () => {
     const { service, ledger } = build();
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     expect(ledger.record).toHaveBeenCalledTimes(1);
     expect(ledger.record.mock.calls[0][0]).toMatchObject({
       reasonCode: 'CORPORATE_RECEIVABLE',
-      amount: 5150,
+      amount: 5922.5, // VAT-inclusive
       direction: 'credit',
       counterpartyType: 'company',
       campaignId: CAMPAIGN,
@@ -115,14 +134,21 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
       },
     });
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
-    const meta = createdData(prisma).metadata as Record<string, unknown>;
+    const d = createdData(prisma);
+    const meta = d.metadata as Record<string, unknown>;
     expect(meta).toEqual({
       productName: 'Bouquet',
       storeName: 'Rosary',
       feePolicyVersion: expect.any(String),
     });
-    const flat = JSON.stringify(meta).toLowerCase();
-    for (const banned of ['sara', 'recipientname', 'phone', '+96650', 'address', 'secret']) {
+    // The tax snapshot + accounting fields must be PII-free too.
+    const flat = JSON.stringify({
+      metadata: meta,
+      taxSnapshot: d.taxSnapshot,
+      externalAccountingProvider: d.externalAccountingProvider ?? null,
+      externalAccountingInvoiceId: d.externalAccountingInvoiceId ?? null,
+    }).toLowerCase();
+    for (const banned of ['sara', 'recipientname', 'phone', '+96650', 'secret', 'street']) {
       expect(flat).not.toContain(banned.toLowerCase());
     }
   });

@@ -2142,7 +2142,34 @@ model CorporateInvoice {
   unitAmount        Float // frozen gift price from the approval snapshot
   subtotalAmount    Float // unitAmount * recipientCount
   platformFeeAmount Float // Qift fee (FeeEngine rate) * recipientCount
-  totalAmount       Float // subtotalAmount + platformFeeAmount
+
+  // ── Tax snapshot (Saudi VAT v1) ──────────────────────────────────
+  // Frozen at issuance so a later rate/rule change never alters a
+  // historical invoice. Nullable so any pre-tax-era invoice stays
+  // untouched. See src/fees/tax-engine.ts. PROVISIONAL — the VAT base
+  // (principal vs agent) is a tax-advisor decision.
+  taxableAmount    Float? // net base the VAT applies to
+  vatRate          Float? // e.g. 0.15
+  vatAmount        Float?
+  totalBeforeVat   Float? // net total (subtotal + fee, ex-VAT)
+  pricesIncludeVat Boolean? // false = VAT added on top (v1 default)
+  taxTreatment     String? // 'full_value_standard' | 'agent_fee_only'
+  taxSnapshot      Json? // frozen rule: version, rate, treatment, base
+
+  // Amount the company owes. For tax-snapshotted invoices it is
+  // VAT-inclusive (= totalBeforeVat + vatAmount); legacy pre-tax
+  // invoices keep their ex-VAT total.
+  totalAmount Float
+
+  // ── Accounting integration readiness (NO integration yet) ────────
+  // Placeholders so a future export to a ZATCA e-invoicing provider /
+  // Zoho Books / Xero / QuickBooks has a home. Nothing writes these
+  // beyond the defaults today.
+  externalAccountingProvider  String? // e.g. 'zatca' | 'zoho' | 'xero'
+  externalAccountingInvoiceId String?
+  accountingExportStatus      String    @default("not_exported") // not_exported | pending | exported | failed
+  accountingExportedAt        DateTime?
+  accountingExportError       String?
 
   dueDate     DateTime?
   issuedAt    DateTime?
