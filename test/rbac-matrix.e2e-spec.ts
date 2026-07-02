@@ -35,11 +35,21 @@
 //   Total: 252 cases per full run.
 //
 // NO PRODUCTION EFFECT
-// Reads only. Logs in via password against pre-seeded accounts. Never
-// writes to the DB. Never touches a row outside the rbac-test-* prefix
-// or merchant-rosary. Runs in `--runInBand` (per package.json script)
-// because the env-var mutation between tests would be racy with jest's
-// parallel workers.
+// Logs in via password against pre-seeded accounts and asserts
+// authorization outcomes. The ONLY write it performs is toggling the
+// `deletedAt` timestamp of the single A12 fixture row (rbac-test-A12):
+// A12 is momentarily reactivated so it can obtain a REAL token, then
+// soft-deleted so the matrix can verify AdminGuard rejects a valid
+// token from a soft-deleted admin per-request. afterAll restores A12 to
+// the exact state it was found in, so the suite is non-destructive and
+// re-runnable. It never writes any other row and never touches a row
+// outside the rbac-test-* prefix or merchant-rosary. This suite must
+// only ever run against a seeded NON-production database (the CI
+// ephemeral Postgres or a local test DB): production has no rbac-test-*
+// accounts, so the beforeAll prerequisite check fails loudly there
+// before any write is attempted. Runs in `--runInBand` (per
+// package.json script) because the env-var mutation between tests would
+// be racy with jest's parallel workers.
 
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -380,10 +390,11 @@ const EXPECTED: Record<AccountId, Record<EndpointKey, Outcome>> = {
   // /store/* still 403: super_admin is still role='admin', not store.
   A11: { E1: OK, E2: OK, E3: OK, E4: OK, E5: OK, E6: OK, E7: STORE_REJ },
 
-  // A12 — soft-deleted admin. AdminGuard's deletedAt rejection runs
-  // BEFORE the RBAC dispatch, so every /admin/* route returns
-  // 'Admin access required' regardless of catalog grants.
-  // /store/orders also 403 (admin doesn't own a Store).
+  // A12 — soft-deleted admin. beforeAll logs A12 in WHILE ACTIVE (to
+  // mint a real token), then soft-deletes it before the matrix runs.
+  // AdminGuard's deletedAt rejection runs BEFORE the RBAC dispatch, so
+  // every /admin/* route returns 'Admin access required' regardless of
+  // catalog grants. /store/orders also 403 (admin doesn't own a Store).
   A12: {
     E1: ADMIN_REJ,
     E2: ADMIN_REJ,
@@ -427,7 +438,17 @@ function buildCases(): Case[] {
 
 describe('RBAC matrix (e2e, both flag states + cross-flag equivalence)', () => {
   let app: INestApplication;
+  let prisma: PrismaService;
   const jwts = new Map<AccountId, string>();
+
+  // A12 is the soft-deleted-admin fixture. The matrix needs A12 to hold
+  // a REAL token AND be soft-deleted, but auth login (F2) correctly
+  // refuses soft-deleted users. So beforeAll reactivates A12, logs it
+  // in, then soft-deletes it before the matrix; afterAll restores its
+  // original state. A12's userId is fixed by the seed.
+  const A12_USER_ID = 'rbac-test-A12';
+  const A12_SOFT_DELETED_AT = new Date('2024-01-01T00:00:00Z');
+  let a12OriginalDeletedAt: Date | null = null;
 
   // Save originals so the spec restores process.env on teardown — any
   // sibling e2e spec that runs after this one inherits a clean
@@ -442,7 +463,7 @@ describe('RBAC matrix (e2e, both flag states + cross-flag equivalence)', () => {
 
     app = moduleRef.createNestApplication();
     await app.init();
-    const prisma = moduleRef.get(PrismaService);
+    prisma = moduleRef.get(PrismaService);
 
     // Verify every required account exists in the DB. Fail loud with
     // the seed command in the message so the operator can recover
@@ -469,7 +490,22 @@ describe('RBAC matrix (e2e, both flag states + cross-flag equivalence)', () => {
         }
         a.identifier = u.phone;
       }
+      // Capture A12's seeded deletedAt so afterAll can restore it
+      // exactly — the login + matrix lifecycle below toggles it.
+      if (a.id === 'A12') {
+        a12OriginalDeletedAt = u.deletedAt ?? null;
+      }
     }
+
+    // A12 is seeded soft-deleted; auth login (F2) refuses soft-deleted
+    // users. Momentarily reactivate A12 so it can obtain a REAL token
+    // in the login loop below. It is re-soft-deleted immediately after,
+    // before any matrix case runs. This write is scoped to the single
+    // A12 fixture row and reverted in afterAll.
+    await prisma.user.update({
+      where: { id: A12_USER_ID },
+      data: { deletedAt: null },
+    });
 
     // Log every account in. Captures access tokens once; reused
     // across the whole suite. Login is a single POST per account —
@@ -496,6 +532,16 @@ describe('RBAC matrix (e2e, both flag states + cross-flag equivalence)', () => {
       }
       jwts.set(a.id, token);
     }
+
+    // A12 now holds a valid JWT minted while active. Soft-delete it so
+    // every matrix case exercises AdminGuard's per-request deletedAt
+    // rejection with a REAL token. F2 is unaffected — a genuine
+    // soft-deleted password login still 401s (proven in
+    // auth.service.spec.ts); we only reactivated A12 transiently above.
+    await prisma.user.update({
+      where: { id: A12_USER_ID },
+      data: { deletedAt: A12_SOFT_DELETED_AT },
+    });
   });
 
   afterAll(async () => {
@@ -508,6 +554,17 @@ describe('RBAC matrix (e2e, both flag states + cross-flag equivalence)', () => {
       delete process.env.NODE_ENV;
     } else {
       process.env.NODE_ENV = ORIGINAL_NODE_ENV;
+    }
+    // Restore the A12 fixture to the exact deletedAt we found it in, so
+    // the suite is non-destructive and re-runnable against the same DB.
+    // Best-effort: a restore hiccup must not crash teardown.
+    if (prisma) {
+      await prisma.user
+        .update({
+          where: { id: A12_USER_ID },
+          data: { deletedAt: a12OriginalDeletedAt },
+        })
+        .catch(() => {});
     }
     if (app) await app.close();
   });
