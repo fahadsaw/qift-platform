@@ -2,10 +2,14 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { GiftsService } from '../gifts/gifts.service';
+import { FinancialLedgerService } from '../financial/financial-ledger.service';
+import { buildOrderLedgerEntries } from '../financial/order-ledger';
 import { validatePaymentProvider } from './providers';
 import { getGateway } from './gateways/registry';
 
@@ -13,9 +17,12 @@ const FORBIDDEN_MSG = 'غير مصرح لك';
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     private prisma: PrismaService,
     private gifts: GiftsService,
+    private ledger: FinancialLedgerService,
   ) {}
 
   async confirmMock(orderId: string, viewerUserId: string) {
@@ -38,6 +45,10 @@ export class PaymentsService {
     // payments — a network retry after the response was lost. The race
     // between two parallel calls is handled below by a guarded UPDATE.
     if (order.status === 'paid' && order.gift) {
+      // Self-heal: if a prior confirm committed the payment but its
+      // ledger write failed, back-fill it now (idempotent no-op if the
+      // entries already exist).
+      await this.ensureLedgerForPaidOrder(order);
       return { order, gift: order.gift };
     }
 
@@ -68,6 +79,7 @@ export class PaymentsService {
         include: { payment: true, gift: true },
       });
       if (refreshed?.status === 'paid' && refreshed.gift) {
+        await this.ensureLedgerForPaidOrder(refreshed);
         return { order: refreshed, gift: refreshed.gift };
       }
       // Order is in some other state (failed / processing without gift);
@@ -191,7 +203,66 @@ export class PaymentsService {
       });
     });
 
+    // Ledger writes run POST-commit (best-effort), not inside the paid
+    // transaction — see ensureLedgerForPaidOrder for the rationale.
+    await this.ensureLedgerForPaidOrder(updated);
+
     return { order: updated, gift };
+  }
+
+  // Records the append-only financial ledger entries for a PAID order.
+  //
+  // FAILURE STRATEGY — best-effort; NEVER fails the payment. By the time
+  // this runs the gateway has charged, the Gift exists, and the Order is
+  // committed as 'paid'. A ledger hiccup is a bookkeeping issue to retry,
+  // not a reason to fail a completed sale — so we swallow-and-log loudly.
+  // It self-heals: the idempotent fast-paths in confirmMock re-invoke
+  // this on the next confirm read, and the (orderId, reasonCode) unique
+  // key makes the retry safe. (We deliberately do NOT put these writes
+  // inside the paid $transaction: a ledger bug must never be able to roll
+  // back — and thereby block — a real payment.)
+  //
+  // IDEMPOTENCY — two layers: (1) skip entirely if entries already exist
+  // for this order; (2) the DB unique key catches any racing writer
+  // (P2002 → treated as already-posted).
+  private async ensureLedgerForPaidOrder(order: {
+    id: string;
+    userId: string;
+    storeId: string | null;
+    productPrice: number;
+    serviceFee: number;
+    deliveryFee: number;
+    totalAmount: number;
+    currency: string;
+    paymentProvider: string;
+    payment?: { id: string } | null;
+  }) {
+    try {
+      const existing = await this.ledger.findByOrder(order.id);
+      if (existing.length > 0) return; // already posted — idempotent no-op
+
+      const entries = buildOrderLedgerEntries(order, order.payment?.id ?? null);
+      for (const entry of entries) {
+        try {
+          await this.ledger.record(entry);
+        } catch (err) {
+          // A racing confirm already wrote this (orderId, reasonCode).
+          if (
+            err instanceof Prisma.PrismaClientKnownRequestError &&
+            err.code === 'P2002'
+          ) {
+            continue;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      this.logger.error(
+        `[ledger-failed] order=${order.id} — payment stands; ledger will ` +
+          `be retried on the next confirm. error=` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async recordFailedPayment(
