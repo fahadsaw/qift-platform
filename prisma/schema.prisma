@@ -2095,6 +2095,15 @@ model FinancialLedgerEntry {
   @@index([storeId])
   @@index([reasonCode, createdAt])
   @@index([eventType, createdAt])
+
+  // Idempotency (PR 3). One entry per (order, reasonCode): a paid order
+  // posts each reasonCode (ORDER_PAID, QIFT_SERVICE_FEE, …) at most
+  // once, so a retried payment confirmation cannot duplicate ledger
+  // rows — the second write hits P2002 and is treated as already-posted.
+  // Relies on PostgreSQL NULL-distinct semantics: non-order entries
+  // (orderId = NULL) are never constrained, matching the Gift /
+  // DispatchJob idempotency-key pattern already used in this schema.
+  @@unique([orderId, reasonCode])
 }
 
 // ── Corporate Foundation (approved scope, PR 1) ─────────────────────
