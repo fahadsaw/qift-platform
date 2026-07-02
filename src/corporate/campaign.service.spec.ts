@@ -19,13 +19,11 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import {
-  CampaignService,
-  MAX_CAMPAIGN_RECIPIENTS,
-} from './campaign.service';
+import { CampaignService, MAX_CAMPAIGN_RECIPIENTS } from './campaign.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { AuditService } from '../audit/audit.service';
 import type { InvoiceService } from './invoice.service';
+import type { MerchantInvoiceService } from './merchant-invoice.service';
 
 type PrismaMock = {
   organization: { findUnique: jest.Mock };
@@ -76,14 +74,13 @@ describe('CampaignService', () => {
   let prisma: PrismaMock;
   let audit: { record: jest.Mock };
   let invoices: { ensureInvoiceForCampaign: jest.Mock };
+  let merchantInvoices: { ensureMerchantInvoiceForCampaign: jest.Mock };
   let service: CampaignService;
 
   beforeEach(() => {
     prisma = {
       organization: {
-        findUnique: jest
-          .fn()
-          .mockResolvedValue({ status: 'approved' }),
+        findUnique: jest.fn().mockResolvedValue({ status: 'approved' }),
       },
       giftCampaign: {
         create: jest
@@ -119,11 +116,21 @@ describe('CampaignService', () => {
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     // PR 4: approval issues the invoice via InvoiceService (best-effort).
-    invoices = { ensureInvoiceForCampaign: jest.fn().mockResolvedValue({ id: 'inv-1' }) };
+    invoices = {
+      ensureInvoiceForCampaign: jest.fn().mockResolvedValue({ id: 'inv-1' }),
+    };
+    // Agent model: approval also issues the MERCHANT goods invoice
+    // (best-effort, second leg of the same commitment point).
+    merchantInvoices = {
+      ensureMerchantInvoiceForCampaign: jest
+        .fn()
+        .mockResolvedValue({ id: 'minv-1' }),
+    };
     service = new CampaignService(
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,
       invoices as unknown as InvoiceService,
+      merchantInvoices as unknown as MerchantInvoiceService,
     );
   });
 
@@ -219,7 +226,9 @@ describe('CampaignService', () => {
     it.each(['pending_approval', 'approved', 'cancelled'])(
       'refuses edits in %s',
       async (status) => {
-        prisma.giftCampaign.findFirst.mockResolvedValue(campaignRow({ status }));
+        prisma.giftCampaign.findFirst.mockResolvedValue(
+          campaignRow({ status }),
+        );
         await expect(
           service.setGiftOption('u1', 'org-1', 'camp-1', 'prod-1'),
         ).rejects.toThrow('campaign_not_editable');
@@ -375,6 +384,30 @@ describe('CampaignService', () => {
         service.approveCampaign('checker-1', 'org-1', 'camp-1'),
       ).rejects.toThrow('product_unavailable');
     });
+
+    it('approval issues BOTH invoice legs: Qift service + merchant goods', async () => {
+      await service.approveCampaign('checker-1', 'org-1', 'camp-1');
+      expect(invoices.ensureInvoiceForCampaign).toHaveBeenCalledWith(
+        'org-1',
+        'camp-1',
+        'checker-1',
+      );
+      expect(
+        merchantInvoices.ensureMerchantInvoiceForCampaign,
+      ).toHaveBeenCalledWith('org-1', 'camp-1', 'checker-1');
+    });
+
+    it('a merchant-invoice failure never undoes the approval (best-effort)', async () => {
+      merchantInvoices.ensureMerchantInvoiceForCampaign.mockRejectedValue(
+        new Error('db down'),
+      );
+      const updated = await service.approveCampaign(
+        'checker-1',
+        'org-1',
+        'camp-1',
+      );
+      expect(updated).toMatchObject({ status: 'approved' });
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────
@@ -397,7 +430,9 @@ describe('CampaignService', () => {
     it.each(['draft', 'pending_approval', 'changes_requested', 'approved'])(
       'cancel is allowed from %s',
       async (status) => {
-        prisma.giftCampaign.findFirst.mockResolvedValue(campaignRow({ status }));
+        prisma.giftCampaign.findFirst.mockResolvedValue(
+          campaignRow({ status }),
+        );
         await expect(
           service.cancelCampaign('u1', 'org-1', 'camp-1'),
         ).resolves.toBeDefined();
@@ -407,7 +442,9 @@ describe('CampaignService', () => {
     it.each(['cancelled', 'dispatching', 'completed'])(
       'cancel is refused from %s',
       async (status) => {
-        prisma.giftCampaign.findFirst.mockResolvedValue(campaignRow({ status }));
+        prisma.giftCampaign.findFirst.mockResolvedValue(
+          campaignRow({ status }),
+        );
         await expect(
           service.cancelCampaign('u1', 'org-1', 'camp-1'),
         ).rejects.toThrow('campaign_not_cancellable');

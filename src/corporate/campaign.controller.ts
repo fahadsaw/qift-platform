@@ -18,6 +18,7 @@ import type { CampaignDraftInput } from './campaign.service';
 import { DispatchService } from './dispatch.service';
 import { ReportService } from './report.service';
 import { InvoiceService } from './invoice.service';
+import { MerchantInvoiceService } from './merchant-invoice.service';
 
 type AuthedRequest = {
   user: { userId: string; qiftUsername: string };
@@ -45,6 +46,7 @@ export class CampaignController {
     private readonly dispatch: DispatchService,
     private readonly reports: ReportService,
     private readonly invoices: InvoiceService,
+    private readonly merchantInvoices: MerchantInvoiceService,
   ) {}
 
   @Post()
@@ -76,6 +78,23 @@ export class CampaignController {
   @RequireOrgRole('admin', 'approver')
   invoice(@Param('campaignId') campaignId: string, @Req() req: AuthedRequest) {
     return this.invoices.getInvoiceForCampaign(
+      req.orgContext!.orgId,
+      campaignId,
+    );
+  }
+
+  // The MERCHANT goods invoice for a campaign (agent model): the
+  // merchant's sale of the goods to the company, recorded by Qift on
+  // the merchant's behalf. Issued at approval; returns null before.
+  // Amounts + status only — no employee identity, address, or claim
+  // data. admin+approver, matching the Qift service invoice above.
+  @Get(':campaignId/merchant-invoice')
+  @RequireOrgRole('admin', 'approver')
+  merchantInvoice(
+    @Param('campaignId') campaignId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.merchantInvoices.getMerchantInvoiceForCampaign(
       req.orgContext!.orgId,
       campaignId,
     );
@@ -214,10 +233,7 @@ export class CampaignController {
     @Param('campaignId') campaignId: string,
     @Req() req: AuthedRequest,
   ) {
-    return this.dispatch.getDispatchStatus(
-      req.orgContext!.orgId,
-      campaignId,
-    );
+    return this.dispatch.getDispatchStatus(req.orgContext!.orgId, campaignId);
   }
 
   // ── Reporting (PR 6) ─────────────────────────────────────────────

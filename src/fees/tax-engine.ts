@@ -142,3 +142,93 @@ export function computeTax(input: TaxInput): TaxBreakdown {
     },
   };
 }
+
+// ── Merchant goods leg (agent model) ────────────────────────────────
+//
+// The MERCHANT is the legal seller of the goods, so VAT on the goods
+// belongs on the merchant (goods) invoice — under the merchant's VAT
+// registration — never on the Qift service invoice. Qift generates the
+// merchant invoice on the merchant's behalf; every amount below is
+// merchant revenue, not Qift's.
+//
+// This is the OTHER HALF of the same agent ruleset computeTax
+// implements (fee-leg VAT for Qift, goods-leg VAT for the merchant), so
+// it shares SAUDI_VAT_RATE / TAX_RULE_VERSION / rounding. Adding it did
+// NOT change any computeTax output, so the rule version is not bumped.
+
+export const MERCHANT_GOODS_TAX_TREATMENT = 'merchant_goods_standard';
+
+export type MerchantGoodsTaxInput = {
+  goodsSubtotalAmount: number; // unit * recipientCount — merchant's goods
+  pricesIncludeVat?: boolean;
+  vatRate?: number; // defaults to the server-side SAUDI_VAT_RATE
+};
+
+export type MerchantGoodsTaxSnapshot = {
+  ruleVersion: string;
+  vatRate: number;
+  taxTreatment: string; // MERCHANT_GOODS_TAX_TREATMENT
+  pricesIncludeVat: boolean;
+  taxableBase: number; // net goods base the merchant VAT applies to
+  vatAmount: number;
+  notes: string;
+};
+
+export type MerchantGoodsTaxBreakdown = {
+  taxTreatment: string; // MERCHANT_GOODS_TAX_TREATMENT
+  pricesIncludeVat: boolean;
+  taxableAmount: number; // net goods base the merchant VAT applies to
+  vatRate: number;
+  vatAmount: number; // MERCHANT output VAT on the goods
+  totalAmount: number; // goods total the company owes the merchant
+  taxSnapshot: MerchantGoodsTaxSnapshot;
+};
+
+const MERCHANT_GOODS_NOTE =
+  'Saudi VAT (agent model), merchant goods leg. The merchant is the ' +
+  "legal seller: this VAT is the MERCHANT's output VAT on the goods, " +
+  "recorded by Qift on the merchant's behalf — not Qift revenue, not " +
+  'Qift VAT. No VAT is remitted to ZATCA yet. Frozen on the invoice ' +
+  'for historical correctness.';
+
+export function computeMerchantGoodsTax(
+  input: MerchantGoodsTaxInput,
+): MerchantGoodsTaxBreakdown {
+  const pricesIncludeVat = input.pricesIncludeVat ?? DEFAULT_PRICES_INCLUDE_VAT;
+  const vatRate = input.vatRate ?? SAUDI_VAT_RATE;
+  const goods = input.goodsSubtotalAmount;
+
+  let taxableAmount: number;
+  let vatAmount: number;
+  let totalAmount: number;
+
+  if (pricesIncludeVat) {
+    // The goods price already includes VAT — extract the tax portion.
+    taxableAmount = round2(goods / (1 + vatRate));
+    vatAmount = round2(goods - taxableAmount);
+    totalAmount = round2(goods);
+  } else {
+    // VAT added on top of the goods base.
+    taxableAmount = round2(goods);
+    vatAmount = round2(taxableAmount * vatRate);
+    totalAmount = round2(taxableAmount + vatAmount);
+  }
+
+  return {
+    taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
+    pricesIncludeVat,
+    taxableAmount,
+    vatRate,
+    vatAmount,
+    totalAmount,
+    taxSnapshot: {
+      ruleVersion: TAX_RULE_VERSION,
+      vatRate,
+      taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
+      pricesIncludeVat,
+      taxableBase: taxableAmount,
+      vatAmount,
+      notes: MERCHANT_GOODS_NOTE,
+    },
+  };
+}
