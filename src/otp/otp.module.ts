@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { OtpController } from './otp.controller';
 import { OtpService } from './otp.service';
-import { PrismaService } from '../prisma/prisma.service';
 
 // Week 2 (Forgot Password Flow) — OtpService is now exported so
 // AuthService can reuse the existing send/verify primitives for
@@ -10,7 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 // DI exposure.
 @Module({
   controllers: [OtpController],
-  providers: [OtpService, PrismaService],
+  providers: [OtpService],
   exports: [OtpService],
 })
 export class OtpModule {}

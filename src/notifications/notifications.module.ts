@@ -9,7 +9,6 @@ import {
 } from './notification-preferences.controller';
 import { OccasionReminderWorker } from './occasion-reminder-worker.service';
 import { DigestWorker } from './digest-worker.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { PushModule } from '../push/push.module';
 
 // Phase 7.2 added the two workers:
@@ -48,7 +47,6 @@ import { PushModule } from '../push/push.module';
     NotificationPreferencesService,
     OccasionReminderWorker,
     DigestWorker,
-    PrismaService,
   ],
   // Workers exported so AdminModule can inject them for the
   // manual-trigger endpoints. NotificationsService stays exported

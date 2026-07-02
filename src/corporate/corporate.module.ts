@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
 import { AdminGuard } from '../admin/admin.guard';
 import { OpsRolesModule } from '../ops-roles/ops-roles.module';
 import { AuditModule } from '../audit/audit.module';
@@ -52,8 +51,8 @@ import { StoreBusinessAdminController } from './store-business-admin.controller'
 //                         OtpModule supplies the possession proof.
 //
 // OpsRolesModule supplies OpsRoleGuard + OpsRolesService for the
-// admin surface; AdminGuard + PrismaService are provided locally
-// (no global PrismaModule — same pattern as BetaAccessModule).
+// admin surface; AdminGuard is provided locally. PrismaService is
+// injected from the global PrismaModule.
 // AuditModule: every org lifecycle change persists to AuditLog.
 //
 // Later Corporate Foundation PRs (roster import, campaigns, dispatch,
@@ -84,7 +83,6 @@ import { StoreBusinessAdminController } from './store-business-admin.controller'
     StoreBusinessService,
     OrgRoleGuard,
     AdminGuard,
-    PrismaService,
   ],
   exports: [OrgService, RosterService, CampaignService, DispatchService],
 })

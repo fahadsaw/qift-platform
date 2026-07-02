@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { GiftPostsController } from './gift-posts.controller';
 import { GiftPostsService } from './gift-posts.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 
 // Imports NotificationsModule (not provided directly) so the
@@ -11,7 +10,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 @Module({
   imports: [NotificationsModule],
   controllers: [GiftPostsController],
-  providers: [GiftPostsService, PrismaService],
+  providers: [GiftPostsService],
   exports: [GiftPostsService],
 })
 export class GiftPostsModule {}

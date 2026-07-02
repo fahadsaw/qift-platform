@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { StoreController } from './store.controller';
 import { StoreService } from './store.service';
 import { StoreGuard } from './store.guard';
-import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { StoresModule } from '../stores/stores.module';
 
@@ -12,6 +11,6 @@ import { StoresModule } from '../stores/stores.module';
 @Module({
   imports: [NotificationsModule, StoresModule],
   controllers: [StoreController],
-  providers: [StoreService, StoreGuard, PrismaService],
+  providers: [StoreService, StoreGuard],
 })
 export class StoreModule {}

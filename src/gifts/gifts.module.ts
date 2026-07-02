@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { GiftsController } from './gifts.controller';
 import { GiftsService } from './gifts.service';
 import { GiftsAutoDefaultService } from './gifts-auto-default.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { BlocksModule } from '../blocks/blocks.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 
@@ -18,7 +17,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 @Module({
   imports: [BlocksModule, NotificationsModule],
   controllers: [GiftsController],
-  providers: [GiftsService, GiftsAutoDefaultService, PrismaService],
+  providers: [GiftsService, GiftsAutoDefaultService],
   exports: [GiftsService],
 })
 export class GiftsModule {}

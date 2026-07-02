@@ -4,7 +4,6 @@ import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy, getJwtSecret } from './jwt.strategy';
-import { PrismaService } from '../prisma/prisma.service';
 import { OtpModule } from '../otp/otp.module';
 import { BetaAccessModule } from '../beta-access/beta-access.module';
 
@@ -34,6 +33,6 @@ import { BetaAccessModule } from '../beta-access/beta-access.module';
     BetaAccessModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, PrismaService],
+  providers: [AuthService, JwtStrategy],
 })
 export class AuthModule {}

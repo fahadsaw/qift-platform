@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { BlocksModule } from '../blocks/blocks.module';
 import { OtpModule } from '../otp/otp.module';
 import { AuditModule } from '../audit/audit.module';
@@ -26,7 +25,7 @@ import { AuditModule } from '../audit/audit.module';
 @Module({
   imports: [BlocksModule, OtpModule, AuditModule],
   controllers: [UsersController],
-  providers: [UsersService, PrismaService],
+  providers: [UsersService],
   exports: [UsersService],
 })
 export class UsersModule {}
