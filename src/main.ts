@@ -55,6 +55,11 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const logger = new Logger('Bootstrap');
 
+  // Listen for termination signals (e.g. a Railway redeploy SIGTERM) so
+  // Nest runs lifecycle destroy hooks — notably PrismaService.$disconnect
+  // — and the single DB connection pool closes cleanly on shutdown.
+  app.enableShutdownHooks();
+
   app.set('trust proxy', 1);
 
   const envOrigins = (process.env.CORS_ORIGINS ?? '')

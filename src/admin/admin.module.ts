@@ -3,7 +3,6 @@ import { AdminController } from './admin.controller';
 import { AdminWorkersController } from './admin-workers.controller';
 import { AdminService } from './admin.service';
 import { AdminGuard } from './admin.guard';
-import { PrismaService } from '../prisma/prisma.service';
 import { StoresModule } from '../stores/stores.module';
 import { OpsRolesModule } from '../ops-roles/ops-roles.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -27,6 +26,6 @@ import { AuditModule } from '../audit/audit.module';
 @Module({
   imports: [StoresModule, OpsRolesModule, NotificationsModule, AuditModule],
   controllers: [AdminController, AdminWorkersController],
-  providers: [AdminService, AdminGuard, PrismaService],
+  providers: [AdminService, AdminGuard],
 })
 export class AdminModule {}

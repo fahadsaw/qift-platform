@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AddressesController } from './addresses.controller';
 import { AddressesService } from './addresses.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 
 // AddressesService notifies pending senders ("address ready for retry")
@@ -11,6 +10,6 @@ import { NotificationsModule } from '../notifications/notifications.module';
 @Module({
   imports: [NotificationsModule],
   controllers: [AddressesController],
-  providers: [AddressesService, PrismaService],
+  providers: [AddressesService],
 })
 export class AddressesModule {}

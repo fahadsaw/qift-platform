@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
 import {
   InvitesController,
   InvitesPublicController,
@@ -16,7 +15,7 @@ import { InvitesService } from './invites.service';
 // than per-route.
 @Module({
   controllers: [InvitesController, InvitesPublicController],
-  providers: [InvitesService, PrismaService],
+  providers: [InvitesService],
   exports: [InvitesService],
 })
 export class InvitesModule {}
