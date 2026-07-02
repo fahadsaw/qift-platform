@@ -2030,6 +2030,73 @@ model AuditLog {
   @@index([action, createdAt])
 }
 
+// ── Financial ledger substrate (PR 2 — dark-launched) ───────────────
+//
+// Append-only record of money-relevant events. This is the FOUNDATION
+// future invoice / settlement / reconciliation work will read from —
+// NOT a full accounting system, and NOTHING writes to it in this PR
+// (dark launch: the table + service ship, no producer is wired).
+//
+// Append-only is enforced two ways: by convention here, and by the
+// service API — FinancialLedgerService exposes only record() + read
+// helpers; there is deliberately no update/delete path anywhere.
+//
+// PURGE SURVIVABILITY: every correlation id (orderId, paymentId,
+// storeId, orgId, campaignId, actorId) is plain TEXT with NO foreign
+// key — the same philosophy as AuditLog / DispatchJob / ClaimableGift.
+// A financial trail must outlive the purge of the actor or entity it
+// references (regulatory retention — ZATCA financial records).
+//
+// MONEY TYPE: `amount` is Float to match the existing Order / Payment
+// money columns, so reconciliation needs no cross-type conversion. It
+// is a positive magnitude; `direction` carries the debit/credit sense
+// so the substrate is double-entry-ready.
+model FinancialLedgerEntry {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  // What happened. `eventType` = high-level category (e.g.
+  // 'order.captured', 'payout.accrued'); `reasonCode` = specific
+  // machine code (e.g. 'ORDER_CAPTURE', 'QIFT_SERVICE_FEE').
+  eventType  String
+  reasonCode String
+
+  // Who caused it. 'system' for automated postings. Plain-TEXT actorId
+  // (purge-survivable), nullable for system events.
+  actorType String
+  actorId   String?
+
+  // Money. Positive magnitude + explicit direction.
+  amount    Float
+  currency  String
+  direction String // 'credit' | 'debit'
+
+  // The other side of the entry, when meaningful (e.g. 'merchant',
+  // 'qift', 'sender', 'psp'). Qift's merchant IS the store, so there is
+  // no separate merchantId — storeId identifies the merchant side.
+  counterpartyType String?
+
+  // Correlation ids — all plain TEXT, all nullable, NO FK (survivability).
+  orderId    String?
+  paymentId  String?
+  campaignId String?
+  orgId      String?
+  storeId    String?
+
+  // Free-form context. MUST NOT carry recipient address / location /
+  // phone data — FinancialLedgerService strips known-sensitive keys
+  // before persisting.
+  metadata Json?
+
+  @@index([orderId])
+  @@index([paymentId])
+  @@index([campaignId])
+  @@index([orgId])
+  @@index([storeId])
+  @@index([reasonCode, createdAt])
+  @@index([eventType, createdAt])
+}
+
 // ── Corporate Foundation (approved scope, PR 1) ─────────────────────
 //
 // Organization — the corporate customer (Corporate Core v2 §2.1).
