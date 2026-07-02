@@ -25,6 +25,7 @@ import {
 } from './campaign.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { AuditService } from '../audit/audit.service';
+import type { InvoiceService } from './invoice.service';
 
 type PrismaMock = {
   organization: { findUnique: jest.Mock };
@@ -74,6 +75,7 @@ const liveProduct = (over: Record<string, unknown> = {}) => ({
 describe('CampaignService', () => {
   let prisma: PrismaMock;
   let audit: { record: jest.Mock };
+  let invoices: { ensureInvoiceForCampaign: jest.Mock };
   let service: CampaignService;
 
   beforeEach(() => {
@@ -116,9 +118,12 @@ describe('CampaignService', () => {
         ),
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
+    // PR 4: approval issues the invoice via InvoiceService (best-effort).
+    invoices = { ensureInvoiceForCampaign: jest.fn().mockResolvedValue({ id: 'inv-1' }) };
     service = new CampaignService(
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,
+      invoices as unknown as InvoiceService,
     );
   });
 

@@ -2106,6 +2106,57 @@ model FinancialLedgerEntry {
   @@unique([orderId, reasonCode])
 }
 
+// ── Corporate Invoice (PR 4 — the first corporate money entity) ─────
+//
+// Issued when a GiftCampaign is APPROVED (the SoD-locked commercial
+// commitment point). Amounts are frozen from the campaign's approval
+// snapshot: company owes Qift `totalAmount` = subtotal (gift value) +
+// platform fee. Manual / offline settlement only in the pilot — no live
+// PSP, no ZATCA XML, no merchant settlement here.
+//
+// SURVIVABILITY: orgId and campaignId are plain TEXT with NO foreign key
+// — a financial record must outlive the purge of the org or campaign it
+// bills (regulatory retention), matching the AuditLog / FinancialLedger
+// posture. `@@unique([campaignId])` is the idempotency anchor: exactly
+// one invoice per campaign, so repeated approval/dispatch cannot
+// duplicate it.
+//
+// PRIVACY: no employee identity, address, phone, or claim choice is ever
+// stored here. metadata carries only non-PII line context (product /
+// store name + fee-policy version).
+model CorporateInvoice {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  orgId      String // plain TEXT, no FK (purge-survivable)
+  campaignId String // plain TEXT, no FK (purge-survivable)
+
+  // draft | issued | cancelled | paid | void. Created as 'issued' at
+  // approval; the 'paid' transition (offline settlement) + its ledger
+  // allocation land in PR 5.
+  status String @default("issued")
+
+  currency          String @default("SAR")
+  recipientCount    Int
+  unitAmount        Float // frozen gift price from the approval snapshot
+  subtotalAmount    Float // unitAmount * recipientCount
+  platformFeeAmount Float // Qift fee (FeeEngine rate) * recipientCount
+  totalAmount       Float // subtotalAmount + platformFeeAmount
+
+  dueDate     DateTime?
+  issuedAt    DateTime?
+  paidAt      DateTime?
+  cancelledAt DateTime?
+
+  metadata Json?
+
+  @@unique([campaignId])
+  @@index([orgId])
+  @@index([status, createdAt])
+  @@index([issuedAt])
+}
+
 // ── Corporate Foundation (approved scope, PR 1) ─────────────────────
 //
 // Organization — the corporate customer (Corporate Core v2 §2.1).
