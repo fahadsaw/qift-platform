@@ -1,5 +1,14 @@
 // InvoiceService — the corporate invoice money path (PR 4).
 //
+// AGENT MODEL (canonical): this issues Qift's SERVICE invoice. Qift is not
+// the seller of the goods, so this invoice bills the Qift platform fee +
+// VAT on the fee ONLY (agent_fee_only, see computeTax). The gift (goods)
+// value is the merchant's revenue — recorded on the invoice's
+// subtotalAmount as facilitated / pass-through value, never as Qift
+// revenue, and excluded from Qift's VAT base and total. The separate
+// merchant (goods) invoice and the combined Campaign Billing Summary are
+// later PRs; this PR does not create them.
+//
 // Issues one CorporateInvoice per approved campaign, frozen from the
 // campaign's approval snapshot. Manual / offline settlement only: no live
 // PSP, no ZATCA XML, no merchant settlement, no refunds here.
@@ -10,10 +19,10 @@
 // so a repeated approval/dispatch never duplicates.
 //
 // LEDGER: on issuance we post ONE minimal FinancialLedgerService entry —
-// the company receivable (company owes Qift totalAmount). It is
-// best-effort: a ledger hiccup must never undo an issued invoice. The
-// payment-time allocation (merchant payable + revenue recognition) is
-// deferred to the settlement PR.
+// the company receivable owed to Qift for its service invoice
+// (totalAmount = fee + VAT on the fee). It is best-effort: a ledger hiccup
+// must never undo an issued invoice. The goods-side collection / merchant
+// payable + revenue recognition is deferred to the settlement PR.
 //
 // PRIVACY: no employee identity / address / phone / claim choice is ever
 // written to the invoice or its ledger entry.
@@ -78,7 +87,8 @@ export class InvoiceService {
       where: { campaignId },
       select: { approvalSnapshot: true },
     });
-    const snapshot = (option?.approvalSnapshot as ApprovalSnapshot | null) ?? null;
+    const snapshot =
+      (option?.approvalSnapshot as ApprovalSnapshot | null) ?? null;
     if (!snapshot || typeof snapshot.price !== 'number') {
       throw new BadRequestException('campaign_no_snapshot');
     }
@@ -91,8 +101,10 @@ export class InvoiceService {
     }
 
     const amounts = computeInvoiceAmounts(snapshot.price, recipientCount);
-    // Freeze the Saudi VAT v1 snapshot (server-side rule) onto the
-    // invoice. totalAmount below is VAT-inclusive.
+    // Freeze the Saudi VAT snapshot (server-side rule) onto the invoice.
+    // Agent model: tax.taxableAmount / tax.totalAmount cover the Qift fee
+    // only; tax.facilitatedValue is the goods subtotal (merchant's), which
+    // is recorded but excluded from Qift's VAT and total.
     const tax = computeTax({
       subtotalAmount: amounts.subtotalAmount,
       platformFeeAmount: amounts.platformFeeAmount,
@@ -110,7 +122,7 @@ export class InvoiceService {
           unitAmount: amounts.unitAmount,
           subtotalAmount: amounts.subtotalAmount,
           platformFeeAmount: amounts.platformFeeAmount,
-          // Tax snapshot (Saudi VAT v1) — frozen for historical correctness.
+          // Tax snapshot (Saudi VAT, agent model) — frozen for correctness.
           taxableAmount: tax.taxableAmount,
           vatRate: tax.vatRate,
           vatAmount: tax.vatAmount,
@@ -118,16 +130,21 @@ export class InvoiceService {
           pricesIncludeVat: tax.pricesIncludeVat,
           taxTreatment: tax.taxTreatment,
           taxSnapshot: tax.taxSnapshot,
-          // VAT-inclusive amount the company owes.
+          // Qift service-invoice total the company owes Qift (agent model):
+          // platform fee + VAT on the fee. The goods subtotal is NOT here.
           totalAmount: tax.totalAmount,
           // Accounting export not wired yet — explicit default.
           accountingExportStatus: 'not_exported',
           issuedAt: now,
-          // Non-PII line context only.
+          // Non-PII line context only. facilitatedValue = the goods
+          // subtotal Qift facilitates on the merchant's behalf (merchant
+          // revenue, not Qift's) — recorded for the future merchant invoice
+          // + Campaign Billing Summary.
           metadata: {
             productName: snapshot.productName ?? null,
             storeName: snapshot.storeName ?? null,
             feePolicyVersion: FEE_POLICY_VERSION,
+            facilitatedValue: tax.facilitatedValue,
           },
         },
       });
@@ -172,9 +189,11 @@ export class InvoiceService {
   }
 
   // Post-issuance ledger write — best-effort, never blocks issuance.
-  // Records the company receivable: company owes Qift the invoice total.
-  // direction 'credit' = amount owed TO Qift (Qift's favour). The
-  // payment/settlement allocation is deferred to the settlement PR.
+  // Records the company receivable for Qift's SERVICE invoice: company
+  // owes Qift totalAmount (agent model = platform fee + VAT on the fee).
+  // direction 'credit' = amount owed TO Qift (Qift's favour). The goods
+  // value is the merchant's (facilitated pass-through) and is NOT part of
+  // this receivable; the goods-side settlement is deferred to a later PR.
   private async recordReceivableLedger(
     invoice: {
       id: string;

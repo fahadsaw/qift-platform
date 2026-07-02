@@ -2140,24 +2140,30 @@ model CorporateInvoice {
   currency          String @default("SAR")
   recipientCount    Int
   unitAmount        Float // frozen gift price from the approval snapshot
-  subtotalAmount    Float // unitAmount * recipientCount
+  // AGENT MODEL: the goods value the MERCHANT sells and Qift merely
+  // facilitates (pass-through) — recorded here, NOT Qift revenue, and
+  // excluded from Qift's VAT base and totalAmount below.
+  subtotalAmount    Float // unitAmount * recipientCount (facilitated value)
   platformFeeAmount Float // Qift fee (FeeEngine rate) * recipientCount
 
-  // ── Tax snapshot (Saudi VAT v1) ──────────────────────────────────
+  // ── Tax snapshot (Saudi VAT, agent model) ────────────────────────
   // Frozen at issuance so a later rate/rule change never alters a
   // historical invoice. Nullable so any pre-tax-era invoice stays
-  // untouched. See src/fees/tax-engine.ts. PROVISIONAL — the VAT base
-  // (principal vs agent) is a tax-advisor decision.
-  taxableAmount    Float? // net base the VAT applies to
+  // untouched. See src/fees/tax-engine.ts. Qift is an AGENT (canonical):
+  // VAT applies to the Qift platform fee ONLY; the goods subtotal is the
+  // merchant's and is excluded. Merchant goods VAT belongs on the
+  // separate merchant (goods) invoice, not here.
+  taxableAmount    Float? // net base the VAT applies to (Qift fee, agent)
   vatRate          Float? // e.g. 0.15
-  vatAmount        Float?
-  totalBeforeVat   Float? // net total (subtotal + fee, ex-VAT)
-  pricesIncludeVat Boolean? // false = VAT added on top (v1 default)
-  taxTreatment     String? // 'full_value_standard' | 'agent_fee_only'
-  taxSnapshot      Json? // frozen rule: version, rate, treatment, base
+  vatAmount        Float? // VAT on the Qift fee only (agent)
+  totalBeforeVat   Float? // Qift charge ex-VAT (the fee under agent)
+  pricesIncludeVat Boolean? // false = VAT added on top (default)
+  taxTreatment     String? // 'agent_fee_only' (default) | 'full_value_standard' (legacy)
+  taxSnapshot      Json? // frozen rule: version, rate, treatment, base, facilitatedValue
 
-  // Amount the company owes. For tax-snapshotted invoices it is
-  // VAT-inclusive (= totalBeforeVat + vatAmount); legacy pre-tax
+  // Amount the company owes Qift on this SERVICE invoice (agent model):
+  // the platform fee + VAT on the fee (= totalBeforeVat + vatAmount). The
+  // goods value is billed separately by the merchant. Legacy pre-tax
   // invoices keep their ex-VAT total.
   totalAmount Float
 

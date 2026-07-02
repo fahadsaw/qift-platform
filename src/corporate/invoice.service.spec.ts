@@ -9,23 +9,33 @@ const ACTOR = 'approver-1';
 // snapshot the approval froze: 500 SAR gift, 10 recipients.
 const SNAPSHOT = { price: 500, productName: 'Bouquet', storeName: 'Rosary' };
 
-function build(opts: {
-  existing?: unknown;
-  status?: string | null;
-  snapshot?: unknown;
-  recipientCount?: number;
-} = {}) {
+function build(
+  opts: {
+    existing?: unknown;
+    status?: string | null;
+    snapshot?: unknown;
+    recipientCount?: number;
+  } = {},
+) {
   const corporateInvoice = {
     findUnique: jest.fn().mockResolvedValue(opts.existing ?? null),
     findFirst: jest.fn(),
-    create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
-      Promise.resolve({ id: 'inv-1', ...data }),
-    ),
+    create: jest
+      .fn()
+      .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: 'inv-1', ...data }),
+      ),
   };
   const giftCampaign = {
-    findFirst: jest.fn().mockResolvedValue(
-      opts.status === undefined ? { id: CAMPAIGN, status: 'approved' } : opts.status === null ? null : { id: CAMPAIGN, status: opts.status },
-    ),
+    findFirst: jest
+      .fn()
+      .mockResolvedValue(
+        opts.status === undefined
+          ? { id: CAMPAIGN, status: 'approved' }
+          : opts.status === null
+            ? null
+            : { id: CAMPAIGN, status: opts.status },
+      ),
   };
   const campaignGiftOption = {
     findFirst: jest.fn().mockResolvedValue({
@@ -35,15 +45,27 @@ function build(opts: {
   const campaignRecipient = {
     count: jest.fn().mockResolvedValue(opts.recipientCount ?? 10),
   };
-  const prisma = { corporateInvoice, giftCampaign, campaignGiftOption, campaignRecipient };
+  const prisma = {
+    corporateInvoice,
+    giftCampaign,
+    campaignGiftOption,
+    campaignRecipient,
+  };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'ledger-1' }) };
-  const service = new InvoiceService(prisma as never, audit as never, ledger as never);
+  const service = new InvoiceService(
+    prisma as never,
+    audit as never,
+    ledger as never,
+  );
   return { service, prisma, audit, ledger };
 }
 
 const createdData = (prisma: ReturnType<typeof build>['prisma']) =>
-  prisma.corporateInvoice.create.mock.calls[0][0].data as Record<string, unknown>;
+  prisma.corporateInvoice.create.mock.calls[0][0].data as Record<
+    string,
+    unknown
+  >;
 
 describe('InvoiceService.ensureInvoiceForCampaign', () => {
   it('issues an invoice from the approval snapshot with correct amounts', async () => {
@@ -57,19 +79,38 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
       currency: 'SAR',
       recipientCount: 10,
       unitAmount: 500,
+      // Goods value stays recorded (merchant's), but as facilitated
+      // pass-through — NOT Qift taxable revenue.
       subtotalAmount: 5000,
       platformFeeAmount: 150,
-      // Saudi VAT v1 (default full_value_standard, exclusive):
-      taxableAmount: 5150,
+      // Saudi VAT (agent_fee_only, exclusive): VAT on the 150 fee only.
+      taxableAmount: 150,
       vatRate: 0.15,
-      vatAmount: 772.5,
-      totalBeforeVat: 5150,
+      vatAmount: 22.5,
+      totalBeforeVat: 150,
       pricesIncludeVat: false,
-      taxTreatment: 'full_value_standard',
-      totalAmount: 5922.5, // VAT-inclusive
+      taxTreatment: 'agent_fee_only',
+      // Qift service invoice total = fee + VAT on fee (goods excluded).
+      totalAmount: 172.5,
     });
     expect(d.issuedAt).toBeInstanceOf(Date);
     expect(inv).toMatchObject({ id: 'inv-1', status: 'issued' });
+  });
+
+  it('records the goods value as facilitated pass-through, not Qift revenue', async () => {
+    const { service, prisma } = build();
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    // Goods subtotal is preserved on the invoice…
+    expect(d.subtotalAmount).toBe(5000);
+    // …but the Qift service total and VAT base exclude it entirely.
+    expect(d.totalAmount).toBe(172.5);
+    expect(d.taxableAmount).toBe(150);
+    // …and it is labelled as facilitated value in the snapshot + metadata.
+    expect((d.taxSnapshot as Record<string, unknown>).facilitatedValue).toBe(
+      5000,
+    );
+    expect((d.metadata as Record<string, unknown>).facilitatedValue).toBe(5000);
   });
 
   it('freezes the tax snapshot + defaults accounting export to not_exported', async () => {
@@ -77,20 +118,20 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     const d = createdData(prisma);
     expect(d.taxSnapshot).toMatchObject({
-      ruleVersion: 'sa-vat-v1',
+      ruleVersion: 'sa-vat-agent-v1',
       vatRate: 0.15,
-      taxTreatment: 'full_value_standard',
+      taxTreatment: 'agent_fee_only',
     });
     expect(d.accountingExportStatus).toBe('not_exported');
   });
 
-  it('posts a company-receivable ledger entry for the VAT-inclusive total', async () => {
+  it('posts a company-receivable ledger entry for the Qift service total (fee + VAT)', async () => {
     const { service, ledger } = build();
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     expect(ledger.record).toHaveBeenCalledTimes(1);
     expect(ledger.record.mock.calls[0][0]).toMatchObject({
       reasonCode: 'CORPORATE_RECEIVABLE',
-      amount: 5922.5, // VAT-inclusive
+      amount: 172.5, // Qift service invoice: fee 150 + VAT 22.5 (goods excluded)
       direction: 'credit',
       counterpartyType: 'company',
       campaignId: CAMPAIGN,
@@ -99,7 +140,9 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
   });
 
   it('is idempotent — returns the existing invoice, no second create', async () => {
-    const { service, prisma, ledger } = build({ existing: { id: 'inv-1', campaignId: CAMPAIGN } });
+    const { service, prisma, ledger } = build({
+      existing: { id: 'inv-1', campaignId: CAMPAIGN },
+    });
     const inv = await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     expect(inv).toMatchObject({ id: 'inv-1' });
     expect(prisma.corporateInvoice.create).not.toHaveBeenCalled();
@@ -140,6 +183,7 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
       productName: 'Bouquet',
       storeName: 'Rosary',
       feePolicyVersion: expect.any(String),
+      facilitatedValue: 5000, // goods pass-through (500 * 10 recipients), not PII
     });
     // The tax snapshot + accounting fields must be PII-free too.
     const flat = JSON.stringify({
@@ -148,7 +192,14 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
       externalAccountingProvider: d.externalAccountingProvider ?? null,
       externalAccountingInvoiceId: d.externalAccountingInvoiceId ?? null,
     }).toLowerCase();
-    for (const banned of ['sara', 'recipientname', 'phone', '+96650', 'secret', 'street']) {
+    for (const banned of [
+      'sara',
+      'recipientname',
+      'phone',
+      '+96650',
+      'secret',
+      'street',
+    ]) {
       expect(flat).not.toContain(banned.toLowerCase());
     }
   });

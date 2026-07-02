@@ -1,36 +1,45 @@
-// Qift TaxEngine — Saudi VAT v1.
+// Qift TaxEngine — Saudi VAT (agent model).
 //
 // A versioned, SERVER-SIDE tax rule (the frontend never supplies a VAT
 // number). computeTax freezes a taxSnapshot onto each invoice so a later
 // rate/rule change never alters a historical invoice — bump
 // TAX_RULE_VERSION whenever any constant below changes.
 //
-// ⚠️ PROVISIONAL — the two load-bearing questions below are NOT yet
-// confirmed by a Saudi tax advisor, and NO VAT is remitted to ZATCA yet
-// (this PR only records a snapshot for future correctness):
-//   1. Is Qift PRINCIPAL (VAT on the full campaign value) or AGENT (VAT
-//      only on the Qift platform fee)?  → `taxTreatment`.
-//   2. Are catalog prices VAT-inclusive or exclusive?  → `pricesIncludeVat`.
-// v1 defaults to the conservative principal / VAT-exclusive stance; both
-// alternatives are representable so the answer changes a constant + a
-// version bump, never historical rows.
+// COMMERCIAL MODEL — Qift is an AGENT, not a principal (canonical
+// decision). Qift is NOT the seller of the goods and does not resell
+// inventory: the merchant is the legal seller. Therefore Qift's VAT
+// applies to the Qift SERVICE / platform fee ONLY. The gift (goods)
+// value is the merchant's revenue — recorded here as facilitated /
+// pass-through value and EXCLUDED from Qift's VAT base and from the Qift
+// invoice total. Merchant goods VAT belongs on the separate merchant
+// (goods) invoice, not on the Qift service invoice.
+//
+// STILL PROVISIONAL — although the agent classification is now settled,
+// no VAT is remitted to ZATCA yet and the rate / e-invoicing mechanics
+// are not advisor-confirmed for remittance. The remaining open question
+// is only `pricesIncludeVat` (are catalog prices VAT-inclusive or
+// exclusive?). Both conventions stay representable so a future answer is
+// a constant + version bump, never a historical-row rewrite.
 
 export const SAUDI_VAT_RATE = 0.15; // KSA standard rate
-export const TAX_RULE_VERSION = 'sa-vat-v1';
+export const TAX_RULE_VERSION = 'sa-vat-agent-v1';
 
 export type TaxTreatment =
-  // Qift as principal: 15% VAT on (subtotal + platform fee).
+  // Qift as principal (legacy): 15% VAT on (subtotal + platform fee).
+  // Retained so any historical invoice frozen under it stays readable;
+  // no new invoice is issued under this treatment.
   | 'full_value_standard'
-  // Qift as agent: 15% VAT on the Qift platform fee only.
+  // Qift as agent (current default): 15% VAT on the Qift platform fee
+  // only; the goods subtotal is facilitated pass-through, not Qift VAT.
   | 'agent_fee_only';
 
-// v1 DEFAULTS — provisional, see header.
-export const DEFAULT_TAX_TREATMENT: TaxTreatment = 'full_value_standard';
+// DEFAULTS — Qift is an agent; VAT on the platform fee only.
+export const DEFAULT_TAX_TREATMENT: TaxTreatment = 'agent_fee_only';
 export const DEFAULT_PRICES_INCLUDE_VAT = false; // VAT added on top
 
 export type TaxInput = {
-  subtotalAmount: number; // gift value (unit * recipientCount)
-  platformFeeAmount: number; // Qift platform fee
+  subtotalAmount: number; // gift value (unit * recipientCount) — merchant's
+  platformFeeAmount: number; // Qift platform fee — Qift's revenue
   treatment?: TaxTreatment;
   pricesIncludeVat?: boolean;
   vatRate?: number; // defaults to the server-side SAUDI_VAT_RATE
@@ -41,26 +50,34 @@ export type TaxSnapshot = {
   vatRate: number;
   taxTreatment: TaxTreatment;
   pricesIncludeVat: boolean;
-  taxableBase: number; // net base the VAT was computed on
+  taxableBase: number; // net base the VAT was computed on (Qift fee, agent)
   vatAmount: number;
+  // Goods value the merchant sells and Qift merely facilitates. EXCLUDED
+  // from Qift's VAT base and Qift invoice total under the agent model
+  // (0 under the legacy principal treatment). Frozen so the split is
+  // auditable on the historical invoice.
+  facilitatedValue: number;
   notes: string;
 };
 
 export type TaxBreakdown = {
   taxTreatment: TaxTreatment;
   pricesIncludeVat: boolean;
-  taxableAmount: number; // net base VAT applies to
+  taxableAmount: number; // net base VAT applies to (Qift fee under agent)
   vatRate: number;
-  vatAmount: number;
-  totalBeforeVat: number; // net total (subtotal + fee, ex-VAT)
-  totalAmount: number; // gross total the company owes (VAT-inclusive)
+  vatAmount: number; // VAT on the Qift fee only (agent)
+  totalBeforeVat: number; // Qift charge, ex-VAT (the fee under agent)
+  totalAmount: number; // Qift invoice total = fee + VAT on fee (agent)
+  // Merchant goods value Qift facilitates but does not sell or invoice.
+  facilitatedValue: number;
   taxSnapshot: TaxSnapshot;
 };
 
 const PROVISIONAL_NOTE =
-  'PROVISIONAL Saudi VAT v1. Principal-vs-agent classification and VAT ' +
-  'base are NOT yet confirmed by a tax advisor; no VAT is remitted to ' +
-  'ZATCA yet. Frozen on the invoice for historical correctness.';
+  'Saudi VAT (agent model). Qift is an AGENT, not the seller: VAT applies ' +
+  "to the Qift platform fee only; the goods value is the merchant's and " +
+  'is excluded as facilitated pass-through. No VAT is remitted to ZATCA ' +
+  'yet. Frozen on the invoice for historical correctness.';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -71,11 +88,19 @@ export function computeTax(input: TaxInput): TaxBreakdown {
   const pricesIncludeVat = input.pricesIncludeVat ?? DEFAULT_PRICES_INCLUDE_VAT;
   const vatRate = input.vatRate ?? SAUDI_VAT_RATE;
 
-  // The base the VAT applies to, per the (provisional) treatment.
-  const grossBase =
-    taxTreatment === 'agent_fee_only'
-      ? input.platformFeeAmount
-      : input.subtotalAmount + input.platformFeeAmount;
+  const isAgent = taxTreatment === 'agent_fee_only';
+
+  // What Qift actually charges the company under this treatment. Under
+  // the agent model that is the platform fee ONLY — the goods subtotal
+  // is the merchant's and never enters the Qift charge or its VAT.
+  const qiftChargeBase = isAgent
+    ? input.platformFeeAmount
+    : input.subtotalAmount + input.platformFeeAmount;
+
+  // Goods value Qift facilitates but does not sell (agent) — excluded
+  // from Qift's VAT base and invoice total. Zero under the legacy
+  // principal treatment, where Qift billed the full value itself.
+  const facilitatedValue = isAgent ? round2(input.subtotalAmount) : 0;
 
   let taxableAmount: number;
   let vatAmount: number;
@@ -83,16 +108,16 @@ export function computeTax(input: TaxInput): TaxBreakdown {
   let totalAmount: number;
 
   if (pricesIncludeVat) {
-    // Amounts already include VAT — extract the tax portion from the base.
-    taxableAmount = round2(grossBase / (1 + vatRate));
-    vatAmount = round2(grossBase - taxableAmount);
-    totalAmount = round2(input.subtotalAmount + input.platformFeeAmount);
+    // The Qift charge already includes VAT — extract the tax portion.
+    taxableAmount = round2(qiftChargeBase / (1 + vatRate));
+    vatAmount = round2(qiftChargeBase - taxableAmount);
+    totalAmount = round2(qiftChargeBase);
     totalBeforeVat = round2(totalAmount - vatAmount);
   } else {
-    // VAT added on top of the base.
-    taxableAmount = round2(grossBase);
+    // VAT added on top of the Qift charge.
+    taxableAmount = round2(qiftChargeBase);
     vatAmount = round2(taxableAmount * vatRate);
-    totalBeforeVat = round2(input.subtotalAmount + input.platformFeeAmount);
+    totalBeforeVat = round2(qiftChargeBase);
     totalAmount = round2(totalBeforeVat + vatAmount);
   }
 
@@ -104,6 +129,7 @@ export function computeTax(input: TaxInput): TaxBreakdown {
     vatAmount,
     totalBeforeVat,
     totalAmount,
+    facilitatedValue,
     taxSnapshot: {
       ruleVersion: TAX_RULE_VERSION,
       vatRate,
@@ -111,6 +137,7 @@ export function computeTax(input: TaxInput): TaxBreakdown {
       pricesIncludeVat,
       taxableBase: taxableAmount,
       vatAmount,
+      facilitatedValue,
       notes: PROVISIONAL_NOTE,
     },
   };

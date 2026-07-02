@@ -1,10 +1,22 @@
-// Pure invoice amount math for a corporate campaign. Side-effect free so
-// it is unit-testable in isolation.
+// Pure invoice amount decomposition for a corporate campaign. Side-effect
+// free so it is unit-testable in isolation.
 //
-// The invoice bills the company for a campaign of N identical gifts:
-//   subtotal    = unitAmount * recipientCount        (gift value)
-//   platformFee = serviceFeeFor(unitAmount) * count  (Qift revenue)
-//   total       = subtotal + platformFee             (company owes Qift)
+// Qift is an AGENT, not the seller (canonical). This helper decomposes a
+// campaign of N identical gifts into its two commercial legs:
+//   subtotal    = unitAmount * recipientCount        (goods value — the
+//                                                     MERCHANT's revenue;
+//                                                     Qift only facilitates)
+//   platformFee = serviceFeeFor(unitAmount) * count  (Qift service revenue)
+//   total       = subtotal + platformFee             (combined campaign
+//                                                     value across BOTH
+//                                                     legs, ex-VAT)
+//
+// NOTE: `total` here is the combined campaign value, NOT the Qift invoice
+// total. The Qift service invoice bills the platform fee + VAT on the fee
+// only (see computeTax, agent_fee_only); the goods subtotal is billed by
+// the merchant on the separate merchant (goods) invoice. This helper feeds
+// computeTax and the future Campaign Billing Summary, which recombine the
+// legs for display.
 //
 // The per-unit platform fee reuses the FeeEngine's serviceFeeFor so the
 // corporate and consumer paths charge the same Qift rate from one source
