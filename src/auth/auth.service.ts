@@ -177,16 +177,22 @@ export class AuthService {
     // where the same string (very unlikely for phone vs email) ever
     // appeared as both — we want to honour ONLY the channel the
     // caller proved.
-    const otp = await this.prisma.otp.findFirst({
-      where: { target: otpTarget, type: channel },
-      orderBy: { createdAt: 'desc' },
+    // Track A4 (PE-05): verification goes through OtpService.verify so
+    // the register/OTP-login path gets the SAME brute-force protection
+    // as every other verify (per-row F1 lockout + the resend-safe
+    // target-window cap). Previously this block re-implemented the
+    // lookup inline and silently bypassed the lockout. consume:false
+    // preserves the historic UX: the single-use row is only burned
+    // after register/login fully succeeds, so a username conflict (or
+    // beta-gate rejection) never forces a re-request. Error codes are
+    // unchanged (invalid_code / expired_code); otp_locked now correctly
+    // applies here too.
+    const { otpId } = await this.otp.verify({
+      target: otpTarget,
+      code,
+      type: channel,
+      consume: false,
     });
-    if (!otp || otp.code !== code) {
-      throw new BadRequestException('invalid_code');
-    }
-    if (otp.expiresAt.getTime() < Date.now()) {
-      throw new BadRequestException('expired_code');
-    }
 
     // --- 3. Branch on existing-user lookup -----------------------------
     // Look up by the channel that was proven — the user typed an OTP
@@ -206,7 +212,7 @@ export class AuthService {
       // Login path. Body fields other than the channel+code are
       // intentionally ignored — the client cannot use this endpoint
       // to overwrite an existing account's fullName/email/password.
-      await this.prisma.otp.delete({ where: { id: otp.id } }).catch(() => {});
+      await this.prisma.otp.delete({ where: { id: otpId } }).catch(() => {});
       const accessToken = await this.signToken(
         existing.id,
         existing.qiftUsername,
@@ -338,7 +344,7 @@ export class AuthService {
 
     // Consume the OTP only after the user row is committed, so a username
     // collision (which throws above) doesn't burn the code.
-    await this.prisma.otp.delete({ where: { id: otp.id } }).catch(() => {});
+    await this.prisma.otp.delete({ where: { id: otpId } }).catch(() => {});
 
     const accessToken = await this.signToken(user.id, user.qiftUsername);
     return {
@@ -405,10 +411,7 @@ export class AuthService {
     // The repair is silent — no observable change to the login
     // response shape — and idempotent (subsequent logins are no-ops
     // because the stored value is already canonical).
-    const repaired = await this.repairUserPhoneIfNeeded(
-      user.id,
-      user.phone,
-    );
+    const repaired = await this.repairUserPhoneIfNeeded(user.id, user.phone);
     const accessToken = await this.signToken(user.id, user.qiftUsername);
 
     return {

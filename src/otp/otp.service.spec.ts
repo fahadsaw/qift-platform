@@ -127,7 +127,7 @@ describe('OtpService — verify (F1: per-row attempt cap + lockout)', () => {
         code: '1234',
       });
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, otpId: expect.any(String) });
     });
 
     it('success path deletes the OTP row (single-use)', async () => {
@@ -376,7 +376,7 @@ describe('OtpService — verify (F1: per-row attempt cap + lockout)', () => {
 
       await expect(
         service.verify({ target: TARGET_PHONE, code: '654321' }),
-      ).resolves.toEqual({ ok: true });
+      ).resolves.toEqual({ ok: true, otpId: expect.any(String) });
     });
 
     it('aggregate _sum null (no rows in window) → treated as zero', async () => {
@@ -385,7 +385,7 @@ describe('OtpService — verify (F1: per-row attempt cap + lockout)', () => {
 
       await expect(
         service.verify({ target: TARGET_PHONE, code: '654321' }),
-      ).resolves.toEqual({ ok: true });
+      ).resolves.toEqual({ ok: true, otpId: expect.any(String) });
     });
 
     it('window is scoped to the target and a recent createdAt cutoff', async () => {

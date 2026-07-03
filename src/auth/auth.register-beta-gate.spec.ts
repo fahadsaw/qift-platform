@@ -15,7 +15,7 @@
 // observe.
 
 import { Test, type TestingModule } from '@nestjs/testing';
-import { HttpException, HttpStatus } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
@@ -38,6 +38,7 @@ describe('AuthService.register — Closed Beta Gate orchestration', () => {
     applyRedemption: jest.Mock;
   };
   let jwt: { signAsync: jest.Mock };
+  let otpVerify: jest.Mock;
 
   const validOtp = {
     id: 'otp-1',
@@ -63,6 +64,7 @@ describe('AuthService.register — Closed Beta Gate orchestration', () => {
       applyRedemption: jest.fn().mockResolvedValue(undefined),
     };
     jwt = { signAsync: jest.fn().mockResolvedValue('signed-jwt') };
+    otpVerify = jest.fn().mockResolvedValue({ ok: true, otpId: 'otp-1' });
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -70,7 +72,12 @@ describe('AuthService.register — Closed Beta Gate orchestration', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: jwt },
         { provide: MailService, useValue: {} },
-        { provide: OtpService, useValue: { send: jest.fn(), verify: jest.fn() } },
+        {
+          provide: OtpService,
+          // Track A4 — register now verifies through OtpService (lockout
+          // path); consume:false returns the row id for later deletion.
+          useValue: { send: jest.fn(), verify: otpVerify },
+        },
         { provide: BetaAccessService, useValue: beta },
       ],
     }).compile();
@@ -78,6 +85,46 @@ describe('AuthService.register — Closed Beta Gate orchestration', () => {
   });
 
   afterEach(() => jest.clearAllMocks());
+
+  it('Track A4: OTP lockout now binds register — otp_locked propagates, nothing created', async () => {
+    otpVerify.mockRejectedValueOnce(new BadRequestException('otp_locked'));
+    await expect(
+      service.register({
+        phone: '0509999999',
+        code: '123456',
+        qiftUsername: 'newbie',
+        password: 'password123',
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ message: 'otp_locked' }),
+    });
+    expect(txUserCreate).not.toHaveBeenCalled();
+    expect(prisma.otp.delete).not.toHaveBeenCalled();
+  });
+
+  it('Track A4: register verifies through OtpService with consume:false + the proven channel, then burns the row itself', async () => {
+    prisma.user.findFirst.mockResolvedValue(null);
+    beta.decideRegistration.mockResolvedValue({ mode: 'open' });
+    txUserCreate.mockResolvedValue({
+      id: 'u-new',
+      qiftUsername: 'newbie',
+      passwordHash: 'h',
+    });
+    await service.register({
+      phone: '0509999999',
+      code: '123456',
+      qiftUsername: 'newbie',
+      password: 'password123',
+    });
+    expect(otpVerify).toHaveBeenCalledWith(
+      expect.objectContaining({ consume: false, type: 'phone' }),
+    );
+    // The single-use row is burned by register AFTER success, by the
+    // id verify returned — not by verify itself.
+    expect(prisma.otp.delete).toHaveBeenCalledWith({
+      where: { id: 'otp-1' },
+    });
+  });
 
   it('existing-user login does NOT consult the gate', async () => {
     prisma.user.findFirst.mockResolvedValueOnce({
@@ -106,7 +153,11 @@ describe('AuthService.register — Closed Beta Gate orchestration', () => {
     prisma.user.findFirst.mockResolvedValue(null);
     beta.decideRegistration.mockRejectedValue(
       new HttpException(
-        { statusCode: HttpStatus.FORBIDDEN, code: 'beta_required', message: 'x' },
+        {
+          statusCode: HttpStatus.FORBIDDEN,
+          code: 'beta_required',
+          message: 'x',
+        },
         HttpStatus.FORBIDDEN,
       ),
     );
