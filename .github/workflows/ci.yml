@@ -57,17 +57,18 @@ jobs:
         run: pnpm test
 
   rbac-e2e:
-    name: RBAC matrix e2e (observed-first — not yet a required gate)
+    name: RBAC matrix e2e
     runs-on: ubuntu-latest
-    # TODO(ci): once this job has produced ONE confirmed green run,
-    # remove `continue-on-error` and add "RBAC matrix e2e" to the branch
-    # protection required-checks list. It ships observed-first because it
-    # could not be validated on the authoring machine before first push
-    # (no Docker available locally, and the local DATABASE_URL points at
-    # PRODUCTION — which must never be migrated or seeded). The job below
-    # is production-safe regardless: it only ever talks to the ephemeral
-    # Postgres service and the suite is read-only.
-    continue-on-error: true
+    # Failure-blocking since the first confirmed green run (PR #54, run
+    # 28627715738: 252/252). Two setup bugs had kept it observed-first —
+    # the A12 soft-deleted login expectation (fixed in PR #51) and the
+    # 200-vs-201 login status pin (fixed in PR #54); neither was a
+    # product defect. To make it branch-protection REQUIRED, add
+    # "RBAC matrix e2e" to the required-checks list in the GitHub repo
+    # settings — that list lives outside this file. The job is
+    # production-safe: it only ever talks to the ephemeral Postgres
+    # service below, and the suite touches nothing beyond the rbac-test-*
+    # fixtures.
     services:
       postgres:
         image: postgres:16
