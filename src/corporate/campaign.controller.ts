@@ -19,6 +19,7 @@ import { DispatchService } from './dispatch.service';
 import { ReportService } from './report.service';
 import { InvoiceService } from './invoice.service';
 import { MerchantInvoiceService } from './merchant-invoice.service';
+import { BillingSummaryService } from './billing-summary.service';
 
 type AuthedRequest = {
   user: { userId: string; qiftUsername: string };
@@ -47,6 +48,7 @@ export class CampaignController {
     private readonly reports: ReportService,
     private readonly invoices: InvoiceService,
     private readonly merchantInvoices: MerchantInvoiceService,
+    private readonly billingSummary: BillingSummaryService,
   ) {}
 
   @Post()
@@ -95,6 +97,23 @@ export class CampaignController {
     @Req() req: AuthedRequest,
   ) {
     return this.merchantInvoices.getMerchantInvoiceForCampaign(
+      req.orgContext!.orgId,
+      campaignId,
+    );
+  }
+
+  // The combined Campaign Billing Summary (agent model): merchant goods
+  // invoice + Qift service invoice + the grand total the company pays
+  // across both. Computed read-model — nothing persisted. Amounts +
+  // statuses only; no employee identity, address, or claim data.
+  // admin+approver, matching the two invoice routes above.
+  @Get(':campaignId/billing-summary')
+  @RequireOrgRole('admin', 'approver')
+  billingSummaryForCampaign(
+    @Param('campaignId') campaignId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.billingSummary.getCampaignBillingSummary(
       req.orgContext!.orgId,
       campaignId,
     );
