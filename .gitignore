@@ -64,3 +64,14 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # Production connection string quarantine (Track A3) — never committed,
 # never auto-loaded; exists only for rare explicit read-only checks.
 .env.prod.DANGER
+
+# Local databases (Track A7) — two April-era SQLite dev.db files were
+# committed by accident before the Postgres move; the DB belongs in
+# Postgres (docker-compose/brew), never in git.
+*.db
+*.db-journal
+
+# Stray editor artifacts (a nano buffer named .envnano was committed
+# once; it held source code, not secrets — verified by gitleaks over
+# the full history, Track A7).
+.envnano
