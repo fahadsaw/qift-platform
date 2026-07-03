@@ -42,6 +42,10 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
+import {
+  FINANCIAL_EVENTS,
+  ledgerIdempotencyKey,
+} from '../financial/financial-events';
 import { computeMerchantGoodsTax } from '../fees/tax-engine';
 import { moneyToNumber } from '../fees/money';
 import { computeInvoiceAmounts } from './invoice-amounts';
@@ -285,8 +289,14 @@ export class MerchantInvoiceService {
   ) {
     try {
       await this.ledger.record({
-        eventType: 'merchant.invoice.issued',
+        eventType: FINANCIAL_EVENTS.MERCHANT_INVOICE_ISSUED,
         reasonCode: 'MERCHANT_GOODS_INVOICED',
+        // FIN-4 — deterministic: a retry or repair of this invoice's
+        // goods posting collides with the original row, never duplicates.
+        idempotencyKey: ledgerIdempotencyKey(
+          FINANCIAL_EVENTS.MERCHANT_INVOICE_ISSUED,
+          invoice.id,
+        ),
         actorType: actorUserId ? 'user' : 'system',
         actorId: actorUserId,
         amount: moneyToNumber(invoice.totalAmount),

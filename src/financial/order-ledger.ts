@@ -22,6 +22,7 @@
 
 import { FEE_POLICY_VERSION } from '../fees/fee-engine';
 import type { RecordLedgerInput } from './financial-ledger.service';
+import { FINANCIAL_EVENTS, ledgerIdempotencyKey } from './financial-events';
 
 // Reason codes for order-lifecycle postings. One per (order, reasonCode)
 // — enforced by the @@unique([orderId, reasonCode]) idempotency key.
@@ -66,8 +67,9 @@ export function buildOrderLedgerEntries(
   // Cash captured from the sender.
   entries.push({
     ...base,
-    eventType: 'order.paid',
+    eventType: FINANCIAL_EVENTS.ORDER_PAID,
     reasonCode: LEDGER_REASON.ORDER_PAID,
+    idempotencyKey: ledgerIdempotencyKey(FINANCIAL_EVENTS.ORDER_PAID, order.id),
     actorType: 'user',
     actorId: order.userId,
     amount: order.totalAmount,
@@ -79,8 +81,12 @@ export function buildOrderLedgerEntries(
   if (order.serviceFee > 0) {
     entries.push({
       ...base,
-      eventType: 'qift.service_fee.accrued',
+      eventType: FINANCIAL_EVENTS.QIFT_SERVICE_FEE_ACCRUED,
       reasonCode: LEDGER_REASON.QIFT_SERVICE_FEE,
+      idempotencyKey: ledgerIdempotencyKey(
+        FINANCIAL_EVENTS.QIFT_SERVICE_FEE_ACCRUED,
+        order.id,
+      ),
       actorType: 'system',
       amount: order.serviceFee,
       direction: 'credit',
@@ -93,8 +99,12 @@ export function buildOrderLedgerEntries(
   if (order.storeId && order.productPrice > 0) {
     entries.push({
       ...base,
-      eventType: 'merchant.payable.accrued',
+      eventType: FINANCIAL_EVENTS.MERCHANT_PAYABLE_ACCRUED,
       reasonCode: LEDGER_REASON.MERCHANT_PAYABLE,
+      idempotencyKey: ledgerIdempotencyKey(
+        FINANCIAL_EVENTS.MERCHANT_PAYABLE_ACCRUED,
+        order.id,
+      ),
       actorType: 'system',
       amount: order.productPrice,
       direction: 'debit',
@@ -106,8 +116,12 @@ export function buildOrderLedgerEntries(
   if (order.deliveryFee > 0) {
     entries.push({
       ...base,
-      eventType: 'delivery.fee.accrued',
+      eventType: FINANCIAL_EVENTS.DELIVERY_FEE_ACCRUED,
       reasonCode: LEDGER_REASON.DELIVERY_FEE,
+      idempotencyKey: ledgerIdempotencyKey(
+        FINANCIAL_EVENTS.DELIVERY_FEE_ACCRUED,
+        order.id,
+      ),
       actorType: 'system',
       amount: order.deliveryFee,
       direction: 'debit',
