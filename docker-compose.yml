@@ -1,0 +1,22 @@
+# Local development database (Track A3 / PE-02).
+#
+# The production DATABASE_URL must NEVER live in a laptop's auto-loaded
+# .env — local dev runs against a local Postgres. Two supported setups:
+#   * Docker:   docker compose up -d   (this file; Postgres 18 = prod major)
+#   * Homebrew: brew install postgresql@18 && brew services start postgresql@18
+#               createdb qift_dev
+# Then: DATABASE_URL=postgresql://<user>@localhost:5432/qift_dev in .env
+# and `pnpm exec prisma migrate deploy` + optional seed.
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: qift
+      POSTGRES_PASSWORD: qift
+      POSTGRES_DB: qift_dev
+    ports:
+      - '5432:5432'
+    volumes:
+      - qift_pg_data:/var/lib/postgresql/data
+volumes:
+  qift_pg_data:
