@@ -44,6 +44,10 @@ import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
 import { computeMerchantGoodsTax } from '../fees/tax-engine';
 import { computeInvoiceAmounts } from './invoice-amounts';
+import {
+  buildMerchantSellerSnapshot,
+  buildOrgBuyerSnapshot,
+} from './party-snapshot';
 
 // The subset of the approval snapshot we read. Only non-PII fields.
 type ApprovalSnapshot = {
@@ -131,7 +135,17 @@ export class MerchantInvoiceService {
     // not registered → no VAT charged by accident.
     const store = await this.prisma.store.findUnique({
       where: { id: storeId },
-      select: { vatRegistered: true, vatNumber: true, pricesIncludeVat: true },
+      select: {
+        vatRegistered: true,
+        vatNumber: true,
+        pricesIncludeVat: true,
+        // FIN-2 — the merchant's legal identity, frozen into the
+        // seller snapshot below.
+        name: true,
+        legalEntityName: true,
+        commercialRegistrationNumber: true,
+        taxCountry: true,
+      },
     });
     const vatRegistered = store?.vatRegistered ?? false;
     const vatNumber = store?.vatNumber ?? null;
@@ -158,6 +172,17 @@ export class MerchantInvoiceService {
       vatNumber,
       pricesIncludeVat,
     });
+
+    // FIN-2 — freeze buyer + seller legal identity at issuance. The
+    // MERCHANT is the seller of record on this invoice; the company is
+    // the buyer. FK-free table → the row carries its parties itself;
+    // old invoices never re-read live Organization/Store rows.
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { legalName: true, crNumber: true, vatNumber: true },
+    });
+    const buyerSnapshot = buildOrgBuyerSnapshot(orgId, org);
+    const sellerSnapshot = buildMerchantSellerSnapshot(storeId, store);
     const now = new Date();
 
     try {
@@ -178,6 +203,10 @@ export class MerchantInvoiceService {
           pricesIncludeVat: goodsTax.pricesIncludeVat,
           taxTreatment: goodsTax.taxTreatment,
           taxSnapshot: goodsTax.taxSnapshot,
+          // FIN-2 — frozen party identity (buyer = company, seller =
+          // the merchant, legal seller of the goods).
+          buyerSnapshot,
+          sellerSnapshot,
           // Goods total the company owes the MERCHANT (VAT-inclusive).
           totalAmount: goodsTax.totalAmount,
           issuedAt: now,

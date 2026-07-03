@@ -40,6 +40,10 @@ import { FinancialLedgerService } from '../financial/financial-ledger.service';
 import { FEE_POLICY_VERSION } from '../fees/fee-engine';
 import { computeTax } from '../fees/tax-engine';
 import { computeInvoiceAmounts } from './invoice-amounts';
+import {
+  buildOrgBuyerSnapshot,
+  buildQiftSellerSnapshot,
+} from './party-snapshot';
 
 // The subset of the approval snapshot we read. Only non-PII fields.
 type ApprovalSnapshot = {
@@ -109,6 +113,27 @@ export class InvoiceService {
       subtotalAmount: amounts.subtotalAmount,
       platformFeeAmount: amounts.platformFeeAmount,
     });
+
+    // FIN-2 — freeze buyer + seller legal identity at issuance. The
+    // invoice table is FK-free (purge-survivable), so the row must
+    // carry its parties itself; old invoices are never re-hydrated
+    // from live Organization rows. Seller = QIFT (env-configured legal
+    // identity; recorded honestly as configured=false until legal
+    // onboarding sets QIFT_LEGAL_NAME / QIFT_CR_NUMBER /
+    // QIFT_VAT_NUMBER).
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { legalName: true, crNumber: true, vatNumber: true },
+    });
+    const buyerSnapshot = buildOrgBuyerSnapshot(orgId, org);
+    const sellerSnapshot = buildQiftSellerSnapshot();
+    if (!sellerSnapshot.configured) {
+      this.logger.warn(
+        `[party-snapshot] Qift legal identity is not configured ` +
+          `(QIFT_LEGAL_NAME unset) — invoice for campaign=${campaignId} ` +
+          `freezes sellerSnapshot.configured=false.`,
+      );
+    }
     const now = new Date();
 
     try {
@@ -130,6 +155,9 @@ export class InvoiceService {
           pricesIncludeVat: tax.pricesIncludeVat,
           taxTreatment: tax.taxTreatment,
           taxSnapshot: tax.taxSnapshot,
+          // FIN-2 — frozen party identity (buyer = company, seller = Qift).
+          buyerSnapshot,
+          sellerSnapshot,
           // Qift service-invoice total the company owes Qift (agent model):
           // platform fee + VAT on the fee. The goods subtotal is NOT here.
           totalAmount: tax.totalAmount,
