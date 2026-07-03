@@ -32,6 +32,8 @@
 //                      treatment) and per-merchant pricesIncludeVat;
 //                      snapshot carries the registration facts.
 
+import { roundMoney } from './money';
+
 export const SAUDI_VAT_RATE = 0.15; // KSA standard rate
 export const TAX_RULE_VERSION = 'sa-vat-agent-v2';
 
@@ -90,8 +92,10 @@ const PROVISIONAL_NOTE =
   'is excluded as facilitated pass-through. No VAT is remitted to ZATCA ' +
   'yet. Frozen on the invoice for historical correctness.';
 
+// FIN-3: rounding is delegated to the Shared Financial Core's Money
+// policy (integer minor units) so there is exactly one rounding rule.
 function round2(n: number): number {
-  return Math.round(n * 100) / 100;
+  return roundMoney(n);
 }
 
 export function computeTax(input: TaxInput): TaxBreakdown {

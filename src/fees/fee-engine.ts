@@ -17,6 +17,8 @@
 // Bump FEE_POLICY_VERSION whenever any constant below changes, so a
 // future ledger/invoice can record which policy produced a given charge.
 
+import { addMoney } from './money';
+
 export const QIFT_SERVICE_FEE_RATE = 0.03; // 3% of the item subtotal
 export const QIFT_MIN_SERVICE_FEE = 5; // SAR floor on the service fee
 export const FAST_DELIVERY_FEE = 15; // SAR, flat, for the fast option
@@ -80,7 +82,8 @@ export function computeFees(input: FeeInput): FeeBreakdown {
   const itemSubtotal = input.itemSubtotal;
   const deliveryFee = deliveryFeeFor(input.deliverySpeed);
   const serviceFee = serviceFeeFor(itemSubtotal);
-  const grandTotal = itemSubtotal + deliveryFee + serviceFee;
+  // FIN-3: exact minor-unit sum — no binary-float drift in the total.
+  const grandTotal = addMoney([itemSubtotal, deliveryFee, serviceFee]);
   return {
     itemSubtotal,
     deliveryFee,

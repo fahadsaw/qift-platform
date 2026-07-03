@@ -39,6 +39,7 @@ import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
 import { FEE_POLICY_VERSION } from '../fees/fee-engine';
 import { computeTax } from '../fees/tax-engine';
+import { moneyToNumber } from '../fees/money';
 import { computeInvoiceAmounts } from './invoice-amounts';
 import {
   buildOrgBuyerSnapshot,
@@ -188,7 +189,7 @@ export class InvoiceService {
         metadata: {
           campaignId,
           invoiceId: invoice.id,
-          totalAmount: invoice.totalAmount,
+          totalAmount: moneyToNumber(invoice.totalAmount),
         },
       });
 
@@ -227,7 +228,9 @@ export class InvoiceService {
       id: string;
       orgId: string;
       campaignId: string;
-      totalAmount: number;
+      // Prisma Decimal on real reads (NUMERIC column), plain number in
+      // unit tests — moneyToNumber handles both.
+      totalAmount: number | { toNumber(): number };
       currency: string;
       recipientCount: number;
     },
@@ -239,7 +242,7 @@ export class InvoiceService {
         reasonCode: 'CORPORATE_RECEIVABLE',
         actorType: actorUserId ? 'user' : 'system',
         actorId: actorUserId,
-        amount: invoice.totalAmount,
+        amount: moneyToNumber(invoice.totalAmount),
         currency: invoice.currency,
         direction: 'credit',
         counterpartyType: 'company',

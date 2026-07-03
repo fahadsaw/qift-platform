@@ -43,6 +43,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
 import { computeMerchantGoodsTax } from '../fees/tax-engine';
+import { moneyToNumber } from '../fees/money';
 import { computeInvoiceAmounts } from './invoice-amounts';
 import {
   buildMerchantSellerSnapshot,
@@ -233,7 +234,7 @@ export class MerchantInvoiceService {
           campaignId,
           invoiceId: invoice.id,
           storeId: invoice.storeId,
-          totalAmount: invoice.totalAmount,
+          totalAmount: moneyToNumber(invoice.totalAmount),
         },
       });
 
@@ -274,7 +275,9 @@ export class MerchantInvoiceService {
       storeId: string;
       orgId: string;
       campaignId: string;
-      totalAmount: number;
+      // Prisma Decimal on real reads (NUMERIC column), plain number in
+      // unit tests — moneyToNumber handles both.
+      totalAmount: number | { toNumber(): number };
       currency: string;
       recipientCount: number;
     },
@@ -286,7 +289,7 @@ export class MerchantInvoiceService {
         reasonCode: 'MERCHANT_GOODS_INVOICED',
         actorType: actorUserId ? 'user' : 'system',
         actorId: actorUserId,
-        amount: invoice.totalAmount,
+        amount: moneyToNumber(invoice.totalAmount),
         currency: invoice.currency,
         direction: 'credit',
         counterpartyType: 'company',
