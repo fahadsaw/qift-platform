@@ -18,6 +18,7 @@ import { OrgService } from './org.service';
 import type { OrgReviewAction } from './org.service';
 import { ReportService } from './report.service';
 import { ClaimExportService } from './claim-export.service';
+import { FulfillmentExportService } from './fulfillment-export.service';
 import { CampaignService } from './campaign.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
@@ -38,6 +39,7 @@ export class OrgAdminController {
     private readonly orgs: OrgService,
     private readonly reports: ReportService,
     private readonly claimExport: ClaimExportService,
+    private readonly fulfillmentExport: FulfillmentExportService,
     private readonly campaigns: CampaignService,
   ) {}
 
@@ -88,6 +90,27 @@ export class OrgAdminController {
     @Req() req: AuthedRequest,
   ) {
     return this.claimExport.exportCampaignClaimLinks(
+      req.user.userId,
+      orgId,
+      campaignId,
+    );
+  }
+
+  // Fulfillment export (Track A5 / PE-06) — the audited delivery
+  // sheet. OPS PLANE ONLY: ClaimAddress stays invisible to the org
+  // plane (employer-blind invariant); this is the single sanctioned
+  // read path, replacing raw SQL against production. Claimed rows
+  // only; audit carries counts, never addresses. POST for parity
+  // with the claim-link export — PII payloads don't belong on
+  // cacheable GETs (though this one, unlike claim-links, mutates
+  // nothing and is safe to repeat).
+  @Post(':orgId/campaigns/:campaignId/fulfillment-export')
+  exportFulfillment(
+    @Param('orgId') orgId: string,
+    @Param('campaignId') campaignId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.fulfillmentExport.exportCampaignFulfillment(
       req.user.userId,
       orgId,
       campaignId,

@@ -20,6 +20,7 @@ import { ClaimMintService } from './claim-mint.service';
 import { ClaimService } from './claim.service';
 import { ClaimController } from './claim.controller';
 import { ClaimExportService } from './claim-export.service';
+import { FulfillmentExportService } from './fulfillment-export.service';
 import { ReportService } from './report.service';
 import { StoreBusinessService } from './store-business.service';
 import { StoreBusinessAdminController } from './store-business-admin.controller';
@@ -88,6 +89,7 @@ import { FinancialLedgerModule } from '../financial/financial-ledger.module';
     ClaimMintService,
     ClaimService,
     ClaimExportService,
+    FulfillmentExportService,
     ReportService,
     StoreBusinessService,
     InvoiceService,
