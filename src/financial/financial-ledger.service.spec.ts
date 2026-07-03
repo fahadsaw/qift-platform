@@ -10,10 +10,17 @@ import {
 
 function buildService() {
   const financialLedgerEntry = {
-    create: jest.fn().mockImplementation(({ data }: { data: unknown }) =>
-      Promise.resolve({ id: 'ledger-1', createdAt: new Date(0), ...(data as object) }),
-    ),
+    create: jest
+      .fn()
+      .mockImplementation(({ data }: { data: unknown }) =>
+        Promise.resolve({
+          id: 'ledger-1',
+          createdAt: new Date(0),
+          ...(data as object),
+        }),
+      ),
     findMany: jest.fn().mockResolvedValue([]),
+    findUnique: jest.fn().mockResolvedValue(null),
     count: jest.fn().mockResolvedValue(0),
     // Present on the mock ONLY so the test can prove the service never
     // calls them. The real code references neither.
@@ -27,7 +34,9 @@ function buildService() {
   return { service, financialLedgerEntry };
 }
 
-function validInput(overrides: Partial<RecordLedgerInput> = {}): RecordLedgerInput {
+function validInput(
+  overrides: Partial<RecordLedgerInput> = {},
+): RecordLedgerInput {
   return {
     eventType: 'order.captured',
     reasonCode: 'ORDER_CAPTURE',
@@ -177,12 +186,12 @@ describe('FinancialLedgerService', () => {
   describe('validation — amount / currency / direction', () => {
     it('rejects a non-positive or non-finite amount', async () => {
       const { service } = buildService();
-      await expect(service.record(validInput({ amount: 0 }))).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
-      await expect(service.record(validInput({ amount: -5 }))).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
+      await expect(
+        service.record(validInput({ amount: 0 })),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.record(validInput({ amount: -5 })),
+      ).rejects.toBeInstanceOf(BadRequestException);
       await expect(
         service.record(validInput({ amount: Number.NaN })),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -214,8 +223,78 @@ describe('FinancialLedgerService', () => {
 
     it('does not persist anything when validation fails', async () => {
       const { service, financialLedgerEntry } = buildService();
-      await expect(service.record(validInput({ amount: -1 }))).rejects.toThrow();
+      await expect(
+        service.record(validInput({ amount: -1 })),
+      ).rejects.toThrow();
       expect(financialLedgerEntry.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('idempotencyKey (FIN-4)', () => {
+    it('persists the deterministic key on the created row', async () => {
+      const { service, financialLedgerEntry } = buildService();
+      await service.record(
+        validInput({ idempotencyKey: 'order.paid:order-1' }),
+      );
+      const data = financialLedgerEntry.create.mock.calls[0][0].data as {
+        idempotencyKey: string | null;
+      };
+      expect(data.idempotencyKey).toBe('order.paid:order-1');
+    });
+
+    it('a duplicate key does NOT duplicate — returns the existing row', async () => {
+      const { service, financialLedgerEntry } = buildService();
+      financialLedgerEntry.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('dup', {
+          code: 'P2002',
+          clientVersion: 'x',
+        }),
+      );
+      const original = {
+        id: 'led-original',
+        idempotencyKey: 'order.paid:order-1',
+      };
+      financialLedgerEntry.findUnique.mockResolvedValueOnce(original);
+      const out = await service.record(
+        validInput({ idempotencyKey: 'order.paid:order-1' }),
+      );
+      expect(out).toBe(original); // the FIRST posting, untouched
+      expect(financialLedgerEntry.create).toHaveBeenCalledTimes(1);
+      expect(financialLedgerEntry.findUnique).toHaveBeenCalledWith({
+        where: { idempotencyKey: 'order.paid:order-1' },
+      });
+    });
+
+    it('a P2002 WITHOUT a key still propagates (legacy caller contract)', async () => {
+      const { service, financialLedgerEntry } = buildService();
+      financialLedgerEntry.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('dup', {
+          code: 'P2002',
+          clientVersion: 'x',
+        }),
+      );
+      await expect(service.record(validInput())).rejects.toMatchObject({
+        code: 'P2002',
+      });
+    });
+
+    it('a blank key is stored as null (never an empty-string unique)', async () => {
+      const { service, financialLedgerEntry } = buildService();
+      await service.record(validInput({ idempotencyKey: '  ' }));
+      const data = financialLedgerEntry.create.mock.calls[0][0].data as {
+        idempotencyKey: string | null;
+      };
+      expect(data.idempotencyKey).toBeNull();
+    });
+
+    it('findByIdempotencyKey reads the unique row', async () => {
+      const { service, financialLedgerEntry } = buildService();
+      financialLedgerEntry.findUnique.mockResolvedValueOnce({ id: 'led-1' });
+      const out = await service.findByIdempotencyKey('k');
+      expect(out).toEqual({ id: 'led-1' });
+      expect(financialLedgerEntry.findUnique).toHaveBeenCalledWith({
+        where: { idempotencyKey: 'k' },
+      });
     });
   });
 });

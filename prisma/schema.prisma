@@ -498,6 +498,26 @@ model Store {
   commercialRegistrationNumber String?
   vatNumber                    String?
 
+  // ── VAT facts (FIN-1, agent model) ────────────────────────────
+  // The merchant is the legal seller of the goods, so the goods VAT
+  // is governed by THESE facts, frozen into every MerchantInvoice at
+  // issuance. Set by ops during merchant onboarding.
+  //
+  // vatRegistered — charge VAT on the goods ONLY when true (KSA
+  // mandatory registration threshold: SAR 375k; an unregistered
+  // merchant must not charge VAT). Defaults FALSE so no merchant is
+  // ever VAT-charged by accident — ops flips it after verifying the
+  // registration (vatNumber above should be recorded when true).
+  vatRegistered Boolean @default(false)
+  // pricesIncludeVat — the merchant's catalog-price convention.
+  // true (default, KSA retail norm): the entered price is the final
+  // shelf price and VAT is EXTRACTED from it. false: VAT is added ON
+  // TOP of the entered price. Only meaningful when vatRegistered.
+  pricesIncludeVat Boolean @default(true)
+  // taxCountry — ISO-3166 alpha-2 tax jurisdiction for the goods
+  // VAT rule. Distinct from countryOfRegistration (a docs concern).
+  taxCountry String @default("SA")
+
   // ── Contact PoC ───────────────────────────────────────────────
   contactPerson String?
   contactPhone  String?
@@ -861,6 +881,12 @@ model Order {
   // the Gift gets created and inherits them.
   productId        String?
   storeId          String?
+  // FIN-3 REVIEWED, CONVERSION STAGED: these consumer-order money
+  // columns stay Float until the PSP phase (which rebuilds payment
+  // records and is pre-authorized to convert them to NUMERIC as its
+  // first task). They have live frontend consumers today; amounts are
+  // engine-rounded 2-dp values, and the authoritative financial
+  // records (ledger + invoices) are already exact NUMERIC.
   productPrice     Float
   serviceFee       Float
   deliveryFee      Float
@@ -1176,6 +1202,8 @@ model PayoutEvent {
   type       String
   // Signed amount in `currency` units (e.g. SAR). Positive for
   // funds owed to merchant; negative for deductions.
+  // FIN-3 REVIEWED, CONVERSION STAGED: superseded by real settlement
+  // (SETTLE-1/2), which will post exact NUMERIC ledger legs instead.
   amount     Float
   currency   String
   // Operator note — required for `adjustment` events, optional
@@ -1374,6 +1402,8 @@ model Payment {
   orderId           String   @unique
   provider          String
   providerPaymentId String?
+  // FIN-3 REVIEWED, CONVERSION STAGED: converts to NUMERIC with the
+  // PSP integration (see Order note).
   amount            Float
   currency          String
   status            String   @default("pending")
@@ -2047,10 +2077,11 @@ model AuditLog {
 // A financial trail must outlive the purge of the actor or entity it
 // references (regulatory retention — ZATCA financial records).
 //
-// MONEY TYPE: `amount` is Float to match the existing Order / Payment
-// money columns, so reconciliation needs no cross-type conversion. It
-// is a positive magnitude; `direction` carries the debit/credit sense
-// so the substrate is double-entry-ready.
+// MONEY TYPE (FIN-3): `amount` is exact NUMERIC(12,2) — the ledger is
+// the settlement/PSP-reconciliation substrate and must never carry
+// binary-float drift. It is a positive magnitude; `direction` carries
+// the debit/credit sense so the substrate is double-entry-ready. All
+// arithmetic routes through src/fees/money.ts (integer minor units).
 model FinancialLedgerEntry {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
@@ -2066,8 +2097,10 @@ model FinancialLedgerEntry {
   actorType String
   actorId   String?
 
-  // Money. Positive magnitude + explicit direction.
-  amount    Float
+  // Money. Positive magnitude + explicit direction. Exact NUMERIC —
+  // FIN-3; the API returns it as a plain number (DecimalToNumber
+  // interceptor).
+  amount    Decimal @db.Decimal(12, 2)
   currency  String
   direction String // 'credit' | 'debit'
 
@@ -2088,6 +2121,16 @@ model FinancialLedgerEntry {
   // before persisting.
   metadata Json?
 
+  // Idempotency key (FIN-4) — the EXPLICIT anchor: deterministic
+  // `${eventType}:${anchorId}` (see src/financial/financial-events.ts),
+  // unique when present. Retries, repairs, and backfills of the same
+  // posting collide here instead of duplicating. It also covers what
+  // the (orderId, reasonCode) constraint below cannot: campaign-scoped
+  // invoice postings (orderId = NULL) and, in future phases, repeated
+  // same-reason legs (partial refunds) whose keys anchor on refundId.
+  // Nullable so pre-FIN-4 rows and ad-hoc entries stay valid.
+  idempotencyKey String? @unique
+
   @@index([orderId])
   @@index([paymentId])
   @@index([campaignId])
@@ -2103,6 +2146,7 @@ model FinancialLedgerEntry {
   // Relies on PostgreSQL NULL-distinct semantics: non-order entries
   // (orderId = NULL) are never constrained, matching the Gift /
   // DispatchJob idempotency-key pattern already used in this schema.
+  // KEPT after FIN-4 as belt-and-braces beneath the explicit key above.
   @@unique([orderId, reasonCode])
 }
 
@@ -2137,14 +2181,17 @@ model CorporateInvoice {
   // allocation land in PR 5.
   status String @default("issued")
 
-  currency          String @default("SAR")
+  currency          String  @default("SAR")
   recipientCount    Int
-  unitAmount        Float // frozen gift price from the approval snapshot
+  // FIN-3: money columns are exact NUMERIC(12,2) (rates NUMERIC(5,4)) —
+  // this is a legal/tax record; binary-float drift is not acceptable.
+  // The API returns plain numbers (DecimalToNumber interceptor).
+  unitAmount        Decimal @db.Decimal(12, 2) // frozen gift price from the approval snapshot
   // AGENT MODEL: the goods value the MERCHANT sells and Qift merely
   // facilitates (pass-through) — recorded here, NOT Qift revenue, and
   // excluded from Qift's VAT base and totalAmount below.
-  subtotalAmount    Float // unitAmount * recipientCount (facilitated value)
-  platformFeeAmount Float // Qift fee (FeeEngine rate) * recipientCount
+  subtotalAmount    Decimal @db.Decimal(12, 2) // unitAmount * recipientCount (facilitated value)
+  platformFeeAmount Decimal @db.Decimal(12, 2) // Qift fee (FeeEngine rate) * recipientCount
 
   // ── Tax snapshot (Saudi VAT, agent model) ────────────────────────
   // Frozen at issuance so a later rate/rule change never alters a
@@ -2153,10 +2200,10 @@ model CorporateInvoice {
   // VAT applies to the Qift platform fee ONLY; the goods subtotal is the
   // merchant's and is excluded. Merchant goods VAT belongs on the
   // separate merchant (goods) invoice, not here.
-  taxableAmount    Float? // net base the VAT applies to (Qift fee, agent)
-  vatRate          Float? // e.g. 0.15
-  vatAmount        Float? // VAT on the Qift fee only (agent)
-  totalBeforeVat   Float? // Qift charge ex-VAT (the fee under agent)
+  taxableAmount    Decimal? @db.Decimal(12, 2) // net base the VAT applies to (Qift fee, agent)
+  vatRate          Decimal? @db.Decimal(5, 4) // e.g. 0.15
+  vatAmount        Decimal? @db.Decimal(12, 2) // VAT on the Qift fee only (agent)
+  totalBeforeVat   Decimal? @db.Decimal(12, 2) // Qift charge ex-VAT (the fee under agent)
   pricesIncludeVat Boolean? // false = VAT added on top (default)
   taxTreatment     String? // 'agent_fee_only' (default) | 'full_value_standard' (legacy)
   taxSnapshot      Json? // frozen rule: version, rate, treatment, base, facilitatedValue
@@ -2165,7 +2212,16 @@ model CorporateInvoice {
   // the platform fee + VAT on the fee (= totalBeforeVat + vatAmount). The
   // goods value is billed separately by the merchant. Legacy pre-tax
   // invoices keep their ex-VAT total.
-  totalAmount Float
+  totalAmount Decimal @db.Decimal(12, 2)
+
+  // ── Party snapshots (FIN-2) ───────────────────────────────────────
+  // The legal identity of buyer + seller, FROZEN at issuance. This
+  // table is FK-free by design (purge survivability), so the invoice
+  // must carry its parties itself — old invoices are never re-hydrated
+  // from live Organization rows. Nullable: pre-FIN-2 invoices stay
+  // untouched. Business identity only — never employee PII.
+  buyerSnapshot  Json? // { partyType:'organization', orgId, legalName, crNumber, vatNumber, country }
+  sellerSnapshot Json? // { partyType:'qift', legalName, crNumber, vatNumber, country, configured }
 
   // ── Accounting integration readiness (NO integration yet) ────────
   // Placeholders so a future export to a ZATCA e-invoicing provider /
@@ -2220,22 +2276,35 @@ model MerchantInvoice {
   // approval; downstream transitions land with settlement.
   status String @default("issued")
 
-  currency       String @default("SAR")
+  currency       String  @default("SAR")
   recipientCount Int
-  unitAmount     Float // frozen gift price from the approval snapshot
+  // FIN-3: exact NUMERIC money (see CorporateInvoice note).
+  unitAmount     Decimal @db.Decimal(12, 2) // frozen gift price from the approval snapshot
 
   // ── The merchant's goods sale ─────────────────────────────────────
   // goodsSubtotal = unitAmount * recipientCount. VAT here is the
-  // MERCHANT's output VAT on the goods (merchant's VAT registration),
-  // per the agent model — Qift's own VAT applies to its fee only, on
-  // the Qift service invoice.
-  goodsSubtotalAmount Float
-  vatRate             Float // e.g. 0.15
-  vatAmount           Float // merchant VAT on the goods
-  totalAmount         Float // goods total the company owes the merchant
+  // MERCHANT's output VAT on the goods, per the agent model — Qift's
+  // own VAT applies to its fee only, on the Qift service invoice.
+  // FIN-1: governed by the Store's VAT facts frozen at issuance —
+  // vatRegistered gates whether VAT is charged at all (0/0 when the
+  // merchant is not VAT-registered), pricesIncludeVat picks
+  // extract-from-price vs add-on-top.
+  goodsSubtotalAmount Decimal @db.Decimal(12, 2)
+  vatRate             Decimal @db.Decimal(5, 4) // 0.15 (registered) | 0 (not registered)
+  vatAmount           Decimal @db.Decimal(12, 2) // merchant VAT on the goods (0 if unregistered)
+  totalAmount         Decimal @db.Decimal(12, 2) // goods total the company owes the merchant
   pricesIncludeVat    Boolean @default(false)
-  taxTreatment        String // 'merchant_goods_standard'
-  taxSnapshot         Json? // frozen rule: version, rate, treatment, base
+  taxTreatment        String // 'merchant_goods_standard' | 'merchant_not_vat_registered'
+  taxSnapshot         Json? // frozen: version, rate, treatment, base, vatRegistered, vatNumber
+
+  // ── Party snapshots (FIN-2) ───────────────────────────────────────
+  // Buyer (the company) + seller (the MERCHANT — legal seller of the
+  // goods), FROZEN at issuance. FK-free table → the invoice carries its
+  // parties itself; old invoices never re-read live Organization/Store
+  // rows. Nullable: pre-FIN-2 invoices stay untouched. Business
+  // identity only — never employee PII.
+  buyerSnapshot  Json? // { partyType:'organization', orgId, legalName, crNumber, vatNumber, country }
+  sellerSnapshot Json? // { partyType:'merchant', storeId, legalName, displayName, crNumber, vatNumber, country }
 
   issuedAt    DateTime?
   cancelledAt DateTime?

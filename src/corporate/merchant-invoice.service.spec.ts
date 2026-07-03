@@ -23,6 +23,18 @@ function build(
     snapshot?: unknown;
     recipientCount?: number;
     productStoreId?: string | null;
+    // FIN-1/FIN-2 — the Store row's VAT facts + legal identity
+    // (null = store row missing).
+    storeVat?: {
+      vatRegistered: boolean;
+      vatNumber: string | null;
+      pricesIncludeVat: boolean;
+      name?: string | null;
+      legalEntityName?: string | null;
+      commercialRegistrationNumber?: string | null;
+      taxCountry?: string | null;
+    } | null;
+    org?: unknown; // FIN-2 — Organization row (null = missing)
   } = {},
 ) {
   const merchantInvoice = {
@@ -62,12 +74,43 @@ function build(
           : { storeId: opts.productStoreId ?? STORE },
       ),
   };
+  const store = {
+    findUnique: jest.fn().mockResolvedValue(
+      'storeVat' in opts
+        ? opts.storeVat
+        : // default: VAT-registered merchant, ex-VAT catalog prices —
+          // the configuration the pre-FIN-1 numeric fixtures assumed —
+          // plus the FIN-2 legal identity.
+          {
+            vatRegistered: true,
+            vatNumber: '310000000000003',
+            pricesIncludeVat: false,
+            name: 'Rosary',
+            legalEntityName: 'Rosary Flowers Est.',
+            commercialRegistrationNumber: '4030303030',
+            taxCountry: 'SA',
+          },
+    ),
+  };
+  const organization = {
+    findUnique: jest.fn().mockResolvedValue(
+      'org' in opts
+        ? opts.org
+        : {
+            legalName: 'Alwadi Trading Co LLC',
+            crNumber: '1010101010',
+            vatNumber: '300000000000003',
+          },
+    ),
+  };
   const prisma = {
     merchantInvoice,
     giftCampaign,
     campaignGiftOption,
     campaignRecipient,
     product,
+    store,
+    organization,
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'ledger-1' }) };
@@ -136,13 +179,152 @@ describe('MerchantInvoiceService.ensureMerchantInvoiceForCampaign', () => {
     await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     const d = createdData(prisma);
     expect(d.taxSnapshot).toMatchObject({
-      ruleVersion: 'sa-vat-agent-v1',
+      ruleVersion: 'sa-vat-agent-v2',
       vatRate: 0.15,
       taxTreatment: 'merchant_goods_standard',
+      // FIN-1 — the merchant's VAT facts are frozen with the rule.
+      vatRegistered: true,
+      vatNumber: '310000000000003',
       pricesIncludeVat: false,
       taxableBase: 5000,
       vatAmount: 750,
     });
+  });
+
+  it('NON-VAT-registered merchant: zero VAT, total equals goods subtotal', async () => {
+    const { service, prisma, ledger } = build({
+      storeVat: {
+        vatRegistered: false,
+        vatNumber: null,
+        pricesIncludeVat: true,
+      },
+    });
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d).toMatchObject({
+      goodsSubtotalAmount: 5000,
+      vatRate: 0,
+      vatAmount: 0,
+      totalAmount: 5000, // equals the goods subtotal — no VAT charged
+      taxTreatment: 'merchant_not_vat_registered',
+    });
+    const snap = d.taxSnapshot as Record<string, unknown>;
+    expect(snap.taxTreatment).toBe('merchant_not_vat_registered');
+    expect(snap.vatRegistered).toBe(false);
+    expect(String(snap.notes)).toMatch(/not.*vat-registered/i);
+    // The ledger pass-through entry follows the real (VAT-free) total.
+    expect(ledger.record.mock.calls[0][0]).toMatchObject({ amount: 5000 });
+  });
+
+  it('VAT-registered merchant with VAT-INCLUSIVE prices: extracts VAT, total is the shelf price', async () => {
+    const { service, prisma } = build({
+      storeVat: {
+        vatRegistered: true,
+        vatNumber: '310000000000003',
+        pricesIncludeVat: true,
+      },
+    });
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d).toMatchObject({
+      goodsSubtotalAmount: 5000,
+      vatRate: 0.15,
+      vatAmount: 652.17, // extracted from the 5000 displayed price
+      totalAmount: 5000, // the company pays what the shelf says
+      pricesIncludeVat: true,
+      taxTreatment: 'merchant_goods_standard',
+    });
+    expect((d.taxSnapshot as Record<string, unknown>).taxableBase).toBe(
+      4347.83,
+    );
+  });
+
+  it('missing Store row falls to the conservative posture: no VAT charged', async () => {
+    const { service, prisma } = build({ storeVat: null });
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d.vatAmount).toBe(0);
+    expect(d.totalAmount).toBe(5000);
+    expect(d.taxTreatment).toBe('merchant_not_vat_registered');
+  });
+
+  it('freezes buyer (company) + seller (MERCHANT) party snapshots at issuance', async () => {
+    const { service, prisma } = build();
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d.buyerSnapshot).toEqual({
+      partyType: 'organization',
+      orgId: ORG,
+      legalName: 'Alwadi Trading Co LLC',
+      crNumber: '1010101010',
+      vatNumber: '300000000000003',
+      country: 'SA',
+    });
+    // Seller on the GOODS invoice is the MERCHANT — the legal seller.
+    expect(d.sellerSnapshot).toEqual({
+      partyType: 'merchant',
+      storeId: STORE,
+      legalName: 'Rosary Flowers Est.',
+      displayName: 'Rosary',
+      crNumber: '4030303030',
+      vatNumber: '310000000000003',
+      country: 'SA',
+    });
+  });
+
+  it('later store changes never alter an already-issued invoice snapshot', async () => {
+    const { service, prisma } = build();
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const frozen = createdData(prisma).sellerSnapshot as Record<
+      string,
+      unknown
+    >;
+    // The merchant re-registers under a new legal name AFTER issuance…
+    prisma.store.findUnique.mockResolvedValue({
+      vatRegistered: true,
+      vatNumber: '388888888888883',
+      pricesIncludeVat: false,
+      name: 'Rosary',
+      legalEntityName: 'Rosary International LLC',
+      commercialRegistrationNumber: '4099999999',
+      taxCountry: 'SA',
+    });
+    // …the idempotent fast-path returns the EXISTING row; no second
+    // create, no re-snapshot.
+    prisma.merchantInvoice.findFirst.mockResolvedValue({
+      id: 'minv-1',
+      sellerSnapshot: frozen,
+    });
+    const again = await service.ensureMerchantInvoiceForCampaign(
+      ORG,
+      CAMPAIGN,
+      ACTOR,
+    );
+    expect(prisma.merchantInvoice.create).toHaveBeenCalledTimes(1);
+    expect(
+      (again as { sellerSnapshot?: Record<string, unknown> }).sellerSnapshot,
+    ).toEqual(frozen);
+    expect(frozen.legalName).toBe('Rosary Flowers Est.'); // unchanged
+  });
+
+  it('party snapshots carry no employee PII', async () => {
+    const { service, prisma } = build();
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    const flat = JSON.stringify({
+      buyerSnapshot: d.buyerSnapshot,
+      sellerSnapshot: d.sellerSnapshot,
+    }).toLowerCase();
+    for (const banned of [
+      'recipientname',
+      'phone',
+      '+96650',
+      'address',
+      'claimchoice',
+      'street',
+    ]) {
+      expect(flat).not.toContain(banned);
+    }
   });
 
   it('posts a MERCHANT_GOODS_INVOICED ledger entry (pass-through, not Qift revenue)', async () => {
@@ -152,6 +334,8 @@ describe('MerchantInvoiceService.ensureMerchantInvoiceForCampaign', () => {
     expect(ledger.record.mock.calls[0][0]).toMatchObject({
       eventType: 'merchant.invoice.issued',
       reasonCode: 'MERCHANT_GOODS_INVOICED',
+      // FIN-4 — deterministic key: retries/repairs collide, never duplicate.
+      idempotencyKey: 'merchant.invoice.issued:minv-1',
       amount: 5750, // goods total (VAT-inclusive), owed to the merchant
       direction: 'credit',
       counterpartyType: 'company',

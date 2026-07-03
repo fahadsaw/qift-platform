@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AppController } from './app.controller';
+import { DecimalToNumberInterceptor } from './common/decimal-to-number.interceptor';
 import { PrismaModule } from './prisma/prisma.module';
 import { UsersModule } from './users/users.module';
 import { SocialAccountsModule } from './social-accounts/social-accounts.module';
@@ -79,5 +81,12 @@ import { FinancialLedgerModule } from './financial/financial-ledger.module';
   // provider (it deliberately does not touch Prisma). The DB client is
   // supplied globally by PrismaModule above.
   controllers: [AppController],
+  providers: [
+    // FIN-3 wire-format guarantee: the financial-record columns are
+    // exact NUMERIC (Prisma Decimal) in the DB, but the API keeps
+    // returning plain JSON numbers. Registered here (not main.ts) so
+    // e2e-booted apps get it too.
+    { provide: APP_INTERCEPTOR, useClass: DecimalToNumberInterceptor },
+  ],
 })
 export class AppModule {}

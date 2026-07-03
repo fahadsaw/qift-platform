@@ -24,6 +24,17 @@ describe('computeInvoiceAmounts', () => {
     expect(a.totalAmount).toBe(110);
   });
 
+  it('FIN-3: fractional unit prices persist EXACT amounts (no float dust)', () => {
+    // Raw floats: 19.99 * 3 = 59.96999999999999 — that value must never
+    // reach the NUMERIC invoice columns. Money-routed math is exact.
+    const a = computeInvoiceAmounts(19.99, 3);
+    expect(a.subtotalAmount).toBe(59.97);
+    expect(a.totalAmount).toBe(59.97 + a.platformFeeAmount);
+    // serviceFeeFor(19.99) floors to 5 → fee 15, total 74.97 exactly.
+    expect(a.platformFeeAmount).toBe(15);
+    expect(a.totalAmount).toBe(74.97);
+  });
+
   it('total always equals subtotal + platform fee', () => {
     for (const [unit, n] of [
       [100, 3],

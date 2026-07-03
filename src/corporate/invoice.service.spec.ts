@@ -15,6 +15,7 @@ function build(
     status?: string | null;
     snapshot?: unknown;
     recipientCount?: number;
+    org?: unknown; // FIN-2 — Organization row (null = missing)
   } = {},
 ) {
   const corporateInvoice = {
@@ -45,11 +46,23 @@ function build(
   const campaignRecipient = {
     count: jest.fn().mockResolvedValue(opts.recipientCount ?? 10),
   };
+  const organization = {
+    findUnique: jest.fn().mockResolvedValue(
+      'org' in opts
+        ? opts.org
+        : {
+            legalName: 'Alwadi Trading Co LLC',
+            crNumber: '1010101010',
+            vatNumber: '300000000000003',
+          },
+    ),
+  };
   const prisma = {
     corporateInvoice,
     giftCampaign,
     campaignGiftOption,
     campaignRecipient,
+    organization,
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'ledger-1' }) };
@@ -118,11 +131,89 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     const d = createdData(prisma);
     expect(d.taxSnapshot).toMatchObject({
-      ruleVersion: 'sa-vat-agent-v1',
+      ruleVersion: 'sa-vat-agent-v2',
       vatRate: 0.15,
       taxTreatment: 'agent_fee_only',
     });
     expect(d.accountingExportStatus).toBe('not_exported');
+  });
+
+  it('freezes buyer (company) + seller (Qift) party snapshots at issuance', async () => {
+    const { service, prisma } = build();
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d.buyerSnapshot).toEqual({
+      partyType: 'organization',
+      orgId: ORG,
+      legalName: 'Alwadi Trading Co LLC',
+      crNumber: '1010101010',
+      vatNumber: '300000000000003',
+      country: 'SA',
+    });
+    // Seller on the SERVICE invoice is QIFT — env-configured legal
+    // identity; unconfigured in the test env, recorded honestly.
+    expect(d.sellerSnapshot).toMatchObject({
+      partyType: 'qift',
+      country: 'SA',
+      configured: false,
+    });
+  });
+
+  it('later org changes never alter an already-issued invoice snapshot', async () => {
+    const { service, prisma } = build();
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const frozen = createdData(prisma).buyerSnapshot as Record<string, unknown>;
+    // The company renames itself AFTER issuance…
+    prisma.organization.findUnique.mockResolvedValue({
+      legalName: 'Renamed Holdings',
+      crNumber: '9999999999',
+      vatNumber: '399999999999993',
+    });
+    // …the idempotent fast-path returns the EXISTING row; no update,
+    // no re-snapshot, no second create.
+    prisma.corporateInvoice.findUnique.mockResolvedValue({
+      id: 'inv-1',
+      buyerSnapshot: frozen,
+    });
+    const again = await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    expect(prisma.corporateInvoice.create).toHaveBeenCalledTimes(1);
+    expect(
+      (again as { buyerSnapshot?: Record<string, unknown> }).buyerSnapshot,
+    ).toEqual(frozen);
+    expect(frozen.legalName).toBe('Alwadi Trading Co LLC'); // unchanged
+  });
+
+  it('a missing org row freezes nulls — identity is never invented', async () => {
+    const { service, prisma } = build({ org: null });
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d.buyerSnapshot).toMatchObject({
+      partyType: 'organization',
+      orgId: ORG,
+      legalName: null,
+      crNumber: null,
+      vatNumber: null,
+    });
+  });
+
+  it('party snapshots carry no employee PII', async () => {
+    const { service, prisma } = build();
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    const flat = JSON.stringify({
+      buyerSnapshot: d.buyerSnapshot,
+      sellerSnapshot: d.sellerSnapshot,
+    }).toLowerCase();
+    for (const banned of [
+      'recipientname',
+      'phone',
+      '+96650',
+      'address',
+      'claimchoice',
+      'street',
+    ]) {
+      expect(flat).not.toContain(banned);
+    }
   });
 
   it('posts a company-receivable ledger entry for the Qift service total (fee + VAT)', async () => {
@@ -130,12 +221,15 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     expect(ledger.record).toHaveBeenCalledTimes(1);
     expect(ledger.record.mock.calls[0][0]).toMatchObject({
+      eventType: 'corporate.invoice.issued',
       reasonCode: 'CORPORATE_RECEIVABLE',
       amount: 172.5, // Qift service invoice: fee 150 + VAT 22.5 (goods excluded)
       direction: 'credit',
       counterpartyType: 'company',
       campaignId: CAMPAIGN,
       orgId: ORG,
+      // FIN-4 — deterministic key: retries/repairs collide, never duplicate.
+      idempotencyKey: 'corporate.invoice.issued:inv-1',
     });
   });
 

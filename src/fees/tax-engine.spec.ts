@@ -5,6 +5,7 @@ import {
   TAX_RULE_VERSION,
   DEFAULT_TAX_TREATMENT,
   MERCHANT_GOODS_TAX_TREATMENT,
+  MERCHANT_NOT_VAT_REGISTERED_TAX_TREATMENT,
 } from './tax-engine';
 
 describe('TaxEngine (Saudi VAT — agent model)', () => {
@@ -111,10 +112,10 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
   });
 
   describe('taxSnapshot (frozen for historical correctness)', () => {
-    it('bumps the rule version to the agent rule', () => {
-      expect(TAX_RULE_VERSION).toBe('sa-vat-agent-v1');
+    it('carries the current rule version (bumped to v2 by FIN-1)', () => {
+      expect(TAX_RULE_VERSION).toBe('sa-vat-agent-v2');
       const t = computeTax({ subtotalAmount: 100, platformFeeAmount: 5 });
-      expect(t.taxSnapshot.ruleVersion).toBe('sa-vat-agent-v1');
+      expect(t.taxSnapshot.ruleVersion).toBe('sa-vat-agent-v2');
     });
 
     it('records rule version, rate, treatment, facilitated value and a note', () => {
@@ -142,10 +143,15 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
     });
   });
 
-  describe('computeMerchantGoodsTax (the merchant goods leg)', () => {
-    it('computes the MERCHANT VAT on the goods (exclusive default)', () => {
-      // goods 5000: merchant VAT 750; goods total 5750.
-      const t = computeMerchantGoodsTax({ goodsSubtotalAmount: 5000 });
+  describe('computeMerchantGoodsTax (the merchant goods leg, FIN-1 VAT facts)', () => {
+    it('VAT-registered merchant, prices EXCLUDE VAT: adds 15% on top', () => {
+      // goods 5000 entered ex-VAT: merchant VAT 750; goods total 5750.
+      const t = computeMerchantGoodsTax({
+        goodsSubtotalAmount: 5000,
+        vatRegistered: true,
+        vatNumber: '310000000000003',
+        pricesIncludeVat: false,
+      });
       expect(t).toMatchObject({
         taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
         pricesIncludeVat: false,
@@ -156,22 +162,54 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
       });
     });
 
-    it('extracts merchant VAT when goods prices include VAT', () => {
+    it('VAT-registered merchant, prices INCLUDE VAT: extracts VAT from the shelf price', () => {
+      // goods 5000 is the final displayed price: net 4347.83, VAT
+      // 652.17, total stays 5000 — the company pays what the shelf says.
       const t = computeMerchantGoodsTax({
-        goodsSubtotalAmount: 5750,
+        goodsSubtotalAmount: 5000,
+        vatRegistered: true,
+        vatNumber: '310000000000003',
         pricesIncludeVat: true,
       });
-      expect(t.taxableAmount).toBe(5000);
-      expect(t.vatAmount).toBe(750);
-      expect(t.totalAmount).toBe(5750); // gross unchanged
+      expect(t.taxableAmount).toBe(4347.83);
+      expect(t.vatAmount).toBe(652.17);
+      expect(t.totalAmount).toBe(5000); // gross unchanged
+      expect(t.taxTreatment).toBe(MERCHANT_GOODS_TAX_TREATMENT);
     });
 
-    it('freezes a snapshot naming the merchant as the tax owner', () => {
-      const t = computeMerchantGoodsTax({ goodsSubtotalAmount: 5000 });
+    it('NON-VAT-registered merchant: zero VAT, total equals the goods subtotal', () => {
+      const t = computeMerchantGoodsTax({
+        goodsSubtotalAmount: 5000,
+        vatRegistered: false,
+        pricesIncludeVat: true, // convention is irrelevant when unregistered
+      });
+      expect(t).toMatchObject({
+        taxTreatment: MERCHANT_NOT_VAT_REGISTERED_TAX_TREATMENT,
+        vatRate: 0,
+        vatAmount: 0,
+        totalAmount: 5000,
+      });
+      // The snapshot clearly states the reason no VAT was charged.
+      expect(t.taxSnapshot.taxTreatment).toBe('merchant_not_vat_registered');
+      expect(t.taxSnapshot.vatRegistered).toBe(false);
+      expect(t.taxSnapshot.vatAmount).toBe(0);
+      expect(t.taxSnapshot.notes).toMatch(/not.*vat-registered/i);
+      expect(t.taxSnapshot.notes).toMatch(/no VAT is charged/i);
+    });
+
+    it('freezes the VAT facts into the snapshot (registration, number, convention, version)', () => {
+      const t = computeMerchantGoodsTax({
+        goodsSubtotalAmount: 5000,
+        vatRegistered: true,
+        vatNumber: '310000000000003',
+        pricesIncludeVat: false,
+      });
       expect(t.taxSnapshot).toMatchObject({
-        ruleVersion: TAX_RULE_VERSION, // same agent ruleset, no bump
+        ruleVersion: TAX_RULE_VERSION, // sa-vat-agent-v2
         vatRate: 0.15,
         taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
+        vatRegistered: true,
+        vatNumber: '310000000000003',
         pricesIncludeVat: false,
         taxableBase: 5000,
         vatAmount: 750,
@@ -180,20 +218,28 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
       expect(t.taxSnapshot.notes).toMatch(/not Qift revenue/i);
     });
 
-    it('two-invoice split: Qift bills the fee leg only, merchant bills the goods leg', () => {
-      // Campaign of 500 SAR x 10 with a 150 fee. Under the agent model
-      // the company receives TWO invoices:
+    it('the Qift service invoice remains fee-only — unaffected by merchant VAT facts', () => {
+      // Campaign of 500 SAR x 10 with a 150 fee. The Qift leg never
+      // changes with the merchant's registration or price convention:
       const qift = computeTax({ subtotalAmount: 5000, platformFeeAmount: 150 });
-      const merchant = computeMerchantGoodsTax({ goodsSubtotalAmount: 5000 });
-      // Qift service invoice: fee 150 + VAT 22.5 = 172.5 (fee-only).
-      expect(qift.totalAmount).toBe(172.5);
-      // Merchant goods invoice: goods 5000 + VAT 750 = 5750.
-      expect(merchant.totalAmount).toBe(5750);
-      // The goods never leak into Qift's invoice, and together the two
-      // legs equal the old single principal invoice (5922.5) — the
-      // company's total outlay is unchanged; only attribution moved.
       expect(qift.taxableAmount).toBe(150);
-      expect(qift.totalAmount + merchant.totalAmount).toBe(5922.5);
+      expect(qift.totalAmount).toBe(172.5); // fee 150 + VAT 22.5, always
+
+      // …while the goods leg varies per merchant facts:
+      const registered = computeMerchantGoodsTax({
+        goodsSubtotalAmount: 5000,
+        vatRegistered: true,
+        pricesIncludeVat: false,
+      });
+      const unregistered = computeMerchantGoodsTax({
+        goodsSubtotalAmount: 5000,
+        vatRegistered: false,
+      });
+      expect(registered.totalAmount).toBe(5750);
+      expect(unregistered.totalAmount).toBe(5000);
+      // Goods never leak into Qift's invoice in either case.
+      expect(qift.totalAmount + registered.totalAmount).toBe(5922.5);
+      expect(qift.totalAmount + unregistered.totalAmount).toBe(5172.5);
     });
   });
 });
