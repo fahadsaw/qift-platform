@@ -2187,6 +2187,15 @@ model CorporateInvoice {
   // invoices keep their ex-VAT total.
   totalAmount Float
 
+  // ── Party snapshots (FIN-2) ───────────────────────────────────────
+  // The legal identity of buyer + seller, FROZEN at issuance. This
+  // table is FK-free by design (purge survivability), so the invoice
+  // must carry its parties itself — old invoices are never re-hydrated
+  // from live Organization rows. Nullable: pre-FIN-2 invoices stay
+  // untouched. Business identity only — never employee PII.
+  buyerSnapshot  Json? // { partyType:'organization', orgId, legalName, crNumber, vatNumber, country }
+  sellerSnapshot Json? // { partyType:'qift', legalName, crNumber, vatNumber, country, configured }
+
   // ── Accounting integration readiness (NO integration yet) ────────
   // Placeholders so a future export to a ZATCA e-invoicing provider /
   // Zoho Books / Xero / QuickBooks has a home. Nothing writes these
@@ -2259,6 +2268,15 @@ model MerchantInvoice {
   pricesIncludeVat    Boolean @default(false)
   taxTreatment        String // 'merchant_goods_standard' | 'merchant_not_vat_registered'
   taxSnapshot         Json? // frozen: version, rate, treatment, base, vatRegistered, vatNumber
+
+  // ── Party snapshots (FIN-2) ───────────────────────────────────────
+  // Buyer (the company) + seller (the MERCHANT — legal seller of the
+  // goods), FROZEN at issuance. FK-free table → the invoice carries its
+  // parties itself; old invoices never re-read live Organization/Store
+  // rows. Nullable: pre-FIN-2 invoices stay untouched. Business
+  // identity only — never employee PII.
+  buyerSnapshot  Json? // { partyType:'organization', orgId, legalName, crNumber, vatNumber, country }
+  sellerSnapshot Json? // { partyType:'merchant', storeId, legalName, displayName, crNumber, vatNumber, country }
 
   issuedAt    DateTime?
   cancelledAt DateTime?
