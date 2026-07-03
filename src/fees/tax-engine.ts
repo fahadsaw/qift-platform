@@ -16,13 +16,24 @@
 //
 // STILL PROVISIONAL — although the agent classification is now settled,
 // no VAT is remitted to ZATCA yet and the rate / e-invoicing mechanics
-// are not advisor-confirmed for remittance. The remaining open question
-// is only `pricesIncludeVat` (are catalog prices VAT-inclusive or
-// exclusive?). Both conventions stay representable so a future answer is
-// a constant + version bump, never a historical-row rewrite.
+// are not advisor-confirmed for remittance. FIN-1 made the two open
+// conventions PER-MERCHANT facts instead of global guesses: the goods
+// leg is gated on the merchant's VAT registration, and the price
+// convention (inclusive/exclusive) comes from the Store row. Both stay
+// representable so any future advisor correction is a constant +
+// version bump, never a historical-row rewrite.
+//
+// VERSION HISTORY
+//   sa-vat-v1        — principal/full-value (legacy; frozen rows only).
+//   sa-vat-agent-v1  — agent flip: fee-leg VAT for Qift; goods leg
+//                      assumed every merchant VAT-registered.
+//   sa-vat-agent-v2  — FIN-1: goods leg gated on per-merchant
+//                      vatRegistered (+ merchant_not_vat_registered
+//                      treatment) and per-merchant pricesIncludeVat;
+//                      snapshot carries the registration facts.
 
 export const SAUDI_VAT_RATE = 0.15; // KSA standard rate
-export const TAX_RULE_VERSION = 'sa-vat-agent-v1';
+export const TAX_RULE_VERSION = 'sa-vat-agent-v2';
 
 export type TaxTreatment =
   // Qift as principal (legacy): 15% VAT on (subtotal + platform fee).
@@ -151,15 +162,35 @@ export function computeTax(input: TaxInput): TaxBreakdown {
 // merchant invoice on the merchant's behalf; every amount below is
 // merchant revenue, not Qift's.
 //
+// FIN-1 — the goods VAT is governed by two PER-MERCHANT facts, frozen
+// from the Store row at issuance:
+//   * vatRegistered (REQUIRED input — the caller must state the fact;
+//     there is no safe default for charging tax): an unregistered
+//     merchant (below the KSA SAR 375k mandatory threshold) must not
+//     charge VAT — vatRate/vatAmount are 0 and the snapshot says
+//     'merchant_not_vat_registered'.
+//   * pricesIncludeVat: true = the entered catalog price is the final
+//     shelf price and VAT is EXTRACTED from it (KSA retail norm);
+//     false = VAT is added ON TOP.
+//
 // This is the OTHER HALF of the same agent ruleset computeTax
 // implements (fee-leg VAT for Qift, goods-leg VAT for the merchant), so
-// it shares SAUDI_VAT_RATE / TAX_RULE_VERSION / rounding. Adding it did
-// NOT change any computeTax output, so the rule version is not bumped.
+// it shares SAUDI_VAT_RATE / TAX_RULE_VERSION / rounding.
 
 export const MERCHANT_GOODS_TAX_TREATMENT = 'merchant_goods_standard';
+export const MERCHANT_NOT_VAT_REGISTERED_TAX_TREATMENT =
+  'merchant_not_vat_registered';
 
 export type MerchantGoodsTaxInput = {
   goodsSubtotalAmount: number; // unit * recipientCount — merchant's goods
+  // REQUIRED: is the merchant VAT-registered? No default — whether tax
+  // is charged on a legal document must be a stated fact, never an
+  // assumption.
+  vatRegistered: boolean;
+  // The merchant's VAT registration number — echoed into the snapshot
+  // so the frozen invoice can name the registration it was issued
+  // under. Not used in any computation.
+  vatNumber?: string | null;
   pricesIncludeVat?: boolean;
   vatRate?: number; // defaults to the server-side SAUDI_VAT_RATE
 };
@@ -167,7 +198,9 @@ export type MerchantGoodsTaxInput = {
 export type MerchantGoodsTaxSnapshot = {
   ruleVersion: string;
   vatRate: number;
-  taxTreatment: string; // MERCHANT_GOODS_TAX_TREATMENT
+  taxTreatment: string; // merchant_goods_standard | merchant_not_vat_registered
+  vatRegistered: boolean;
+  vatNumber: string | null;
   pricesIncludeVat: boolean;
   taxableBase: number; // net goods base the merchant VAT applies to
   vatAmount: number;
@@ -175,7 +208,7 @@ export type MerchantGoodsTaxSnapshot = {
 };
 
 export type MerchantGoodsTaxBreakdown = {
-  taxTreatment: string; // MERCHANT_GOODS_TAX_TREATMENT
+  taxTreatment: string; // merchant_goods_standard | merchant_not_vat_registered
   pricesIncludeVat: boolean;
   taxableAmount: number; // net goods base the merchant VAT applies to
   vatRate: number;
@@ -191,12 +224,47 @@ const MERCHANT_GOODS_NOTE =
   'Qift VAT. No VAT is remitted to ZATCA yet. Frozen on the invoice ' +
   'for historical correctness.';
 
+const MERCHANT_NOT_REGISTERED_NOTE =
+  'Saudi VAT (agent model), merchant goods leg — ' +
+  'merchant_not_vat_registered: the merchant (legal seller) is NOT ' +
+  'VAT-registered, so no VAT is charged on the goods (KSA mandatory ' +
+  'registration threshold SAR 375k). The total equals the goods ' +
+  'subtotal. Not Qift revenue, not Qift VAT. Frozen on the invoice ' +
+  'for historical correctness.';
+
 export function computeMerchantGoodsTax(
   input: MerchantGoodsTaxInput,
 ): MerchantGoodsTaxBreakdown {
   const pricesIncludeVat = input.pricesIncludeVat ?? DEFAULT_PRICES_INCLUDE_VAT;
-  const vatRate = input.vatRate ?? SAUDI_VAT_RATE;
+  const vatNumber = input.vatNumber ?? null;
   const goods = input.goodsSubtotalAmount;
+
+  // Unregistered merchant: no VAT on the goods, whatever the price
+  // convention — the entered price IS the price.
+  if (!input.vatRegistered) {
+    const totalAmount = round2(goods);
+    return {
+      taxTreatment: MERCHANT_NOT_VAT_REGISTERED_TAX_TREATMENT,
+      pricesIncludeVat,
+      taxableAmount: totalAmount,
+      vatRate: 0,
+      vatAmount: 0,
+      totalAmount,
+      taxSnapshot: {
+        ruleVersion: TAX_RULE_VERSION,
+        vatRate: 0,
+        taxTreatment: MERCHANT_NOT_VAT_REGISTERED_TAX_TREATMENT,
+        vatRegistered: false,
+        vatNumber,
+        pricesIncludeVat,
+        taxableBase: totalAmount,
+        vatAmount: 0,
+        notes: MERCHANT_NOT_REGISTERED_NOTE,
+      },
+    };
+  }
+
+  const vatRate = input.vatRate ?? SAUDI_VAT_RATE;
 
   let taxableAmount: number;
   let vatAmount: number;
@@ -225,6 +293,8 @@ export function computeMerchantGoodsTax(
       ruleVersion: TAX_RULE_VERSION,
       vatRate,
       taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
+      vatRegistered: true,
+      vatNumber,
       pricesIncludeVat,
       taxableBase: taxableAmount,
       vatAmount,

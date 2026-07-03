@@ -118,7 +118,7 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     const d = createdData(prisma);
     expect(d.taxSnapshot).toMatchObject({
-      ruleVersion: 'sa-vat-agent-v1',
+      ruleVersion: 'sa-vat-agent-v2',
       vatRate: 0.15,
       taxTreatment: 'agent_fee_only',
     });

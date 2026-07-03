@@ -23,6 +23,12 @@ function build(
     snapshot?: unknown;
     recipientCount?: number;
     productStoreId?: string | null;
+    // FIN-1 — the Store row's VAT facts (null = store row missing).
+    storeVat?: {
+      vatRegistered: boolean;
+      vatNumber: string | null;
+      pricesIncludeVat: boolean;
+    } | null;
   } = {},
 ) {
   const merchantInvoice = {
@@ -62,12 +68,26 @@ function build(
           : { storeId: opts.productStoreId ?? STORE },
       ),
   };
+  const store = {
+    findUnique: jest.fn().mockResolvedValue(
+      'storeVat' in opts
+        ? opts.storeVat
+        : // default: VAT-registered merchant, ex-VAT catalog prices —
+          // the configuration the pre-FIN-1 numeric fixtures assumed.
+          {
+            vatRegistered: true,
+            vatNumber: '310000000000003',
+            pricesIncludeVat: false,
+          },
+    ),
+  };
   const prisma = {
     merchantInvoice,
     giftCampaign,
     campaignGiftOption,
     campaignRecipient,
     product,
+    store,
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'ledger-1' }) };
@@ -136,13 +156,73 @@ describe('MerchantInvoiceService.ensureMerchantInvoiceForCampaign', () => {
     await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     const d = createdData(prisma);
     expect(d.taxSnapshot).toMatchObject({
-      ruleVersion: 'sa-vat-agent-v1',
+      ruleVersion: 'sa-vat-agent-v2',
       vatRate: 0.15,
       taxTreatment: 'merchant_goods_standard',
+      // FIN-1 — the merchant's VAT facts are frozen with the rule.
+      vatRegistered: true,
+      vatNumber: '310000000000003',
       pricesIncludeVat: false,
       taxableBase: 5000,
       vatAmount: 750,
     });
+  });
+
+  it('NON-VAT-registered merchant: zero VAT, total equals goods subtotal', async () => {
+    const { service, prisma, ledger } = build({
+      storeVat: {
+        vatRegistered: false,
+        vatNumber: null,
+        pricesIncludeVat: true,
+      },
+    });
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d).toMatchObject({
+      goodsSubtotalAmount: 5000,
+      vatRate: 0,
+      vatAmount: 0,
+      totalAmount: 5000, // equals the goods subtotal — no VAT charged
+      taxTreatment: 'merchant_not_vat_registered',
+    });
+    const snap = d.taxSnapshot as Record<string, unknown>;
+    expect(snap.taxTreatment).toBe('merchant_not_vat_registered');
+    expect(snap.vatRegistered).toBe(false);
+    expect(String(snap.notes)).toMatch(/not.*vat-registered/i);
+    // The ledger pass-through entry follows the real (VAT-free) total.
+    expect(ledger.record.mock.calls[0][0]).toMatchObject({ amount: 5000 });
+  });
+
+  it('VAT-registered merchant with VAT-INCLUSIVE prices: extracts VAT, total is the shelf price', async () => {
+    const { service, prisma } = build({
+      storeVat: {
+        vatRegistered: true,
+        vatNumber: '310000000000003',
+        pricesIncludeVat: true,
+      },
+    });
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d).toMatchObject({
+      goodsSubtotalAmount: 5000,
+      vatRate: 0.15,
+      vatAmount: 652.17, // extracted from the 5000 displayed price
+      totalAmount: 5000, // the company pays what the shelf says
+      pricesIncludeVat: true,
+      taxTreatment: 'merchant_goods_standard',
+    });
+    expect((d.taxSnapshot as Record<string, unknown>).taxableBase).toBe(
+      4347.83,
+    );
+  });
+
+  it('missing Store row falls to the conservative posture: no VAT charged', async () => {
+    const { service, prisma } = build({ storeVat: null });
+    await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
+    const d = createdData(prisma);
+    expect(d.vatAmount).toBe(0);
+    expect(d.totalAmount).toBe(5000);
+    expect(d.taxTreatment).toBe('merchant_not_vat_registered');
   });
 
   it('posts a MERCHANT_GOODS_INVOICED ledger entry (pass-through, not Qift revenue)', async () => {
