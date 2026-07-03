@@ -224,6 +224,40 @@ describe('BillingSummaryService.getCampaignBillingSummary', () => {
     expect(s.merchantInvoice!.storeName).toBe('Rosary');
   });
 
+  it('FIN-3: converts Decimal invoice amounts to plain numbers', async () => {
+    const dec = (n: number) => ({ toNumber: () => n });
+    const { service } = build({
+      qift: {
+        ...QIFT_INVOICE,
+        platformFeeAmount: dec(150),
+        vatAmount: dec(22.5),
+        totalAmount: dec(172.5),
+      },
+      merchant: {
+        ...MERCHANT_INVOICE,
+        goodsSubtotalAmount: dec(5000),
+        vatAmount: dec(750),
+        totalAmount: dec(5750),
+      },
+    });
+    const s2 = await service.getCampaignBillingSummary(ORG, CAMPAIGN);
+    expect(s2.qiftInvoice!.totalAmount).toBe(172.5);
+    expect(s2.merchantInvoice!.goodsSubtotalAmount).toBe(5000);
+    expect(s2.grandTotalAmount).toBe(5922.5);
+    // The wire payload must carry numbers, never Decimal objects.
+    expect(typeof s2.merchantInvoice!.vatAmount).toBe('number');
+  });
+
+  it('currency mismatch between legs omits the grand total (never a wrong sum)', async () => {
+    const { service } = build({
+      merchant: { ...MERCHANT_INVOICE, currency: 'KWD' },
+    });
+    const s2 = await service.getCampaignBillingSummary(ORG, CAMPAIGN);
+    expect(s2.merchantInvoice).not.toBeNull();
+    expect(s2.qiftInvoice).not.toBeNull();
+    expect(s2.grandTotalAmount).toBeNull();
+  });
+
   it('ignores a non-string storeName in metadata (whitelist is typed)', async () => {
     const { service } = build({
       merchant: { ...MERCHANT_INVOICE, metadata: { storeName: 42 } },

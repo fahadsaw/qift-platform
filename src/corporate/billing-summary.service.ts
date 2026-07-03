@@ -19,14 +19,11 @@
 // metadata is never spread wholesale into the response, so no employee
 // identity / address / phone / claim choice can ever appear here.
 
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { addMoney, moneyToNumber } from '../fees/money';
 import { InvoiceService } from './invoice.service';
 import { MerchantInvoiceService } from './merchant-invoice.service';
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
 
 // The merchant GOODS leg — the merchant's sale to the company.
 export type MerchantLegSummary = {
@@ -83,6 +80,8 @@ const MODEL_NOTE =
 
 @Injectable()
 export class BillingSummaryService {
+  private readonly logger = new Logger(BillingSummaryService.name);
+
   constructor(
     private prisma: PrismaService,
     private invoices: InvoiceService,
@@ -111,6 +110,9 @@ export class BillingSummaryService {
 
     // Whitelisted projections — never spread the invoice row or its
     // metadata wholesale (privacy invariant).
+    // FIN-3 — the invoice money columns are exact NUMERIC (Prisma
+    // Decimal at runtime); project through moneyToNumber so the summary
+    // carries plain numbers.
     const qiftLeg: QiftLegSummary | null = qift
       ? {
           leg: 'qift_service',
@@ -118,9 +120,9 @@ export class BillingSummaryService {
           invoiceId: qift.id,
           status: qift.status,
           issuedAt: qift.issuedAt ?? null,
-          serviceFeeAmount: qift.platformFeeAmount,
-          vatAmount: qift.vatAmount ?? 0,
-          totalAmount: qift.totalAmount,
+          serviceFeeAmount: moneyToNumber(qift.platformFeeAmount),
+          vatAmount: moneyToNumber(qift.vatAmount),
+          totalAmount: moneyToNumber(qift.totalAmount),
         }
       : null;
 
@@ -138,9 +140,9 @@ export class BillingSummaryService {
             typeof merchantMeta?.storeName === 'string'
               ? merchantMeta.storeName
               : null,
-          goodsSubtotalAmount: merchant.goodsSubtotalAmount,
-          vatAmount: merchant.vatAmount,
-          totalAmount: merchant.totalAmount,
+          goodsSubtotalAmount: moneyToNumber(merchant.goodsSubtotalAmount),
+          vatAmount: moneyToNumber(merchant.vatAmount),
+          totalAmount: moneyToNumber(merchant.totalAmount),
         }
       : null;
 
@@ -158,9 +160,20 @@ export class BillingSummaryService {
       modelNote: MODEL_NOTE,
       merchantInvoice: merchantLeg,
       qiftInvoice: qiftLeg,
+      // Exact minor-unit sum (FIN-3). Guarded: legs in different
+      // currencies must never be summed — a cross-currency campaign
+      // (impossible today, SAR-only) surfaces as an explicit null
+      // grand total + a warn log instead of a silently wrong number.
       grandTotalAmount:
         merchantLeg && qiftLeg
-          ? round2(merchantLeg.totalAmount + qiftLeg.totalAmount)
+          ? merchant!.currency === qift!.currency
+            ? addMoney([merchantLeg.totalAmount, qiftLeg.totalAmount])
+            : (this.logger.warn(
+                `[billing-summary] currency mismatch for campaign=` +
+                  `${campaignId}: merchant=${merchant!.currency} ` +
+                  `qift=${qift!.currency} — grand total omitted.`,
+              ),
+              null)
           : null,
       complete: missing.length === 0,
       missing,
