@@ -123,13 +123,40 @@ export class MerchantInvoiceService {
       throw new BadRequestException('campaign_recipients_required');
     }
 
+    // FIN-1 — the merchant's VAT FACTS, read from the Store row at
+    // issuance (the commitment point) and frozen into the snapshot:
+    // whether the merchant is VAT-registered (charge VAT only if so),
+    // its registration number, and its catalog-price convention. If
+    // the Store row is somehow gone, fall to the conservative posture:
+    // not registered → no VAT charged by accident.
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { vatRegistered: true, vatNumber: true, pricesIncludeVat: true },
+    });
+    const vatRegistered = store?.vatRegistered ?? false;
+    const vatNumber = store?.vatNumber ?? null;
+    const pricesIncludeVat = store?.pricesIncludeVat ?? true;
+    if (vatRegistered && !vatNumber) {
+      // Legal-completeness smell, not a blocker: registration is the
+      // fact that governs charging; the number belongs on the document
+      // and is enforced fully by the party snapshot in FIN-2.
+      this.logger.warn(
+        `[vat-facts] store=${storeId} is vatRegistered but has no ` +
+          `vatNumber recorded — merchant invoice for campaign=` +
+          `${campaignId} freezes vatNumber=null.`,
+      );
+    }
+
     // Reuse the same two-leg decomposition the Qift service invoice
     // uses; the goods leg is its subtotal. Then the merchant's VAT on
     // the goods (agent model: goods VAT is the merchant's, never
-    // Qift's).
+    // Qift's), governed by the merchant's own VAT facts.
     const amounts = computeInvoiceAmounts(snapshot.price, recipientCount);
     const goodsTax = computeMerchantGoodsTax({
       goodsSubtotalAmount: amounts.subtotalAmount,
+      vatRegistered,
+      vatNumber,
+      pricesIncludeVat,
     });
     const now = new Date();
 

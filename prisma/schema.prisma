@@ -498,6 +498,26 @@ model Store {
   commercialRegistrationNumber String?
   vatNumber                    String?
 
+  // ── VAT facts (FIN-1, agent model) ────────────────────────────
+  // The merchant is the legal seller of the goods, so the goods VAT
+  // is governed by THESE facts, frozen into every MerchantInvoice at
+  // issuance. Set by ops during merchant onboarding.
+  //
+  // vatRegistered — charge VAT on the goods ONLY when true (KSA
+  // mandatory registration threshold: SAR 375k; an unregistered
+  // merchant must not charge VAT). Defaults FALSE so no merchant is
+  // ever VAT-charged by accident — ops flips it after verifying the
+  // registration (vatNumber above should be recorded when true).
+  vatRegistered Boolean @default(false)
+  // pricesIncludeVat — the merchant's catalog-price convention.
+  // true (default, KSA retail norm): the entered price is the final
+  // shelf price and VAT is EXTRACTED from it. false: VAT is added ON
+  // TOP of the entered price. Only meaningful when vatRegistered.
+  pricesIncludeVat Boolean @default(true)
+  // taxCountry — ISO-3166 alpha-2 tax jurisdiction for the goods
+  // VAT rule. Distinct from countryOfRegistration (a docs concern).
+  taxCountry String @default("SA")
+
   // ── Contact PoC ───────────────────────────────────────────────
   contactPerson String?
   contactPhone  String?
@@ -2226,16 +2246,19 @@ model MerchantInvoice {
 
   // ── The merchant's goods sale ─────────────────────────────────────
   // goodsSubtotal = unitAmount * recipientCount. VAT here is the
-  // MERCHANT's output VAT on the goods (merchant's VAT registration),
-  // per the agent model — Qift's own VAT applies to its fee only, on
-  // the Qift service invoice.
+  // MERCHANT's output VAT on the goods, per the agent model — Qift's
+  // own VAT applies to its fee only, on the Qift service invoice.
+  // FIN-1: governed by the Store's VAT facts frozen at issuance —
+  // vatRegistered gates whether VAT is charged at all (0/0 when the
+  // merchant is not VAT-registered), pricesIncludeVat picks
+  // extract-from-price vs add-on-top.
   goodsSubtotalAmount Float
-  vatRate             Float // e.g. 0.15
-  vatAmount           Float // merchant VAT on the goods
+  vatRate             Float // 0.15 (registered) | 0 (not registered)
+  vatAmount           Float // merchant VAT on the goods (0 if unregistered)
   totalAmount         Float // goods total the company owes the merchant
   pricesIncludeVat    Boolean @default(false)
-  taxTreatment        String // 'merchant_goods_standard'
-  taxSnapshot         Json? // frozen rule: version, rate, treatment, base
+  taxTreatment        String // 'merchant_goods_standard' | 'merchant_not_vat_registered'
+  taxSnapshot         Json? // frozen: version, rate, treatment, base, vatRegistered, vatNumber
 
   issuedAt    DateTime?
   cancelledAt DateTime?
