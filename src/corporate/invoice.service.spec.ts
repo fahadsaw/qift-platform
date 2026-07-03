@@ -221,12 +221,15 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
     await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     expect(ledger.record).toHaveBeenCalledTimes(1);
     expect(ledger.record.mock.calls[0][0]).toMatchObject({
+      eventType: 'corporate.invoice.issued',
       reasonCode: 'CORPORATE_RECEIVABLE',
       amount: 172.5, // Qift service invoice: fee 150 + VAT 22.5 (goods excluded)
       direction: 'credit',
       counterpartyType: 'company',
       campaignId: CAMPAIGN,
       orgId: ORG,
+      // FIN-4 — deterministic key: retries/repairs collide, never duplicate.
+      idempotencyKey: 'corporate.invoice.issued:inv-1',
     });
   });
 

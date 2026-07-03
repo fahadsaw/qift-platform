@@ -2121,6 +2121,16 @@ model FinancialLedgerEntry {
   // before persisting.
   metadata Json?
 
+  // Idempotency key (FIN-4) — the EXPLICIT anchor: deterministic
+  // `${eventType}:${anchorId}` (see src/financial/financial-events.ts),
+  // unique when present. Retries, repairs, and backfills of the same
+  // posting collide here instead of duplicating. It also covers what
+  // the (orderId, reasonCode) constraint below cannot: campaign-scoped
+  // invoice postings (orderId = NULL) and, in future phases, repeated
+  // same-reason legs (partial refunds) whose keys anchor on refundId.
+  // Nullable so pre-FIN-4 rows and ad-hoc entries stay valid.
+  idempotencyKey String? @unique
+
   @@index([orderId])
   @@index([paymentId])
   @@index([campaignId])
@@ -2136,6 +2146,7 @@ model FinancialLedgerEntry {
   // Relies on PostgreSQL NULL-distinct semantics: non-order entries
   // (orderId = NULL) are never constrained, matching the Gift /
   // DispatchJob idempotency-key pattern already used in this schema.
+  // KEPT after FIN-4 as belt-and-braces beneath the explicit key above.
   @@unique([orderId, reasonCode])
 }
 

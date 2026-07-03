@@ -38,6 +38,11 @@ export type RecordLedgerInput = {
   orgId?: string | null;
   storeId?: string | null;
   metadata?: Record<string, unknown> | null;
+  // FIN-4 — deterministic `${eventType}:${anchorId}` key (see
+  // financial-events.ts). When present, a duplicate write returns the
+  // EXISTING row instead of creating or throwing: retries, repairs and
+  // backfills are safe by construction.
+  idempotencyKey?: string | null;
 };
 
 // Metadata keys that must never reach the ledger. Recipient address /
@@ -133,26 +138,56 @@ export class FinancialLedgerService {
 
     const metadata = sanitizeLedgerMetadata(input.metadata);
 
-    return this.prisma.financialLedgerEntry.create({
-      data: {
-        eventType,
-        reasonCode,
-        actorType,
-        actorId: input.actorId ?? null,
-        amount: input.amount,
-        currency,
-        direction: input.direction,
-        counterpartyType: input.counterpartyType ?? null,
-        orderId: input.orderId ?? null,
-        paymentId: input.paymentId ?? null,
-        campaignId: input.campaignId ?? null,
-        orgId: input.orgId ?? null,
-        storeId: input.storeId ?? null,
-        metadata:
-          metadata == null
-            ? Prisma.JsonNull
-            : (metadata as Prisma.InputJsonValue),
-      },
+    const idempotencyKey = input.idempotencyKey?.trim() || null;
+
+    try {
+      return await this.prisma.financialLedgerEntry.create({
+        data: {
+          eventType,
+          reasonCode,
+          actorType,
+          actorId: input.actorId ?? null,
+          amount: input.amount,
+          currency,
+          direction: input.direction,
+          counterpartyType: input.counterpartyType ?? null,
+          orderId: input.orderId ?? null,
+          paymentId: input.paymentId ?? null,
+          campaignId: input.campaignId ?? null,
+          orgId: input.orgId ?? null,
+          storeId: input.storeId ?? null,
+          metadata:
+            metadata == null
+              ? Prisma.JsonNull
+              : (metadata as Prisma.InputJsonValue),
+          idempotencyKey,
+        },
+      });
+    } catch (err) {
+      // FIN-4 — a P2002 on the EXPLICIT key means this exact posting
+      // already exists: idempotent success, return the original row.
+      // Any other unique collision (e.g. the legacy (orderId,
+      // reasonCode) anchor) keeps propagating so existing callers'
+      // P2002 handling stays exactly as it was.
+      if (
+        idempotencyKey &&
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        const existing = await this.prisma.financialLedgerEntry.findUnique({
+          where: { idempotencyKey },
+        });
+        if (existing) return existing;
+      }
+      throw err;
+    }
+  }
+
+  // FIN-4 — read helper for reconciliation: the row for a deterministic
+  // idempotency key, or null when the posting is missing.
+  findByIdempotencyKey(idempotencyKey: string) {
+    return this.prisma.financialLedgerEntry.findUnique({
+      where: { idempotencyKey },
     });
   }
 

@@ -37,6 +37,10 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
+import {
+  FINANCIAL_EVENTS,
+  ledgerIdempotencyKey,
+} from '../financial/financial-events';
 import { FEE_POLICY_VERSION } from '../fees/fee-engine';
 import { computeTax } from '../fees/tax-engine';
 import { moneyToNumber } from '../fees/money';
@@ -238,8 +242,14 @@ export class InvoiceService {
   ) {
     try {
       await this.ledger.record({
-        eventType: 'corporate.invoice.issued',
+        eventType: FINANCIAL_EVENTS.CORPORATE_INVOICE_ISSUED,
         reasonCode: 'CORPORATE_RECEIVABLE',
+        // FIN-4 — deterministic: a retry or repair of this invoice's
+        // receivable collides with the original row, never duplicates.
+        idempotencyKey: ledgerIdempotencyKey(
+          FINANCIAL_EVENTS.CORPORATE_INVOICE_ISSUED,
+          invoice.id,
+        ),
         actorType: actorUserId ? 'user' : 'system',
         actorId: actorUserId,
         amount: moneyToNumber(invoice.totalAmount),

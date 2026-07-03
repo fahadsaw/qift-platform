@@ -334,6 +334,8 @@ describe('MerchantInvoiceService.ensureMerchantInvoiceForCampaign', () => {
     expect(ledger.record.mock.calls[0][0]).toMatchObject({
       eventType: 'merchant.invoice.issued',
       reasonCode: 'MERCHANT_GOODS_INVOICED',
+      // FIN-4 — deterministic key: retries/repairs collide, never duplicate.
+      idempotencyKey: 'merchant.invoice.issued:minv-1',
       amount: 5750, // goods total (VAT-inclusive), owed to the merchant
       direction: 'credit',
       counterpartyType: 'company',
