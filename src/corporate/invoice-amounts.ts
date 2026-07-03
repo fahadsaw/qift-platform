@@ -23,6 +23,7 @@
 // of truth.
 
 import { serviceFeeFor, FEE_POLICY_VERSION } from '../fees/fee-engine';
+import { addMoney, mulMoney } from '../fees/money';
 
 export type InvoiceAmounts = {
   unitAmount: number;
@@ -37,9 +38,12 @@ export function computeInvoiceAmounts(
   unitAmount: number,
   recipientCount: number,
 ): InvoiceAmounts {
-  const subtotalAmount = unitAmount * recipientCount;
-  const platformFeeAmount = serviceFeeFor(unitAmount) * recipientCount;
-  const totalAmount = subtotalAmount + platformFeeAmount;
+  // FIN-3: exact minor-unit math — 19.99 × 3 is 59.97 here, never
+  // 59.96999999999999; what persists to the NUMERIC invoice columns is
+  // already exact.
+  const subtotalAmount = mulMoney(unitAmount, recipientCount);
+  const platformFeeAmount = mulMoney(serviceFeeFor(unitAmount), recipientCount);
+  const totalAmount = addMoney([subtotalAmount, platformFeeAmount]);
   return {
     unitAmount,
     recipientCount,
