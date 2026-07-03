@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
 } from '@nestjs/common';
+import { randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RateLimiter } from '../common/rate-limiter';
 import { MailService } from '../mail/mail.service';
@@ -20,7 +21,19 @@ const otpSendLimiter = new RateLimiter(5, 5 * 60 * 1000);
 export type OtpType = 'phone' | 'email';
 
 export type SendOtpInput = { target?: string; type?: OtpType };
-export type VerifyOtpInput = { target?: string; code?: string };
+export type VerifyOtpInput = {
+  target?: string;
+  code?: string;
+  // Track A4 — optional row-type filter: honour ONLY the channel the
+  // caller proved (register/login pass their channel here).
+  type?: 'phone' | 'email';
+  // Track A4 — consume=false verifies WITHOUT deleting the row (full
+  // lockout checks still apply). Callers that must complete more work
+  // before burning the single-use code (register: username uniqueness,
+  // beta gate) verify first and delete the returned otpId themselves
+  // on success. Default true = historic single-use behaviour.
+  consume?: boolean;
+};
 
 // PR 3 (platform stabilization): 6 digits, up from 4. Code space
 // grows 10,000 → 1,000,000, which combined with the attempt caps
@@ -317,7 +330,7 @@ export class OtpService {
     }
 
     const otp = await this.prisma.otp.findFirst({
-      where: { target },
+      where: { target, ...(body.type ? { type: body.type } : {}) },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -379,17 +392,25 @@ export class OtpService {
       throw new BadRequestException('invalid_code');
     }
 
-    // Single-use: best-effort delete so the code can't be replayed.
-    await this.prisma.otp.delete({ where: { id: otp.id } }).catch(() => {});
-    this.logger.log(`[otp:verify-success] target=${target}`);
+    if (body.consume !== false) {
+      // Single-use: best-effort delete so the code can't be replayed.
+      await this.prisma.otp.delete({ where: { id: otp.id } }).catch(() => {});
+    }
+    this.logger.log(
+      `[otp:verify-success] target=${target}` +
+        (body.consume === false ? ' (unconsumed)' : ''),
+    );
 
-    return { ok: true };
+    // otpId lets consume:false callers delete the row themselves once
+    // their remaining work (uniqueness checks, beta gate) succeeds.
+    return { ok: true as const, otpId: otp.id };
   }
 
   private generateCode(): string {
+    // Track A4 (PE-05/T1-6): CSPRNG — Math.random is predictable enough
+    // to matter for a 6-digit security code; crypto.randomInt is not.
     const max = 10 ** CODE_LENGTH;
     const min = 10 ** (CODE_LENGTH - 1);
-    const n = Math.floor(min + Math.random() * (max - min));
-    return String(n);
+    return String(randomInt(min, max));
   }
 }
