@@ -60,3 +60,7 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 /generated/prisma
+
+# Production connection string quarantine (Track A3) — never committed,
+# never auto-loaded; exists only for rare explicit read-only checks.
+.env.prod.DANGER
