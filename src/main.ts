@@ -1,3 +1,6 @@
+// Sentry first — it patches Node internals; later imports escape it.
+import './instrument';
+import helmet from 'helmet';
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
@@ -61,6 +64,12 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   app.set('trust proxy', 1);
+
+  // Security headers (Track A8). Defaults are safe for a JSON-only
+  // API (no static assets, no HTML): CSP/CORP only bite on documents
+  // and cross-origin embeds, which this service never serves. CORS
+  // stays governed by the allow-list below, not helmet.
+  app.use(helmet());
 
   const envOrigins = (process.env.CORS_ORIGINS ?? '')
     .split(',')
