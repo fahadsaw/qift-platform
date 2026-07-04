@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 import { AppController } from './app.controller';
 import { DecimalToNumberInterceptor } from './common/decimal-to-number.interceptor';
 import { PrismaModule } from './prisma/prisma.module';
@@ -38,6 +39,9 @@ import { FinancialLedgerModule } from './financial/financial-ledger.module';
 
 @Module({
   imports: [
+    // Sentry (Track A8). A no-op unless SENTRY_DSN is set (see
+    // src/instrument.ts) — safe in dev, CI, and tests.
+    SentryModule.forRoot(),
     // Global DB client: one PrismaService (and one connection pool)
     // for the whole app. Imported once here; every feature module
     // resolves the same instance without providing it locally.
@@ -82,6 +86,11 @@ import { FinancialLedgerModule } from './financial/financial-ledger.module';
   // supplied globally by PrismaModule above.
   controllers: [AppController],
   providers: [
+    // Track A8: must be the FIRST registered filter. It extends Nest's
+    // BaseExceptionFilter — HttpExceptions keep their status codes and
+    // bodies exactly as before; only unexpected 5xx errors are ALSO
+    // reported to Sentry (when a DSN is configured).
+    { provide: APP_FILTER, useClass: SentryGlobalFilter },
     // FIN-3 wire-format guarantee: the financial-record columns are
     // exact NUMERIC (Prisma Decimal) in the DB, but the API keeps
     // returning plain JSON numbers. Registered here (not main.ts) so
