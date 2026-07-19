@@ -73,6 +73,10 @@ function makeService(hasOrgReview: boolean) {
     {} as unknown as StoresService,
     {} as unknown as AuditService,
     opsRoles as unknown as ConstructorParameters<typeof AdminService>[3],
+    {
+      findMissing: jest.fn(),
+      repairAll: jest.fn(),
+    } as unknown as ConstructorParameters<typeof AdminService>[4],
   );
   return { prisma, opsRoles, service };
 }

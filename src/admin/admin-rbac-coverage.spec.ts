@@ -77,6 +77,11 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
   { method: 'systemStatus', path: 'system', opsPermission: null },
   { method: 'search', path: 'search', opsPermission: 'diagnostics.read' },
   {
+    method: 'reconciliationReport',
+    path: 'finance/reconciliation',
+    opsPermission: 'finance.reconcile',
+  },
+  {
     method: 'financeStoreBalances',
     path: 'finance/stores',
     opsPermission: 'finance.read_payouts',
@@ -549,6 +554,15 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
     // review.
     const ADMIN_MUTATION_ROUTES: ReadonlyArray<AdminMutationRoute> = [
       {
+        // Track B2 / PE-11 — ledger repair is a mutation (append-only,
+        // idempotent) and rides POST, distinct from the read-only GET
+        // report per Financial Constitution Ch. 18.2.
+        method: 'reconciliationRepair',
+        path: 'finance/reconciliation/repair',
+        httpMethod: 'POST',
+        opsPermission: 'finance.reconcile',
+      },
+      {
         method: 'setUserRole',
         path: 'users/:id/role',
         httpMethod: 'PATCH',
@@ -744,6 +758,7 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             'user.assign_ops_role': [],
             'finance.read_payouts': ['finance'],
             'finance.record_payout_event': ['finance'],
+            'finance.reconcile': ['finance'],
             'finance.approve_payout': ['finance'],
             'diagnostics.read': [
               'operations_manager',

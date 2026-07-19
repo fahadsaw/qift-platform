@@ -355,6 +355,22 @@ export class AdminController {
   // any of the finance surfaces — the frontend hides the tab
   // entirely, but the server-side gate is authoritative.
 
+  // Ledger reconciliation (Track B2 / PE-11). Two distinct operations
+  // per Constitution Ch. 18.2: read-only diagnosis FIRST (GET), then
+  // the append-only idempotent repair (POST). finance.reconcile gates
+  // both; every invocation is audited.
+  @Get('finance/reconciliation')
+  @RequireOpsPermission('finance.reconcile')
+  reconciliationReport(@Req() req: AuthedRequest) {
+    return this.admin.reconciliationReport(req.user.userId);
+  }
+
+  @Post('finance/reconciliation/repair')
+  @RequireOpsPermission('finance.reconcile')
+  reconciliationRepair(@Req() req: AuthedRequest) {
+    return this.admin.reconciliationRepair(req.user.userId);
+  }
+
   @Get('finance/stores')
   @RequireOpsPermission('finance.read_payouts')
   financeStoreBalances() {
