@@ -23,6 +23,12 @@ export class OrdersController {
     return this.service.create(body, req.user.userId);
   }
 
+  // Buyer order history (Track A.5 PR 7). Owner-scoped via the JWT.
+  @Get()
+  list(@Req() req: AuthedRequest) {
+    return this.service.listForUser(req.user.userId);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string, @Req() req: AuthedRequest) {
     return this.service.findOne(id, req.user.userId);
