@@ -44,6 +44,8 @@ export type QiftLegSummary = {
   leg: 'qift_service';
   seller: 'qift';
   invoiceId: string;
+  // Qift's sequential legal invoice number (QC-YYYY-NNNNN).
+  invoiceNumber: string;
   status: string;
   issuedAt: Date | null;
   serviceFeeAmount: number;
@@ -118,6 +120,7 @@ export class BillingSummaryService {
           leg: 'qift_service',
           seller: 'qift',
           invoiceId: qift.id,
+          invoiceNumber: qift.invoiceNumber,
           status: qift.status,
           issuedAt: qift.issuedAt ?? null,
           serviceFeeAmount: moneyToNumber(qift.platformFeeAmount),

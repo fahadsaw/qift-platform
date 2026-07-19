@@ -34,6 +34,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { formatSequentialReference } from '../references/reference';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
@@ -142,44 +143,65 @@ export class InvoiceService {
     const now = new Date();
 
     try {
-      const invoice = await this.prisma.corporateInvoice.create({
-        data: {
-          orgId,
-          campaignId,
-          status: 'issued',
-          currency: 'SAR',
-          recipientCount,
-          unitAmount: amounts.unitAmount,
-          subtotalAmount: amounts.subtotalAmount,
-          platformFeeAmount: amounts.platformFeeAmount,
-          // Tax snapshot (Saudi VAT, agent model) — frozen for correctness.
-          taxableAmount: tax.taxableAmount,
-          vatRate: tax.vatRate,
-          vatAmount: tax.vatAmount,
-          totalBeforeVat: tax.totalBeforeVat,
-          pricesIncludeVat: tax.pricesIncludeVat,
-          taxTreatment: tax.taxTreatment,
-          taxSnapshot: tax.taxSnapshot,
-          // FIN-2 — frozen party identity (buyer = company, seller = Qift).
-          buyerSnapshot,
-          sellerSnapshot,
-          // Qift service-invoice total the company owes Qift (agent model):
-          // platform fee + VAT on the fee. The goods subtotal is NOT here.
-          totalAmount: tax.totalAmount,
-          // Accounting export not wired yet — explicit default.
-          accountingExportStatus: 'not_exported',
-          issuedAt: now,
-          // Non-PII line context only. facilitatedValue = the goods
-          // subtotal Qift facilitates on the merchant's behalf (merchant
-          // revenue, not Qift's) — recorded for the future merchant invoice
-          // + Campaign Billing Summary.
-          metadata: {
-            productName: snapshot.productName ?? null,
-            storeName: snapshot.storeName ?? null,
-            feePolicyVersion: FEE_POLICY_VERSION,
-            facilitatedValue: tax.facilitatedValue,
+      // QC number + invoice row in ONE transaction: the sequence
+      // increment rolls back with a failed create, so the legal series
+      // stays gap-free (Constitution §7.5 numbering discipline). Agent
+      // model: this is the ONLY invoice number Qift generates.
+      const invoice = await this.prisma.$transaction(async (tx) => {
+        const seriesYear = now.getUTCFullYear();
+        const seriesKey = `QC-${seriesYear}`;
+        const allocated = await tx.$queryRaw<{ lastValue: number }[]>`
+          INSERT INTO "NumberSequence" ("seriesKey", "lastValue", "updatedAt")
+          VALUES (${seriesKey}, 1, now())
+          ON CONFLICT ("seriesKey")
+          DO UPDATE SET "lastValue" = "NumberSequence"."lastValue" + 1,
+                        "updatedAt" = now()
+          RETURNING "lastValue"`;
+        const invoiceNumber = formatSequentialReference(
+          'QC',
+          seriesYear,
+          allocated[0].lastValue,
+        );
+        return tx.corporateInvoice.create({
+          data: {
+            invoiceNumber,
+            orgId,
+            campaignId,
+            status: 'issued',
+            currency: 'SAR',
+            recipientCount,
+            unitAmount: amounts.unitAmount,
+            subtotalAmount: amounts.subtotalAmount,
+            platformFeeAmount: amounts.platformFeeAmount,
+            // Tax snapshot (Saudi VAT, agent model) — frozen for correctness.
+            taxableAmount: tax.taxableAmount,
+            vatRate: tax.vatRate,
+            vatAmount: tax.vatAmount,
+            totalBeforeVat: tax.totalBeforeVat,
+            pricesIncludeVat: tax.pricesIncludeVat,
+            taxTreatment: tax.taxTreatment,
+            taxSnapshot: tax.taxSnapshot,
+            // FIN-2 — frozen party identity (buyer = company, seller = Qift).
+            buyerSnapshot,
+            sellerSnapshot,
+            // Qift service-invoice total the company owes Qift (agent model):
+            // platform fee + VAT on the fee. The goods subtotal is NOT here.
+            totalAmount: tax.totalAmount,
+            // Accounting export not wired yet — explicit default.
+            accountingExportStatus: 'not_exported',
+            issuedAt: now,
+            // Non-PII line context only. facilitatedValue = the goods
+            // subtotal Qift facilitates on the merchant's behalf
+            // (merchant revenue, not Qift's) — recorded for the future
+            // merchant invoice + Campaign Billing Summary.
+            metadata: {
+              productName: snapshot.productName ?? null,
+              storeName: snapshot.storeName ?? null,
+              feePolicyVersion: FEE_POLICY_VERSION,
+              facilitatedValue: tax.facilitatedValue,
+            },
           },
-        },
+        });
       });
 
       await this.recordReceivableLedger(invoice, actorUserId);

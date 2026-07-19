@@ -63,7 +63,14 @@ function build(
     campaignGiftOption,
     campaignRecipient,
     organization,
+    // QC numbering (Track A.5): the sequence allocation runs inside
+    // the same transaction as the create; the tx client IS this mock.
+    $queryRaw: jest.fn().mockResolvedValue([{ lastValue: 1 }]),
+    $transaction: jest.fn(),
   };
+  prisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
+    fn(prisma),
+  );
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'ledger-1' }) };
   const service = new InvoiceService(
@@ -331,5 +338,55 @@ describe('InvoiceService.ensureInvoiceForCampaign', () => {
     await expect(
       service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR),
     ).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+describe('QC invoice numbering (Track A.5 PR 4 — agent model)', () => {
+  const ACTOR2 = 'ops-1';
+
+  it('numbers the invoice from the transactional sequence: QC-<year>-NNNNN', async () => {
+    const { service, prisma } = build();
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR2);
+    const data = prisma.corporateInvoice.create.mock.calls[0][0].data as Record<
+      string,
+      unknown
+    >;
+    const year = new Date().getUTCFullYear();
+    expect(data.invoiceNumber).toBe(`QC-${year}-00001`);
+    // Allocation + create share ONE transaction (gap-free series).
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    const sql = (prisma.$queryRaw as jest.Mock).mock.calls[0]
+      .map(String)
+      .join(' ');
+    expect(sql).toContain('NumberSequence');
+  });
+
+  it('continues the series from the sequence value (zero-padded)', async () => {
+    const { service, prisma } = build();
+    (prisma.$queryRaw as jest.Mock).mockResolvedValue([{ lastValue: 123 }]);
+    await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR2);
+    const data = prisma.corporateInvoice.create.mock.calls[0][0].data as Record<
+      string,
+      unknown
+    >;
+    const year = new Date().getUTCFullYear();
+    expect(data.invoiceNumber).toBe(`QC-${year}-00123`);
+  });
+
+  it('duplicate-campaign race returns the EXISTING numbered row (allocation rolls back with the tx)', async () => {
+    const { service, prisma } = build();
+    const raced = { id: 'inv-raced', invoiceNumber: 'QC-2026-00007' };
+    const { Prisma: RealPrisma } = jest.requireActual('@prisma/client');
+    prisma.corporateInvoice.create.mockRejectedValueOnce(
+      new RealPrisma.PrismaClientKnownRequestError('dup', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
+    prisma.corporateInvoice.findUnique
+      .mockResolvedValueOnce(null) // idempotent fast-path: nothing yet
+      .mockResolvedValueOnce(raced); // post-race read
+    const out = await service.ensureInvoiceForCampaign(ORG, CAMPAIGN, ACTOR2);
+    expect(out).toEqual(raced);
   });
 });
