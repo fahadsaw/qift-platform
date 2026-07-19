@@ -8,6 +8,7 @@ import { OpsRolesModule } from '../ops-roles/ops-roles.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AuditModule } from '../audit/audit.module';
 import { FinancialLedgerModule } from '../financial/financial-ledger.module';
+import { VatFactsService } from './vat-facts.service';
 
 // AdminModule. Pulls StoresModule for the v2 review endpoints
 // (storeDetail / reviewStore reuse the same canonical projection
@@ -35,6 +36,6 @@ import { FinancialLedgerModule } from '../financial/financial-ledger.module';
     FinancialLedgerModule,
   ],
   controllers: [AdminController, AdminWorkersController],
-  providers: [AdminService, AdminGuard],
+  providers: [VatFactsService, AdminService, AdminGuard],
 })
 export class AdminModule {}

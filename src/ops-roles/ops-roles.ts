@@ -111,6 +111,11 @@ export const OPS_PERMISSIONS = [
   // Constitutionally required surface (Financial Constitution Ch. 5.6);
   // mismatches carry P0 semantics (Core Invariants #59).
   'finance.reconcile',
+  // VAT-facts maker-checker (Track B3 / PE-12): propose/approve/
+  // reject merchant VAT facts. Narrower than the Stage-10
+  // finance.write_financial_config (reserved for finance_admin). SoD (maker != checker) is
+  // enforced in the service ABOVE this permission.
+  'finance.vat_facts',
   // Diagnostics / debug.
   'diagnostics.read',
   'diagnostics.run_seed',
@@ -164,6 +169,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'finance.record_payout_event',
     'finance.approve_payout',
     'finance.reconcile',
+    'finance.vat_facts',
     'store.read_detail',
     'analytics.read',
   ],
@@ -237,6 +243,7 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'finance.record_payout_event',
   'finance.approve_payout',
   'finance.reconcile',
+  'finance.vat_facts',
   'diagnostics.read',
   'diagnostics.run_seed',
   'report.read',

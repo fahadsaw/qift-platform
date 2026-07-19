@@ -2717,3 +2717,30 @@ model NumberSequence {
   lastValue Int      @default(0)
   updatedAt DateTime @updatedAt
 }
+
+// VAT-facts change proposal (Track B3 / PE-12) — the maker-checker
+// vehicle mandated by Financial Constitution Ch. 14.1/14.2: no single
+// person silently changes a tax fact. A proposal freezes the intended
+// facts + the verification-evidence reference; a DIFFERENT operator
+// approves, which applies the facts to the Store for FUTURE issuances
+// only (issued documents are immutable and never recompute). storeId
+// is plain TEXT (no FK) so the decision trail survives store purges.
+model StoreVatFactsProposal {
+  id               String    @id @default(cuid())
+  storeId          String
+  vatRegistered    Boolean
+  vatNumber        String?
+  pricesIncludeVat Boolean
+  taxCountry       String    @default("SA")
+  // Written verification evidence (ops manual §5.4 "in writing"):
+  // e.g. VAT-certificate number / document pointer. Never personal PII.
+  evidenceNote     String
+  status           String    @default("pending") // pending | approved | rejected
+  proposedBy       String
+  decidedBy        String?
+  decidedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([storeId, status])
+}

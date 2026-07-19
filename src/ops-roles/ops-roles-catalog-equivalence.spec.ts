@@ -119,7 +119,7 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       expect(OPS_ROLES.length).toBe(8);
     });
 
-    it('OPS_PERMISSIONS contains exactly 23 documented permission identifiers', () => {
+    it('OPS_PERMISSIONS contains exactly 24 documented permission identifiers', () => {
       // Same freeze-point reasoning as above. Adding a new
       // OpsPermission requires updating both ops-roles.ts
       // (PERMISSIONS_BY_ROLE + SUPER_ADMIN_ALL) and role-map.ts
@@ -141,7 +141,10 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       //   23 — `finance.reconcile` added with the ledger
       //        reconciliation surface (Track B2 / PE-11). Granted to
       //        super_admin + finance.
-      expect(OPS_PERMISSIONS.length).toBe(23);
+      //   24 — `finance.vat_facts` added with the
+      //        VAT-facts maker-checker (Track B3 / PE-12). Granted to
+      //        super_admin + finance; SoD enforced in-service.
+      expect(OPS_PERMISSIONS.length).toBe(24);
     });
   });
 });

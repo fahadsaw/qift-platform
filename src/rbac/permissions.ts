@@ -104,6 +104,10 @@ export const FINANCE_PERMISSIONS = [
   'finance.approve_payout',
   // Ledger reconciliation (Track B2 / PE-11) — findMissing + repair.
   'finance.reconcile',
+  // VAT-facts maker-checker (Track B3 / PE-12). Deliberately NARROWER
+  // than finance.write_financial_config (reserved for the Stage 10
+  // finance_admin): this grants exactly the merchant-VAT-facts flow.
+  'finance.vat_facts',
   'finance.reject_payout',
   'finance.read_payout_overview',
 
