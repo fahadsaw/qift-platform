@@ -75,9 +75,15 @@ describe('FulfillmentExportService', () => {
       },
       claimableGift: {
         findMany: jest.fn().mockResolvedValue([
-          { id: 'claim-1', recipientName: 'Sara O.', claimedAt: claimedAt1 },
+          {
+            id: 'claim-1',
+            giftReference: 'QG-AAAA-2222',
+            recipientName: 'Sara O.',
+            claimedAt: claimedAt1,
+          },
           {
             id: 'claim-2',
+            giftReference: 'QG-BBBB-3333',
             recipientName: 'Mohammed A.',
             claimedAt: claimedAt2,
           },
@@ -111,6 +117,7 @@ describe('FulfillmentExportService', () => {
     expect(out.count).toBe(2);
     expect(out.rows).toEqual([
       {
+        giftReference: 'QG-AAAA-2222',
         recipientName: 'سارة العتيبي', // self-entered name wins
         phone: '+966501234567',
         country: 'SA',
@@ -122,6 +129,7 @@ describe('FulfillmentExportService', () => {
         claimedAt: claimedAt1,
       },
       {
+        giftReference: 'QG-BBBB-3333',
         recipientName: 'Mohammed A.', // roster fallback when fullName null
         phone: '+966559876543',
         country: 'SA',
@@ -246,5 +254,95 @@ describe('FulfillmentExportService', () => {
     expect(out.campaign.productName).toBeNull();
     expect(out.campaign.storeName).toBeNull();
     expect(out.count).toBe(2);
+  });
+});
+
+describe('lookupClaimByReference (Track A.5 PR 3 — support lookup)', () => {
+  // Narrow harness. STRUCTURAL read-only guarantee: the claimableGift
+  // mock has NO create/update/upsert and there is NO mint service —
+  // if the lookup ever tried to rotate anything, these tests crash.
+  const CLAIM = {
+    giftReference: 'QG-AAAA-2222',
+    status: 'claimed',
+    recipientName: 'سارة العتيبي',
+    channel: 'phone',
+    claimedAt: new Date('2026-07-01T10:00:00Z'),
+    declinedAt: null,
+    expiresAt: new Date('2026-07-10T10:00:00Z'),
+    campaign: {
+      id: 'camp-1',
+      referenceNumber: 'QB-TEST-2026',
+      name: 'Eid 2026',
+      orgId: 'org-1',
+    },
+  };
+
+  const mk = () => {
+    const prisma = {
+      claimableGift: { findUnique: jest.fn().mockResolvedValue(CLAIM) },
+    };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const service = new FulfillmentExportService(
+      prisma as unknown as PrismaService,
+      audit as unknown as AuditService,
+    );
+    return { prisma, audit, service };
+  };
+
+  it('resolves a normalized reference to claim state + campaign context', async () => {
+    const { prisma, service } = mk();
+    // lower-case, dash-less input still resolves (search contract).
+    const out = await service.lookupClaimByReference('ops-1', 'qg aaaa 2222');
+    expect(prisma.claimableGift.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { giftReference: 'QG-AAAA-2222' } }),
+    );
+    expect(out).toMatchObject({
+      giftReference: 'QG-AAAA-2222',
+      status: 'claimed',
+      recipientName: 'سارة العتيبي',
+      campaign: {
+        campaignId: 'camp-1',
+        campaignReference: 'QB-TEST-2026',
+        campaignName: 'Eid 2026',
+        orgId: 'org-1',
+      },
+    });
+    // No address, no channel VALUE, no token material in the payload.
+    const serialized = JSON.stringify(out);
+    for (const banned of ['line1', 'phone:', 'tokenHash', 'channelValue']) {
+      expect(serialized).not.toContain(banned);
+    }
+  });
+
+  it('rejects non-QG input before touching the database', async () => {
+    const { prisma, service } = mk();
+    for (const bad of ['QB-AAAA-2222', 'hello', 'clzy8p2qk0000356m']) {
+      await expect(
+        service.lookupClaimByReference('ops-1', bad),
+      ).rejects.toThrow('invalid_gift_reference');
+    }
+    expect(prisma.claimableGift.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('404s an unknown reference; audit only fires on success', async () => {
+    const { prisma, audit, service } = mk();
+    prisma.claimableGift.findUnique.mockResolvedValue(null);
+    await expect(
+      service.lookupClaimByReference('ops-1', 'QG-ZZZZ-9999'),
+    ).rejects.toThrow('claim_not_found');
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('audits reference + campaign only — never the recipient name', async () => {
+    const { audit, service } = mk();
+    await service.lookupClaimByReference('ops-1', 'QG-AAAA-2222');
+    const call = audit.record.mock.calls[0][0];
+    expect(call).toMatchObject({
+      action: 'org.claim.lookup',
+      targetType: 'organization',
+      targetId: 'org-1',
+      metadata: { giftReference: 'QG-AAAA-2222', campaignId: 'camp-1' },
+    });
+    expect(JSON.stringify(call)).not.toContain('سارة');
   });
 });

@@ -45,6 +45,20 @@ export class OrgAdminController {
 
   // Review queue. ?status=submitted is the default operator view;
   // unknown status values fall back to the unfiltered list.
+  // Support lookup by QG reference (Track A.5 PR 3): resolves what a
+  // recipient or merchant quoted, WITHOUT rotating anything. Declared
+  // before the :orgId routes so the literal segment wins the match.
+  @Get('claims/by-reference/:reference')
+  lookupClaim(
+    @Param('reference') reference: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.fulfillmentExport.lookupClaimByReference(
+      req.user.userId,
+      reference,
+    );
+  }
+
   @Get()
   list(@Query('status') status?: string) {
     return this.orgs.listOrgsForReview(status);
