@@ -38,8 +38,9 @@ describe('reference immutability tripwire (source pins)', () => {
   it('fulfillmentNumber: allocation in gifts.service.ts; store only READS it', () => {
     // 3 = probe where-clause + allocation const + create data key.
     expect(count('gifts/gifts.service.ts', 'fulfillmentNumber')).toBe(3);
-    // 8 = type field (1) + row map key/value (2) + five
-    // notification-body reads (5). ALL reads — no update touches it.
-    expect(count('store/store.service.ts', 'fulfillmentNumber')).toBe(8);
+    // 9 = type field (1) + row map key/value (2) + five
+    // notification-body reads (5) + the ?q= exact-match FILTER (1,
+    // PR 8). ALL reads — no update touches it.
+    expect(count('store/store.service.ts', 'fulfillmentNumber')).toBe(9);
   });
 });

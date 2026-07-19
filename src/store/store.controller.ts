@@ -6,6 +6,7 @@ import {
   Post,
   Req,
   UseGuards,
+  Query,
 } from '@nestjs/common';
 import { StoreService } from './store.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
@@ -36,9 +37,17 @@ type ShipmentEventBody = {
 export class StoreController {
   constructor(private service: StoreService) {}
 
+  // Track A.5 PR 8: ?q= searches by QF reference (case/dash-blind),
+  // receiver name/username, product name, or carrier tracking number;
+  // ?scope=history returns the PII-minimized completed-order view
+  // (delivered + cancelled, no address fields).
   @Get('orders')
-  listOrders(@Req() req: AuthedRequest) {
-    return this.service.listOrders(req.user.userId);
+  listOrders(
+    @Req() req: AuthedRequest,
+    @Query('q') q?: string,
+    @Query('scope') scope?: string,
+  ) {
+    return this.service.listOrders(req.user.userId, { q, scope });
   }
 
   // address_confirmed | default_address_used → preparing

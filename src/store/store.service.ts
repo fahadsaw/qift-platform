@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { normalizeReference } from '../references/reference';
 import {
   NotificationsService,
   NotificationType,
@@ -119,8 +120,8 @@ function toSafeStoreMutationResult(g: {
 //
 // `delivered` is excluded because it's the terminal happy state —
 // the merchant's work is done, and keeping the row in the live feed
-// would just clutter the queue. Historical view of delivered gifts
-// is a separate (future) endpoint.
+// would just clutter the queue. The historical view exists since
+// Track A.5 PR 8: GET /store/orders?scope=history (PII-minimized).
 const DASHBOARD_STATUSES: GiftStatus[] = [
   'pending_address',
   'address_confirmed',
@@ -172,14 +173,63 @@ export class StoreService {
   //   - otherwise → only orders whose `storeId` belongs to the viewer
   // Cross-store leakage is prevented by the storeId filter; if the
   // viewer owns no stores the list is empty.
-  async listOrders(viewerUserId: string): Promise<StoreOrderRow[]> {
+  async listOrders(
+    viewerUserId: string,
+    opts: { q?: string; scope?: string } = {},
+  ): Promise<StoreOrderRow[]> {
     const storeIds = await this.scopedStoreIds(viewerUserId);
+
+    // Track A.5 PR 8. scope=history is the completed-order view the
+    // dashboard never had (delivered was excluded from the live feed
+    // by design). History rows are PII-MINIMIZED: once the work is
+    // done the merchant no longer needs the address — see the map
+    // below, which nulls every address field for history rows.
+    const history = opts.scope === 'history';
+    const statuses: GiftStatus[] = history
+      ? ['delivered', 'cancelled']
+      : DASHBOARD_STATUSES;
+
+    // Search: a canonical QF reference resolves exactly; anything else
+    // matches receiver name/username, product name, or the carrier
+    // tracking number. Reference input is case/dash-blind.
+    const q = opts.q?.trim();
+    const qfRef = q ? normalizeReference(q) : null;
+    const searchWhere = !q
+      ? {}
+      : qfRef?.startsWith('QF-')
+        ? { fulfillmentNumber: qfRef }
+        : {
+            OR: [
+              {
+                receiver: {
+                  is: {
+                    OR: [
+                      {
+                        fullName: { contains: q, mode: 'insensitive' as const },
+                      },
+                      {
+                        qiftUsername: {
+                          contains: q,
+                          mode: 'insensitive' as const,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+              { productName: { contains: q, mode: 'insensitive' as const } },
+              { trackingNumber: { equals: q } },
+            ],
+          };
+
     const gifts = await this.prisma.gift.findMany({
       where: {
-        status: { in: DASHBOARD_STATUSES },
+        status: { in: statuses },
         ...(storeIds === null ? {} : { storeId: { in: storeIds } }),
+        ...searchWhere,
       },
       orderBy: { createdAt: 'desc' },
+      take: history ? 100 : undefined,
       include: {
         receiver: { select: { fullName: true, qiftUsername: true } },
         address: true,
@@ -198,15 +248,18 @@ export class StoreService {
       // Privacy: messageText / mediaUrl / mediaType are intentionally
       // omitted. The store doesn't need them to ship the package, and
       // the spec forbids us from leaking buyer-to-receiver content.
-      address: g.address ? formatAddress(g.address) : '—',
-      deliveryPhone: g.address?.deliveryPhone ?? null,
+      // HISTORY rows additionally null EVERY address field + phone —
+      // the work is done; the merchant keeps the reference, not the
+      // recipient's address (Track A.5 PR 8).
+      address: !history && g.address ? formatAddress(g.address) : '—',
+      deliveryPhone: history ? null : (g.address?.deliveryPhone ?? null),
       // Raw address fields. Null when the gift has no linked address row
       // (legacy data before the addressId FK existed).
-      region: g.address?.region ?? null,
-      city: g.address?.city ?? null,
-      district: g.address?.district ?? null,
-      street: g.address?.street ?? null,
-      buildingNumber: g.address?.buildingNumber ?? null,
+      region: history ? null : (g.address?.region ?? null),
+      city: history ? null : (g.address?.city ?? null),
+      district: history ? null : (g.address?.district ?? null),
+      street: history ? null : (g.address?.street ?? null),
+      buildingNumber: history ? null : (g.address?.buildingNumber ?? null),
       status: g.status as GiftStatus,
       trackingNumber: g.trackingNumber,
       carrier: g.carrier,
