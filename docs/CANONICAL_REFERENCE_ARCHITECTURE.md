@@ -1,8 +1,12 @@
 # Canonical Reference Architecture
 
 **Track A.5 — Canonical References & Order Tracking.**
-Status: living document; sections marked *(shipped)* are merged, others
-land with their PR. Governs every human-readable identifier Qift issues.
+Status: **COMPLETE — all nine PRs merged (2026-07-19)**: backend
+qift-platform #67 (generator) #68 (QB) #69 (QG + support lookup)
+#70 (QC) #71 (merchant invoice architecture) #72 (QP/QF) #73 (buyer
+history) #74 (merchant search/history) #75 (cross-reference search +
+dispute anchors); frontend qift-ui-v2 #46-#50. Governs every
+human-readable identifier Qift issues.
 Where this document and `QIFT_FINANCIAL_PLATFORM_BLUEPRINT_v1.0.md`
 (the frozen Financial Constitution) touch, the Constitution wins; this
 document implements it and records the mapping.
@@ -16,7 +20,7 @@ quotable; invoices had no numbers; merchants could not retrieve a
 delivered order. This architecture closes that with **one grammar, one
 generator, one normalizer** (`src/references/reference.ts`).
 
-## 2. The prefix registry *(shipped, PR 1)*
+## 2. The prefix registry
 
 | Prefix | Object | Kind | Format | Issued when |
 |---|---|---|---|---|
@@ -158,9 +162,21 @@ Order **11**, Gift **19**.
   are additive to every response shape).
 - Each schema PR re-verifies prod counts read-only before merge.
 
-## 9. Search contract
+## 9. Search contract (as shipped)
 
 All search inputs pass through `normalizeReference` first; a canonical
 hit routes to the object's authorized lookup; a non-reference falls
-through to the surface's existing text search. Endpoints added per PR
-(merchant `?q=`, ops cross-reference search, buyer order list).
+through to the surface's existing text search.
+
+| Surface | Endpoint | Accepts | Authorization |
+|---|---|---|---|
+| Buyer history | `GET /orders` | — (owner list) | JWT owner |
+| Merchant queue/history | `GET /store/orders?q=&scope=` | QF, receiver, product, tracking # | StoreGuard scoping |
+| Ops cross-reference | `GET /admin/search?q=` | QP/QF (diagnostics.read); QB/QG/QC (org.review, else `restricted:true`) | AdminGuard + ops RBAC |
+| Ops claim lookup | `GET /admin/orgs/claims/by-reference/:ref` | QG (non-rotating, read-only) | org.review |
+| Merchant invoice attach | `PATCH /admin/orgs/merchant-invoices/:id/legal-reference` | supplied refs only | org.review |
+
+Immutability is enforced by unit pins on every corporate update path
+plus the source tripwire `src/references/reference-immutability.spec.ts`
+for the personal flow. History (merchant `scope=history`) is
+PII-minimized: no address fields, no phone.
