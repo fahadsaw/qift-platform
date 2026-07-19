@@ -30,6 +30,7 @@ type PrismaMock = {
   giftCampaign: {
     create: jest.Mock;
     findFirst: jest.Mock;
+    findUnique: jest.Mock;
     findMany: jest.Mock;
     update: jest.Mock;
   };
@@ -86,6 +87,8 @@ describe('CampaignService', () => {
         create: jest
           .fn()
           .mockImplementation(({ data }) => Promise.resolve(campaignRow(data))),
+        // Reference-allocation uniqueness probe: nothing taken.
+        findUnique: jest.fn().mockResolvedValue(null),
         findFirst: jest.fn().mockResolvedValue(campaignRow()),
         findMany: jest.fn().mockResolvedValue([]),
         update: jest
@@ -156,6 +159,10 @@ describe('CampaignService', () => {
             orgId: 'org-1',
             name: 'Eid 2026',
             createdBy: 'maker-1',
+            // Canonical QB reference allocated exactly at creation.
+            referenceNumber: expect.stringMatching(
+              /^QB-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/,
+            ),
           }),
         }),
       );
@@ -468,5 +475,86 @@ describe('CampaignService', () => {
         'campaign_not_found',
       );
     });
+  });
+});
+
+describe('QB reference discipline (Track A.5)', () => {
+  // Rebuild the same harness shape the main suite uses, narrowly.
+  const mkService = () => {
+    const prisma = {
+      organization: {
+        findUnique: jest.fn().mockResolvedValue({ status: 'approved' }),
+      },
+      giftCampaign: {
+        create: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: jest.fn(),
+        findMany: jest.fn(),
+        update: jest
+          .fn()
+          .mockImplementation(({ data }) =>
+            Promise.resolve({ id: 'camp-1', ...data }),
+          ),
+      },
+      campaignGiftOption: {
+        deleteMany: jest.fn(),
+        create: jest.fn(),
+        count: jest.fn(),
+        findFirst: jest.fn(),
+      },
+      campaignRecipient: {
+        deleteMany: jest.fn(),
+        createMany: jest.fn(),
+        count: jest.fn(),
+      },
+      corporateContact: { findMany: jest.fn() },
+      product: { findFirst: jest.fn() },
+    };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const invoices = { ensureForCampaign: jest.fn() };
+    const merchantInvoices = { ensureForCampaign: jest.fn() };
+    const service = new CampaignService(
+      prisma as unknown as PrismaService,
+      audit as unknown as AuditService,
+      invoices as unknown as InvoiceService,
+      merchantInvoices as unknown as MerchantInvoiceService,
+    );
+    return { prisma, service };
+  };
+
+  it('retries allocation when the create races into P2002, then succeeds', async () => {
+    const { prisma, service } = mkService();
+    const p2002 = Object.assign(new Error('unique'), { code: 'P2002' });
+    prisma.giftCampaign.create
+      .mockRejectedValueOnce(p2002)
+      .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: 'camp-1', ...data }),
+      );
+    const campaign = await service.createCampaign('u1', 'org-1', {
+      name: 'Eid 2026',
+    });
+    expect(prisma.giftCampaign.create).toHaveBeenCalledTimes(2);
+    const first = prisma.giftCampaign.create.mock.calls[0][0].data
+      .referenceNumber as string;
+    const second = prisma.giftCampaign.create.mock.calls[1][0].data
+      .referenceNumber as string;
+    expect(first).not.toBe(second); // a fresh reference per attempt
+    expect(campaign).toBeTruthy();
+  });
+
+  it('IMMUTABILITY: updateCampaign can never write referenceNumber', async () => {
+    const { prisma, service } = mkService();
+    prisma.giftCampaign.findFirst.mockResolvedValue({
+      id: 'camp-1',
+      status: 'draft',
+    });
+    await service.updateCampaign('u1', 'org-1', 'camp-1', {
+      name: 'Renamed Campaign',
+      occasion: 'Eid',
+      message: 'hello',
+    });
+    const data = prisma.giftCampaign.update.mock.calls[0][0].data;
+    expect(Object.keys(data)).toEqual(['name', 'occasion', 'message']);
+    expect(data).not.toHaveProperty('referenceNumber');
   });
 });

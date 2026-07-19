@@ -32,6 +32,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { allocateReference } from '../references/reference';
 import { InvoiceService } from './invoice.service';
 import { MerchantInvoiceService } from './merchant-invoice.service';
 
@@ -55,6 +56,7 @@ export const MAX_CAMPAIGN_RECIPIENTS = 1000;
 
 const CAMPAIGN_SELECT = {
   id: true,
+  referenceNumber: true,
   name: true,
   occasion: true,
   message: true,
@@ -121,16 +123,41 @@ export class CampaignService {
     if (org.status !== 'approved') {
       throw new BadRequestException('org_not_approved');
     }
-    const campaign = await this.prisma.giftCampaign.create({
-      data: {
-        orgId,
-        name,
-        occasion: body.occasion?.trim() || null,
-        message: body.message?.trim() || null,
-        createdBy: actorUserId,
-      },
-      select: CAMPAIGN_SELECT,
-    });
+    // Canonical QB reference: allocated once, here, and never again.
+    // The unique index is the real guarantee; a same-instant race
+    // surfaces as P2002 and burns one bounded retry.
+    const createWithReference = async () => {
+      for (let attempt = 0; ; attempt++) {
+        const referenceNumber = await allocateReference(
+          'QB',
+          async (candidate) =>
+            Boolean(
+              await this.prisma.giftCampaign.findUnique({
+                where: { referenceNumber: candidate },
+                select: { id: true },
+              }),
+            ),
+        );
+        try {
+          return await this.prisma.giftCampaign.create({
+            data: {
+              orgId,
+              referenceNumber,
+              name,
+              occasion: body.occasion?.trim() || null,
+              message: body.message?.trim() || null,
+              createdBy: actorUserId,
+            },
+            select: CAMPAIGN_SELECT,
+          });
+        } catch (e) {
+          const code = (e as { code?: string })?.code;
+          if (code === 'P2002' && attempt < 2) continue;
+          throw e;
+        }
+      }
+    };
+    const campaign = await createWithReference();
     await this.audit.record({
       actorUserId,
       actorType: 'user',
