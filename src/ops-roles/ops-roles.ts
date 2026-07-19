@@ -106,6 +106,11 @@ export const OPS_PERMISSIONS = [
   'finance.read_payouts',
   'finance.record_payout_event',
   'finance.approve_payout',
+  // Ledger reconciliation (Track B2 / PE-11): read the document<->ledger
+  // missing report and invoke the append-only idempotent repair.
+  // Constitutionally required surface (Financial Constitution Ch. 5.6);
+  // mismatches carry P0 semantics (Core Invariants #59).
+  'finance.reconcile',
   // Diagnostics / debug.
   'diagnostics.read',
   'diagnostics.run_seed',
@@ -158,6 +163,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'finance.read_payouts',
     'finance.record_payout_event',
     'finance.approve_payout',
+    'finance.reconcile',
     'store.read_detail',
     'analytics.read',
   ],
@@ -230,6 +236,7 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'finance.read_payouts',
   'finance.record_payout_event',
   'finance.approve_payout',
+  'finance.reconcile',
   'diagnostics.read',
   'diagnostics.run_seed',
   'report.read',

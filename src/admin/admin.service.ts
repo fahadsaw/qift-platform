@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { normalizeReference } from '../references/reference';
 import { OpsRolesService } from '../ops-roles/ops-roles.service';
+import { LedgerReconciliationService } from '../financial/ledger-reconciliation.service';
 import { AuditService } from '../audit/audit.service';
 import { StoresService } from '../stores/stores.service';
 
@@ -59,6 +60,8 @@ export class AdminService {
     // corporate references (QB/QG/QC) resolve only for org.review
     // holders even though the endpoint itself is diagnostics.read.
     private opsRoles: OpsRolesService,
+    // Track B2 / PE-11 — reconciliation surface (Constitution Ch. 5.6).
+    private reconciliation: LedgerReconciliationService,
   ) {}
 
   // --- Audit log (PR 11 — read-only viewer) -----------------------
@@ -1053,6 +1056,118 @@ export class AdminService {
     }
 
     return [];
+  }
+
+  // --- Ledger reconciliation (Track B2 / PE-11) ---------------------
+  // Constitution Ch. 5.6: document<->ledger findMissing + idempotent
+  // repair are constitutionally REQUIRED surfaces; Ch. 18.2: diagnose
+  // read-only FIRST, then repair — two distinct operations, never one
+  // "reconcile" button. Reference Constitution Ch. 13.8/14.1: a new
+  // surface identifies every object by canonical reference alongside
+  // its cuid — bare-cuid listings are forbidden.
+
+  async reconciliationReport(actorUserId: string) {
+    const missing = await this.reconciliation.findMissing();
+    const [corporateInvoices, merchantInvoices, orders] = await Promise.all([
+      missing.corporateInvoiceIds.length
+        ? this.prisma.corporateInvoice.findMany({
+            where: { id: { in: missing.corporateInvoiceIds } },
+            select: { id: true, invoiceNumber: true, campaignId: true },
+          })
+        : [],
+      missing.merchantInvoiceIds.length
+        ? this.prisma.merchantInvoice.findMany({
+            where: { id: { in: missing.merchantInvoiceIds } },
+            select: {
+              id: true,
+              merchantInvoiceNumber: true,
+              invoiceNumberSource: true,
+              campaignId: true,
+              storeId: true,
+            },
+          })
+        : [],
+      missing.orderIds.length
+        ? this.prisma.order.findMany({
+            where: { id: { in: missing.orderIds } },
+            select: { id: true, orderNumber: true },
+          })
+        : [],
+    ]);
+    // QB references for the campaigns the invoices belong to.
+    const campaignIds = Array.from(
+      new Set(
+        [...corporateInvoices, ...merchantInvoices].map((i) => i.campaignId),
+      ),
+    );
+    const campaigns = campaignIds.length
+      ? await this.prisma.giftCampaign.findMany({
+          where: { id: { in: campaignIds } },
+          select: { id: true, referenceNumber: true },
+        })
+      : [];
+    const qbById = new Map(campaigns.map((c) => [c.id, c.referenceNumber]));
+
+    const report = {
+      // Mismatches carry P0 severity semantics (Core Invariants #59) —
+      // healthy means every list is empty.
+      healthy:
+        corporateInvoices.length + merchantInvoices.length + orders.length ===
+        0,
+      corporateInvoices: corporateInvoices.map((i) => ({
+        id: i.id,
+        invoiceNumber: i.invoiceNumber,
+        campaignId: i.campaignId,
+        campaignReference: qbById.get(i.campaignId) ?? null,
+      })),
+      merchantInvoices: merchantInvoices.map((i) => ({
+        id: i.id,
+        merchantInvoiceNumber: i.merchantInvoiceNumber,
+        invoiceNumberSource: i.invoiceNumberSource,
+        campaignId: i.campaignId,
+        campaignReference: qbById.get(i.campaignId) ?? null,
+        storeId: i.storeId,
+      })),
+      orders: orders.map((o) => ({ id: o.id, orderNumber: o.orderNumber })),
+    };
+
+    // Read audited counts-only: the missing report is what the SLO
+    // board reads; who looked (and how bad it was) is worth a row.
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'admin.finance.reconciliation_read',
+      targetType: 'system',
+      targetId: 'ledger',
+      metadata: {
+        corporateInvoices: report.corporateInvoices.length,
+        merchantInvoices: report.merchantInvoices.length,
+        orders: report.orders.length,
+      },
+    });
+    return report;
+  }
+
+  async reconciliationRepair(actorUserId: string) {
+    // Append-only by construction: repairAll re-emits the existing
+    // taxonomy events through the single ledger write path with the
+    // original deterministic keys — running it twice, or concurrently,
+    // cannot double-post (Constitution Principles 6/7; Rule 13.7).
+    const result = await this.reconciliation.repairAll();
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'admin.finance.reconciliation_repair',
+      targetType: 'system',
+      targetId: 'ledger',
+      metadata: {
+        corporateInvoiceIds: result.missing.corporateInvoiceIds,
+        merchantInvoiceIds: result.missing.merchantInvoiceIds,
+        orderIds: result.missing.orderIds,
+        posted: result.posted,
+      },
+    });
+    return result;
   }
 
   // --- Finance operations -------------------------------------------

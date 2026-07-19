@@ -102,6 +102,8 @@ export const FINANCE_PERMISSIONS = [
   'finance.read_payouts',
   'finance.record_payout_event',
   'finance.approve_payout',
+  // Ledger reconciliation (Track B2 / PE-11) — findMissing + repair.
+  'finance.reconcile',
   'finance.reject_payout',
   'finance.read_payout_overview',
 

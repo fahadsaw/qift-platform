@@ -19,6 +19,10 @@ function makeService() {
     {
       userHasPermission: jest.fn().mockResolvedValue(false),
     } as unknown as ConstructorParameters<typeof AdminService>[3],
+    {
+      findMissing: jest.fn(),
+      repairAll: jest.fn(),
+    } as unknown as ConstructorParameters<typeof AdminService>[4],
   );
   return { service, findMany };
 }
