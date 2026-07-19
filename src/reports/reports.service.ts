@@ -22,6 +22,9 @@ export type ReportInput = {
   reportedUserId?: string;
   reason?: string;
   details?: string;
+  // Optional dispute anchor (Track A.5 PR 9): the gift this report is
+  // about. Only a PARTY to the gift (sender/receiver) may anchor it.
+  giftId?: string;
 };
 
 @Injectable()
@@ -65,9 +68,25 @@ export class ReportsService {
       throw new NotFoundException('user_not_found');
     }
 
+    // Dispute anchor (Track A.5 PR 9): a report may reference the gift
+    // it is about, but ONLY when the reporter is a party to that gift
+    // (sender or receiver) — no anchoring other people's gifts.
+    const giftId = body.giftId?.trim() || null;
+    if (giftId) {
+      const gift = await this.prisma.gift.findUnique({
+        where: { id: giftId },
+        select: { senderId: true, receiverId: true },
+      });
+      if (!gift) throw new NotFoundException('gift_not_found');
+      if (gift.senderId !== reporterId && gift.receiverId !== reporterId) {
+        throw new BadRequestException('gift_not_yours');
+      }
+    }
+
     return this.prisma.report.create({
       data: {
         reporterId,
+        giftId,
         reportedUserId,
         reason,
         details: rawDetails || null,

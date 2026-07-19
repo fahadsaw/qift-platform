@@ -8,6 +8,8 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { normalizeReference } from '../references/reference';
+import { OpsRolesService } from '../ops-roles/ops-roles.service';
 import { AuditService } from '../audit/audit.service';
 import { StoresService } from '../stores/stores.service';
 
@@ -53,6 +55,10 @@ export class AdminService {
     // the change-phone PR). record() is best-effort by contract: it
     // never throws, so an audit hiccup can't unwind an admin action.
     private audit: AuditService,
+    // Track A.5 PR 9 — per-group disclosure inside the ops search:
+    // corporate references (QB/QG/QC) resolve only for org.review
+    // holders even though the endpoint itself is diagnostics.read.
+    private opsRoles: OpsRolesService,
   ) {}
 
   // --- Audit log (PR 11 — read-only viewer) -----------------------
@@ -605,7 +611,12 @@ export class AdminService {
     ) {
       throw new BadRequestException('Invalid review action');
     }
-    const result = await this.stores.review(adminUserId, storeId, action, reason);
+    const result = await this.stores.review(
+      adminUserId,
+      storeId,
+      action,
+      reason,
+    );
     // Reason text is operator-authored review feedback (not user
     // PII) — keeping it makes the audit row self-explanatory.
     await this.audit.record({
@@ -730,9 +741,22 @@ export class AdminService {
         createdAt: true,
         reporterId: true,
         reportedUserId: true,
+        giftId: true,
         reporter: { select: { id: true, qiftUsername: true } },
       },
     });
+    // Resolve referenced gifts (dispute anchors) to their QF references
+    // in one batch — plain column, no relation, purge-tolerant.
+    const giftIds = Array.from(
+      new Set(rows.map((r) => r.giftId).filter((v): v is string => !!v)),
+    );
+    const gifts = giftIds.length
+      ? await this.prisma.gift.findMany({
+          where: { id: { in: giftIds } },
+          select: { id: true, fulfillmentNumber: true },
+        })
+      : [];
+    const giftRefById = new Map(gifts.map((g) => [g.id, g.fulfillmentNumber]));
     // The Report schema has reportedUserId as a plain column (no
     // relation in the schema today). We resolve the username with a
     // single batched query for ergonomics in the admin UI.
@@ -757,6 +781,12 @@ export class AdminService {
         id: r.reportedUserId,
         qiftUsername: usernameById.get(r.reportedUserId) ?? null,
       },
+      gift: r.giftId
+        ? {
+            id: r.giftId,
+            fulfillmentNumber: giftRefById.get(r.giftId) ?? null,
+          }
+        : null,
     }));
   }
 
@@ -793,7 +823,10 @@ export class AdminService {
   // PRIVACY: this is admin-only via the controller guard chain.
   // Results carry public-safe identifiers only — same projection
   // every other admin endpoint already uses.
-  async opsSearch(q: string): Promise<{
+  async opsSearch(
+    q: string,
+    viewerUserId?: string,
+  ): Promise<{
     users: AdminUserRow[];
     stores: AdminStoreRow[];
     gifts: {
@@ -802,11 +835,21 @@ export class AdminService {
       storeName: string;
       status: string;
     }[];
+    references: AdminReferenceHit[];
   }> {
     const term = q.trim();
     if (term.length < 2) {
-      return { users: [], stores: [], gifts: [] };
+      return { users: [], stores: [], gifts: [], references: [] };
     }
+
+    // Canonical-reference fast path (Track A.5 PR 9): QP/QF resolve
+    // under this endpoint's diagnostics.read gate; QB/QG/QC are
+    // corporate and additionally require org.review — without it the
+    // hit comes back restricted:true and carries NO data.
+    const reference = normalizeReference(term);
+    const references = reference
+      ? await this.resolveReference(reference, viewerUserId)
+      : [];
     const [users, stores, gifts] = await Promise.all([
       this.prisma.user.findMany({
         where: {
@@ -850,7 +893,143 @@ export class AdminService {
         take: 10,
       }),
     ]);
-    return { users, stores, gifts };
+    return { users, stores, gifts, references };
+  }
+
+  private async resolveReference(
+    reference: string,
+    viewerUserId?: string,
+  ): Promise<AdminReferenceHit[]> {
+    const prefix = reference.slice(0, 2);
+
+    if (prefix === 'QP') {
+      const order = await this.prisma.order.findUnique({
+        where: { orderNumber: reference },
+        select: {
+          id: true,
+          status: true,
+          productName: true,
+          storeName: true,
+          giftId: true,
+        },
+      });
+      return order
+        ? [
+            {
+              kind: 'personal_order',
+              reference,
+              status: order.status,
+              label: `${order.productName} — ${order.storeName}`,
+              orderId: order.id,
+              giftId: order.giftId,
+            },
+          ]
+        : [];
+    }
+
+    if (prefix === 'QF') {
+      const gift = await this.prisma.gift.findUnique({
+        where: { fulfillmentNumber: reference },
+        select: {
+          id: true,
+          status: true,
+          productName: true,
+          storeName: true,
+        },
+      });
+      return gift
+        ? [
+            {
+              kind: 'merchant_fulfillment',
+              reference,
+              status: gift.status,
+              label: `${gift.productName} — ${gift.storeName}`,
+              giftId: gift.id,
+            },
+          ]
+        : [];
+    }
+
+    // Corporate references: role-based disclosure. diagnostics.read
+    // got the viewer through the door; org.review decides whether the
+    // corporate object is revealed.
+    if (prefix === 'QB' || prefix === 'QG' || prefix === 'QC') {
+      const allowed = viewerUserId
+        ? await this.opsRoles.userHasPermission(viewerUserId, 'org.review')
+        : false;
+      const kind =
+        prefix === 'QB'
+          ? 'business_campaign'
+          : prefix === 'QG'
+            ? 'recipient_gift'
+            : 'qift_service_invoice';
+      if (!allowed) {
+        return [{ kind, reference, restricted: true }];
+      }
+      if (prefix === 'QB') {
+        const campaign = await this.prisma.giftCampaign.findUnique({
+          where: { referenceNumber: reference },
+          select: { id: true, name: true, status: true, orgId: true },
+        });
+        return campaign
+          ? [
+              {
+                kind,
+                reference,
+                status: campaign.status,
+                label: campaign.name,
+                campaignId: campaign.id,
+                orgId: campaign.orgId,
+              },
+            ]
+          : [];
+      }
+      if (prefix === 'QG') {
+        const claim = await this.prisma.claimableGift.findUnique({
+          where: { giftReference: reference },
+          select: {
+            id: true,
+            status: true,
+            campaign: {
+              select: { id: true, referenceNumber: true, orgId: true },
+            },
+          },
+        });
+        // Deliberately NO recipient name on the search surface — the
+        // dedicated org.review lookup endpoint carries the fuller view.
+        return claim
+          ? [
+              {
+                kind,
+                reference,
+                status: claim.status,
+                label: claim.campaign.referenceNumber,
+                campaignId: claim.campaign.id,
+                orgId: claim.campaign.orgId,
+              },
+            ]
+          : [];
+      }
+      const invoice = await this.prisma.corporateInvoice.findUnique({
+        where: { invoiceNumber: reference },
+        select: { id: true, status: true, orgId: true, campaignId: true },
+      });
+      return invoice
+        ? [
+            {
+              kind,
+              reference,
+              status: invoice.status,
+              label: invoice.campaignId,
+              invoiceId: invoice.id,
+              orgId: invoice.orgId,
+              campaignId: invoice.campaignId,
+            },
+          ]
+        : [];
+    }
+
+    return [];
   }
 
   // --- Finance operations -------------------------------------------
@@ -1827,6 +2006,27 @@ export type AdminGiftRow = {
   receiver: { id: string; qiftUsername: string } | null;
 };
 
+// One resolved canonical reference in the ops search (Track A.5 PR 9).
+// restricted:true = the reference parsed as a corporate type but the
+// viewer lacks org.review — no data crosses the line.
+export type AdminReferenceHit = {
+  kind:
+    | 'personal_order'
+    | 'merchant_fulfillment'
+    | 'business_campaign'
+    | 'recipient_gift'
+    | 'qift_service_invoice';
+  reference: string;
+  restricted?: boolean;
+  status?: string;
+  label?: string;
+  orderId?: string;
+  giftId?: string | null;
+  campaignId?: string;
+  orgId?: string;
+  invoiceId?: string;
+};
+
 export type AdminReportRow = {
   id: string;
   reason: string;
@@ -1835,6 +2035,10 @@ export type AdminReportRow = {
   createdAt: Date;
   reporter: { id: string; qiftUsername: string } | null;
   reportedUser: { id: string; qiftUsername: string | null };
+  // Dispute anchor (Track A.5 PR 9): the referenced gift + its QF
+  // reference; null when the report isn't about a specific gift or the
+  // gift was purged.
+  gift: { id: string; fulfillmentNumber: string | null } | null;
 };
 
 export type AdminSystemStatus = {
