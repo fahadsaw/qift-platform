@@ -9,6 +9,7 @@ const STORE = 'store-1';
 // 500 SAR gift x 10 recipients, 15/unit Qift fee.
 const QIFT_INVOICE = {
   id: 'inv-1',
+  invoiceNumber: 'QC-2026-00001',
   status: 'issued',
   currency: 'SAR',
   issuedAt: new Date('2026-07-03T10:00:00Z'),
@@ -95,6 +96,7 @@ describe('BillingSummaryService.getCampaignBillingSummary', () => {
         leg: 'qift_service',
         seller: 'qift',
         invoiceId: 'inv-1',
+        invoiceNumber: 'QC-2026-00001',
         status: 'issued',
         serviceFeeAmount: 150,
         vatAmount: 22.5,

@@ -2170,6 +2170,11 @@ model FinancialLedgerEntry {
 // store name + fee-policy version).
 model CorporateInvoice {
   id         String   @id @default(cuid())
+  // Qift's own sequential legal invoice number (Track A.5):
+  // QC-YYYY-NNNNN, allocated transactionally via NumberSequence at
+  // issuance. Agent model: the ONLY invoice number Qift generates for
+  // itself. Frozen forever — voiding is a status, never a renumber.
+  invoiceNumber String @unique
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -2643,4 +2648,15 @@ model StoreBusinessProfile {
   store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
   @@index([status])
+}
+
+// Transactional legal-number series (Track A.5). One row per series
+// (e.g. 'QC-2026'); lastValue increments atomically INSIDE the same
+// transaction that creates the numbered document, so a failed create
+// rolls the allocation back and the series stays gap-free. Operational
+// references (QP/QB/QG/QF) are random and never touch this table.
+model NumberSequence {
+  seriesKey String   @id
+  lastValue Int      @default(0)
+  updatedAt DateTime @updatedAt
 }
