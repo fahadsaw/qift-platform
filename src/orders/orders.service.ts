@@ -355,6 +355,30 @@ export class OrdersService {
     return created;
   }
 
+  // Buyer order history (Track A.5 PR 7) — the first buyer-facing
+  // order LIST the platform has had. Owner-scoped by construction;
+  // lean projection (no message/media — those live on the gift).
+  async listForUser(viewerUserId: string) {
+    return this.prisma.order.findMany({
+      where: { userId: viewerUserId },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        productName: true,
+        storeName: true,
+        receiverUsername: true,
+        totalAmount: true,
+        currency: true,
+        createdAt: true,
+        giftId: true,
+        gift: { select: { status: true, fulfillmentNumber: true } },
+      },
+    });
+  }
+
   async findOne(id: string, viewerUserId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id },

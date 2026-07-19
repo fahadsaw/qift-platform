@@ -27,8 +27,9 @@ function count(file: string, needle: string): number {
 
 describe('reference immutability tripwire (source pins)', () => {
   it('orderNumber: allocation-site only in orders.service.ts; payments never touches it', () => {
-    // 3 = probe where-clause + create data key + comment mention.
-    expect(count('orders/orders.service.ts', 'orderNumber')).toBe(3);
+    // 4 = probe where-clause + create data key + comment mention +
+    // listForUser select READ (PR 7 buyer history).
+    expect(count('orders/orders.service.ts', 'orderNumber')).toBe(4);
     // The payment lifecycle (processing/paid/failed) updates Order rows
     // but must NEVER carry the reference.
     expect(count('payments/payments.service.ts', 'orderNumber')).toBe(0);
