@@ -23,6 +23,7 @@
 //   touch real users / stores. Failure aborts before commit.
 
 import { PrismaClient } from '@prisma/client';
+import { generateReference } from '../src/references/reference';
 
 const prisma = new PrismaClient();
 
@@ -131,6 +132,7 @@ async function main() {
     // derives it from product.storeId.
     const order = await prisma.order.create({
       data: {
+        orderNumber: generateReference('QP'),
         userId: buyer.id,
         receiverUsername: recipient.qiftUsername,
         productName: product.name,
@@ -163,6 +165,7 @@ async function main() {
     // --- Test 2: Gift created from Order inherits storeId ---
     const gift = await prisma.gift.create({
       data: {
+        fulfillmentNumber: generateReference('QF'),
         senderId: buyer.id,
         receiverId: recipient.id,
         productName: order.productName,
@@ -248,16 +251,16 @@ async function main() {
     record({
       name: 'post-confirmation row has address attached',
       ok: !!after?.address && after.address.city === 'الرياض',
-      detail: after?.address
-        ? `address ${after.address.id}`
-        : 'still missing',
+      detail: after?.address ? `address ${after.address.id}` : 'still missing',
     });
 
     // --- Summary ---
     const passed = steps.filter((s) => s.ok).length;
     const failed = steps.length - passed;
     // eslint-disable-next-line no-console
-    console.log(`\n${passed}/${steps.length} passed${failed ? `, ${failed} FAILED` : ''}\n`);
+    console.log(
+      `\n${passed}/${steps.length} passed${failed ? `, ${failed} FAILED` : ''}\n`,
+    );
     if (failed > 0) process.exitCode = 1;
   } finally {
     if (process.env.KEEP_DATA === '1') {

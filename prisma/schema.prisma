@@ -315,6 +315,11 @@ model SocialAccount {
 
 model Gift {
   id          String  @id @default(cuid())
+  // Canonical merchant-fulfillment reference (Track A.5): QF-XXXX-XXXX.
+  // What the merchant works and every party quotes about THIS item's
+  // delivery. Allocated once at creation; status changes, re-shipment,
+  // and cancellation never touch it.
+  fulfillmentNumber String @unique
   senderId    String
   receiverId  String
   productName String
@@ -871,6 +876,10 @@ model ProductImage {
 
 model Order {
   id               String   @id @default(cuid())
+  // Canonical personal-order reference (Track A.5): QP-XXXX-XXXX.
+  // The buyer's quotable purchase number. Allocated once at creation,
+  // immutable through payment / cancellation / refund forever.
+  orderNumber      String   @unique
   userId           String
   giftId           String?  @unique
   receiverUsername String
