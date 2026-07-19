@@ -2351,6 +2351,26 @@ model MerchantInvoice {
   issuedAt    DateTime?
   cancelledAt DateTime?
 
+  // ── Settlement + accounting mirror (Track B1 / PE-13) ─────────────
+  // Constitution Ch. 21 pre-authorized MODIFY. Exact mirror of the
+  // CorporateInvoice accounting-readiness shape. NO writers exist yet:
+  //   dueDate — pre-agreed written credit terms (ops manual §5.6);
+  //             recorded by SETTLE-1, consumed by receivables aging.
+  //   paidAt  — derives from receipts covering the total (Ch. 6.2);
+  //             ONLY SETTLE-1's markPaid family may ever write it.
+  //   externalAccounting* / accountingExport* — per-invoice export
+  //             CACHE (Ch. 21: InvoiceExport becomes source of truth
+  //             at the first connector). Provider-neutral; these map
+  //             beside merchantInvoiceNumber and never replace it
+  //             (Reference Constitution Ch. 9.4).
+  externalAccountingProvider  String?
+  externalAccountingInvoiceId String?
+  accountingExportStatus      String    @default("not_exported") // not_exported | pending | exported | failed
+  accountingExportedAt        DateTime?
+  accountingExportError       String?
+  dueDate                     DateTime?
+  paidAt                      DateTime?
+
   metadata Json?
 
   @@unique([campaignId, storeId])
