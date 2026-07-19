@@ -27,10 +27,14 @@ export class DispatchService {
   // Flip approved → dispatching and enqueue one DispatchJob per
   // recipient, atomically. idempotencyKey (campaignId:contactId) +
   // skipDuplicates make job creation replay-safe.
-  async dispatchCampaign(actorUserId: string, orgId: string, campaignId: string) {
+  async dispatchCampaign(
+    actorUserId: string,
+    orgId: string,
+    campaignId: string,
+  ) {
     const campaign = await this.prisma.giftCampaign.findFirst({
       where: { id: campaignId, orgId },
-      select: { id: true, status: true },
+      select: { id: true, referenceNumber: true, status: true },
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
     if (campaign.status !== 'approved') {
@@ -87,7 +91,11 @@ export class DispatchService {
       action: 'org.campaign.dispatch',
       targetType: 'organization',
       targetId: orgId,
-      metadata: { campaignId, jobs: enqueued },
+      metadata: {
+        campaignId,
+        campaignReference: campaign.referenceNumber,
+        jobs: enqueued,
+      },
     });
     return { ok: true, jobs: enqueued };
   }

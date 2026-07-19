@@ -793,19 +793,42 @@ export class AdminService {
   async setReportStatus(
     reportId: string,
     status: string,
+    actorUserId?: string,
   ): Promise<{ id: string; status: string }> {
     if (!ALLOWED_REPORT_STATUSES.has(status)) {
       throw new BadRequestException('Invalid report status');
     }
     const existing = await this.prisma.report.findUnique({
       where: { id: reportId },
-      select: { id: true },
+      select: { id: true, giftId: true, reportedUserId: true },
     });
     if (!existing) throw new NotFoundException('Report not found');
     const updated = await this.prisma.report.update({
       where: { id: reportId },
       data: { status },
       select: { id: true, status: true },
+    });
+    // Track A.5: dispute-state changes are audited, carrying the
+    // anchored gift's canonical QF reference when one exists.
+    const anchoredGift = existing.giftId
+      ? await this.prisma.gift.findUnique({
+          where: { id: existing.giftId },
+          select: { fulfillmentNumber: true },
+        })
+      : null;
+    await this.audit.record({
+      actorUserId: actorUserId ?? null,
+      actorType: actorUserId ? 'user' : 'system',
+      action: 'admin.report.status_change',
+      // Reports target USERS; the report id rides in metadata.
+      targetType: 'user',
+      targetId: existing.reportedUserId,
+      metadata: {
+        reportId,
+        status,
+        giftId: existing.giftId,
+        fulfillmentNumber: anchoredGift?.fulfillmentNumber ?? null,
+      },
     });
     return updated;
   }

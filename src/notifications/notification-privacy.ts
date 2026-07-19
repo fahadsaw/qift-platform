@@ -152,3 +152,12 @@ export function senderDisplayForReceiverGiftNotification(
   // formed flows.
   return null;
 }
+
+// Track A.5: append the canonical QF fulfillment reference to a
+// notification body so anyone reading the notification to support has
+// something quotable. Surprise-safe by construction — when the masked
+// body is null, the reference alone remains, and a random reference
+// reveals nothing about the gift.
+export function withFulfillmentRef(body: string | null, ref: string): string {
+  return body ? `${body} · ${ref}` : ref;
+}

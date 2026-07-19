@@ -215,6 +215,7 @@ export class InvoiceService {
         metadata: {
           campaignId,
           invoiceId: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
           totalAmount: moneyToNumber(invoice.totalAmount),
         },
       });

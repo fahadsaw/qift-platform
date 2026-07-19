@@ -36,11 +36,22 @@ describe('reference immutability tripwire (source pins)', () => {
   });
 
   it('fulfillmentNumber: allocation in gifts.service.ts; store only READS it', () => {
-    // 3 = probe where-clause + allocation const + create data key.
-    expect(count('gifts/gifts.service.ts', 'fulfillmentNumber')).toBe(3);
-    // 9 = type field (1) + row map key/value (2) + five
-    // notification-body reads (5) + the ?q= exact-match FILTER (1,
-    // PR 8). ALL reads — no update touches it.
-    expect(count('store/store.service.ts', 'fulfillmentNumber')).toBe(9);
+    // 7 = probe where-clause + allocation const + create data key +
+    // four notification-body READS (received / confirm_address /
+    // address_confirmed / cancelled — propagation audit close).
+    expect(count('gifts/gifts.service.ts', 'fulfillmentNumber')).toBe(7);
+    // 10 = type field (1) + row map key/value (2) + SIX
+    // notification-body reads (all three lifecycle pairs, incl. the
+    // delivered-receiver site the propagation audit caught) + the
+    // ?q= exact-match FILTER (1). ALL reads — no update touches it.
+    expect(count('store/store.service.ts', 'fulfillmentNumber')).toBe(10);
+  });
+
+  it('fulfillmentNumber: the auto-default sweep only READS it', () => {
+    // 5 = sweep select (1) + four notification-body reads
+    // (auto_fallback_blocked ×2, default_address_used ×2).
+    expect(
+      count('gifts/gifts-auto-default.service.ts', 'fulfillmentNumber'),
+    ).toBe(5);
   });
 });

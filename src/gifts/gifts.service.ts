@@ -17,7 +17,10 @@ import {
   NotificationsService,
   NotificationType,
 } from '../notifications/notifications.service';
-import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
+import {
+  bodyForReceiverGiftUpdate,
+  withFulfillmentRef,
+} from '../notifications/notification-privacy';
 import { assertTransition, type GiftStatus } from './gift-status';
 import {
   applyGiftVisibility,
@@ -698,14 +701,17 @@ export class GiftsService {
       userId: receiver.id,
       type: NotificationType.GiftReceived,
       title: isSurprise ? 'وصلتك هدية مفاجأة 🎁' : 'وصلتك هدية جديدة 🎁',
-      body: isSurprise ? null : `${productName} — ${storeName}`,
+      body: withFulfillmentRef(
+        isSurprise ? null : `${productName} — ${storeName}`,
+        created.fulfillmentNumber,
+      ),
       link: giftLink,
     });
     void this.notifications.trigger({
       userId: receiver.id,
       type: NotificationType.GiftConfirmAddress,
       title: 'يرجى تأكيد عنوان استلام الهدية',
-      body: null,
+      body: withFulfillmentRef(null, created.fulfillmentNumber),
       link: giftLink,
     });
 
@@ -986,7 +992,7 @@ export class GiftsService {
       userId: gift.senderId,
       type: NotificationType.GiftAddressConfirmed,
       title: 'تم تأكيد العنوان وجاري التجهيز',
-      body: updated.productName,
+      body: withFulfillmentRef(updated.productName, updated.fulfillmentNumber),
       // Deep-link to the gift detail so the sender lands on the
       // accepted-state timeline directly.
       link: `/gifts/${gift.id}`,
@@ -1168,9 +1174,12 @@ export class GiftsService {
       userId: gift.receiverId,
       type: NotificationType.GiftCancelled,
       title: 'تم إلغاء الهدية',
-      body: bodyForReceiverGiftUpdate(
-        { isSurprise: gift.isSurprise, status: 'cancelled' },
-        gift.productName,
+      body: withFulfillmentRef(
+        bodyForReceiverGiftUpdate(
+          { isSurprise: gift.isSurprise, status: 'cancelled' },
+          gift.productName,
+        ),
+        gift.fulfillmentNumber,
       ),
       // Deep-link to the gift detail when possible — receiver lands
       // on the cancelled-state card directly instead of bouncing to

@@ -165,6 +165,10 @@ export class MailService {
     to: string;
     recipientName: string;
     giftId: string;
+    // Canonical QF fulfillment reference (Track A.5): REQUIRED by the
+    // propagation rule for any wired producer — the reader must have a
+    // quotable support handle. Optional only for template flexibility.
+    fulfillmentNumber?: string;
     headingAr: string;
     headingEn: string;
     bodyAr: string;
@@ -174,6 +178,7 @@ export class MailService {
     const lang = args.lang ?? 'ar';
     const tpl = renderGiftNotificationEmail({
       recipientName: args.recipientName,
+      fulfillmentNumber: args.fulfillmentNumber,
       headingAr: args.headingAr,
       headingEn: args.headingEn,
       bodyAr: args.bodyAr,
@@ -226,11 +231,15 @@ export class MailService {
     headingEn: string;
     bodyAr: string;
     bodyEn: string;
+    // Canonical reference for the alert's subject: QF for fulfillment
+    // alerts, the merchant's own invoice number for billing ones.
+    reference?: string;
     lang?: EmailLang;
   }): Promise<SendResult> {
     const lang = args.lang ?? 'ar';
     const tpl = renderMerchantNotificationEmail({
       storeName: args.storeName,
+      reference: args.reference,
       headingAr: args.headingAr,
       headingEn: args.headingEn,
       bodyAr: args.bodyAr,

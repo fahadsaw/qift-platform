@@ -59,6 +59,8 @@ export type QiftLegSummary = {
 
 export type CampaignBillingSummary = {
   campaignId: string;
+  // Canonical business-purchase reference (QB-XXXX-XXXX).
+  campaignReference: string;
   orgId: string;
   currency: string;
   // Canonical commercial model, labelled explicitly so no consumer of
@@ -105,7 +107,7 @@ export class BillingSummaryService {
     // foreign/unknown campaign is a 404, not an empty payload.
     const campaign = await this.prisma.giftCampaign.findFirst({
       where: { id: campaignId, orgId },
-      select: { id: true },
+      select: { id: true, referenceNumber: true },
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
 
@@ -161,6 +163,7 @@ export class BillingSummaryService {
 
     return {
       campaignId,
+      campaignReference: campaign.referenceNumber,
       orgId,
       // Both legs are SAR today; prefer whichever leg exists so the
       // summary stays honest if currencies ever diverge per leg.

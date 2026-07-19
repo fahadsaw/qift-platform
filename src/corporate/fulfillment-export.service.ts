@@ -150,6 +150,7 @@ export class FulfillmentExportService {
       targetId: orgId,
       metadata: {
         campaignId,
+        campaignReference: campaign.referenceNumber,
         claimedCount: claims.length,
         exportedCount: rows.length,
         missingAddressCount: missingAddress,

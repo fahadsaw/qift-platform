@@ -9,7 +9,10 @@ import {
   NotificationsService,
   NotificationType,
 } from '../notifications/notifications.service';
-import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
+import {
+  bodyForReceiverGiftUpdate,
+  withFulfillmentRef,
+} from '../notifications/notification-privacy';
 import { assertTransition, type GiftStatus } from '../gifts/gift-status';
 import { QIFT_SERVICE_FEE_RATE } from '../fees/fee-engine';
 import { StoresService } from '../stores/stores.service';
@@ -36,14 +39,6 @@ import {
 // details modal that splits the address into labelled rows). The raw
 // fields stay nullable because country-specific schemas only fill the
 // columns that apply (e.g. KW uses `governorate`, not `region`).
-// Track A.5: append the QF reference to a notification body so a user
-// reading the notification to support has something quotable. Safe for
-// surprise gifts — when the masked body is null, the reference alone
-// remains (a random reference reveals nothing).
-function withFulfillmentRef(body: string | null, ref: string): string {
-  return body ? `${body} · ${ref}` : ref;
-}
-
 export type StoreOrderRow = {
   giftId: string;
   // Canonical merchant-fulfillment reference (QF-XXXX-XXXX) — the
@@ -848,7 +843,7 @@ export class StoreService {
       userId: gift.receiverId,
       type: NotificationType.GiftDelivered,
       title: 'لديك رسالة من مرسل الهدية 💌',
-      body: updated.productName,
+      body: withFulfillmentRef(updated.productName, updated.fulfillmentNumber),
       link: deliveredLink,
     });
     void this.notifications.trigger({

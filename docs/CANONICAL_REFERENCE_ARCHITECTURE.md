@@ -22,16 +22,16 @@ generator, one normalizer** (`src/references/reference.ts`).
 
 ## 2. The prefix registry
 
-| Prefix | Object | Kind | Format | Issued when |
-|---|---|---|---|---|
-| **QP** | Personal order | random | `QP-XXXX-XXXX` | order creation |
-| **QB** | Business campaign / corporate purchase | random | `QB-XXXX-XXXX` | campaign creation |
-| **QG** | Recipient gift (one recipient's journey in a campaign) | random | `QG-XXXX-XXXX` | claim mint |
-| **QF** | Merchant fulfillment order | random | `QF-XXXX-XXXX` | gift creation |
-| **QC** | Qift service-fee invoice | **sequential** | `QC-YYYY-NNNNN` | invoice issuance (transactional) |
-| *(merchant invoice)* | Merchant goods invoice | **not Qift-issued** | merchant's own series | see §5 |
-| **QS** | Settlement reference | **reserved** | `QS-XXXX-XXXX` | Track C — generation refuses it today |
-| *(carrier)* | Shipment tracking | carrier-issued | carrier format | merchant enters it; already modeled (`Shipment.trackingNumber` + `provider` + `trackingUrl`) |
+| Prefix               | Object                                                 | Kind                | Format                | Issued when                                                                                  |
+| -------------------- | ------------------------------------------------------ | ------------------- | --------------------- | -------------------------------------------------------------------------------------------- |
+| **QP**               | Personal order                                         | random              | `QP-XXXX-XXXX`        | order creation                                                                               |
+| **QB**               | Business campaign / corporate purchase                 | random              | `QB-XXXX-XXXX`        | campaign creation                                                                            |
+| **QG**               | Recipient gift (one recipient's journey in a campaign) | random              | `QG-XXXX-XXXX`        | claim mint                                                                                   |
+| **QF**               | Merchant fulfillment order                             | random              | `QF-XXXX-XXXX`        | gift creation                                                                                |
+| **QC**               | Qift service-fee invoice                               | **sequential**      | `QC-YYYY-NNNNN`       | invoice issuance (transactional)                                                             |
+| _(merchant invoice)_ | Merchant goods invoice                                 | **not Qift-issued** | merchant's own series | see §5                                                                                       |
+| **QS**               | Settlement reference                                   | **reserved**        | `QS-XXXX-XXXX`        | Track C — generation refuses it today                                                        |
+| _(carrier)_          | Shipment tracking                                      | carrier-issued      | carrier format        | merchant enters it; already modeled (`Shipment.trackingNumber` + `provider` + `trackingUrl`) |
 
 Separate legal/operational objects keep separate references — a QB is a
 purchase, a QG is one recipient's slice of it, a QF is a merchant's
@@ -79,11 +79,30 @@ numbering therefore applies to `CorporateInvoice` ONLY:
   `externalAccountingInvoiceId` if the e-invoicing provider issues its
   own — both survive because the fields are separate).
 
+## 4b. Planned-surface contracts (obligations written before the surfaces exist)
+
+- **Printable/emailed invoice documents** (none exist yet): any rendered
+  Qift service-invoice document MUST display the frozen `invoiceNumber`
+  (QC); any rendered merchant goods document displays the MERCHANT's
+  number (`merchantInvoiceNumber`) — never a Qift-manufactured one.
+- **Accounting / e-invoicing connector payloads** (placeholders only —
+  `externalAccountingInvoiceId` etc.): every outbound payload MUST carry
+  `invoiceNumber` (QC) for the service leg and `merchantInvoiceNumber`
+  - `invoiceNumberSource` for the goods leg. The connector may attach
+    its own external id; it never replaces the frozen numbers.
+- **Real dispatch providers (SMS/email/social)**: the
+  `DispatchDelivery` payload carries `giftReference` (QG) — a provider
+  message template MUST quote it next to the claim link so a recipient
+  with a broken/expired link has a non-PII handle for support.
+- **Outbound webhooks** (none exist; store-integrations is inbound-only
+  today): any future outbound event about an order/gift/campaign/invoice
+  carries that object's canonical reference in the payload.
+
 ## 5. Merchant goods invoice — NO manufactured numbers
 
 The merchant is the **legal seller** of the goods. Qift does not and
 must not silently mint a merchant's legal invoice number. The
-`MerchantInvoice` row is Qift's *facilitation record* of the goods leg
+`MerchantInvoice` row is Qift's _facilitation record_ of the goods leg
 — not the legal document itself. It carries:
 
 - `merchantInvoiceNumber` — the number from the merchant's own series,
@@ -108,15 +127,15 @@ invoice is `MERCHANT`-sourced with the number pending.
 
 ## 6. Authorization matrix
 
-| Reference | Buyer/sender | Recipient | Company (org) | Merchant | Ops/admin | Support usage |
-|---|---|---|---|---|---|---|
-| QP | ✅ own orders | ❌ | ❌ | ❌ | ✅ (diagnostics.read) | buyer quotes it |
-| QB | ❌ | ❌ | ✅ own org | ❌ | ✅ (org.review) | company quotes it |
-| QG | ❌ | ✅ own claim screen | ❌ (privacy: org never sees per-recipient state) | ✅ fulfillment export rows | ✅ (org.review) | recipient/merchant quote it |
-| QF | ✅ via own gift | ✅ via own gift | ❌ | ✅ own store's orders | ✅ (diagnostics.read) | merchant quotes it |
-| QC | ❌ | ❌ | ✅ own org invoice | ❌ | ✅ (org.review) | invoice disputes |
-| merchant inv. no. | ❌ | ❌ | ✅ (it's their purchase doc) | ✅ own | ✅ (org.review) | goods-leg disputes |
-| carrier tracking | ✅ | ✅ | ❌ | ✅ | ✅ | delivery chasing |
+| Reference         | Buyer/sender    | Recipient           | Company (org)                                    | Merchant                   | Ops/admin             | Support usage               |
+| ----------------- | --------------- | ------------------- | ------------------------------------------------ | -------------------------- | --------------------- | --------------------------- |
+| QP                | ✅ own orders   | ❌                  | ❌                                               | ❌                         | ✅ (diagnostics.read) | buyer quotes it             |
+| QB                | ❌              | ❌                  | ✅ own org                                       | ❌                         | ✅ (org.review)       | company quotes it           |
+| QG                | ❌              | ✅ own claim screen | ❌ (privacy: org never sees per-recipient state) | ✅ fulfillment export rows | ✅ (org.review)       | recipient/merchant quote it |
+| QF                | ✅ via own gift | ✅ via own gift     | ❌                                               | ✅ own store's orders      | ✅ (diagnostics.read) | merchant quotes it          |
+| QC                | ❌              | ❌                  | ✅ own org invoice                               | ❌                         | ✅ (org.review)       | invoice disputes            |
+| merchant inv. no. | ❌              | ❌                  | ✅ (it's their purchase doc)                     | ✅ own                     | ✅ (org.review)       | goods-leg disputes          |
+| carrier tracking  | ✅              | ✅                  | ❌                                               | ✅                         | ✅                    | delivery chasing            |
 
 The employer-blind invariant is untouched: QG gives the org NOTHING —
 org surfaces never resolve it; only ops and the parties themselves can.
@@ -168,13 +187,13 @@ All search inputs pass through `normalizeReference` first; a canonical
 hit routes to the object's authorized lookup; a non-reference falls
 through to the surface's existing text search.
 
-| Surface | Endpoint | Accepts | Authorization |
-|---|---|---|---|
-| Buyer history | `GET /orders` | — (owner list) | JWT owner |
-| Merchant queue/history | `GET /store/orders?q=&scope=` | QF, receiver, product, tracking # | StoreGuard scoping |
-| Ops cross-reference | `GET /admin/search?q=` | QP/QF (diagnostics.read); QB/QG/QC (org.review, else `restricted:true`) | AdminGuard + ops RBAC |
-| Ops claim lookup | `GET /admin/orgs/claims/by-reference/:ref` | QG (non-rotating, read-only) | org.review |
-| Merchant invoice attach | `PATCH /admin/orgs/merchant-invoices/:id/legal-reference` | supplied refs only | org.review |
+| Surface                 | Endpoint                                                  | Accepts                                                                 | Authorization         |
+| ----------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------- | --------------------- |
+| Buyer history           | `GET /orders`                                             | — (owner list)                                                          | JWT owner             |
+| Merchant queue/history  | `GET /store/orders?q=&scope=`                             | QF, receiver, product, tracking #                                       | StoreGuard scoping    |
+| Ops cross-reference     | `GET /admin/search?q=`                                    | QP/QF (diagnostics.read); QB/QG/QC (org.review, else `restricted:true`) | AdminGuard + ops RBAC |
+| Ops claim lookup        | `GET /admin/orgs/claims/by-reference/:ref`                | QG (non-rotating, read-only)                                            | org.review            |
+| Merchant invoice attach | `PATCH /admin/orgs/merchant-invoices/:id/legal-reference` | supplied refs only                                                      | org.review            |
 
 Immutability is enforced by unit pins on every corporate update path
 plus the source tripwire `src/references/reference-immutability.spec.ts`

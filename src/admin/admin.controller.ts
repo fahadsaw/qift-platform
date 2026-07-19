@@ -321,8 +321,12 @@ export class AdminController {
   // can change their status.
   @Patch('reports/:id/status')
   @RequireOpsPermission('report.resolve')
-  setReportStatus(@Param('id') id: string, @Body() body: { status?: string }) {
-    return this.admin.setReportStatus(id, body?.status ?? '');
+  setReportStatus(
+    @Param('id') id: string,
+    @Body() body: { status?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.admin.setReportStatus(id, body?.status ?? '', req.user.userId);
   }
 
   // ── System ───────────────────────────────────────────────────────
