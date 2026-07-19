@@ -11,6 +11,7 @@ import { Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { allocateReference } from '../references/reference';
 import { BlocksService } from '../blocks/blocks.service';
 import {
   NotificationsService,
@@ -525,10 +526,24 @@ export class GiftsService {
     // wishlist-fulfilment hook (created.productId), and the
     // product trending counter (created.productId again) all need
     // fields beyond what the visibility-helper's GiftLike exposes.
+    // Canonical QF reference (Track A.5) — the merchant-fulfillment
+    // handle every party quotes about this item's delivery. Allocated
+    // once here; the uniqueness probe makes an insert-time collision
+    // practically impossible, so the existing P2002 catch below keeps
+    // its idempotency-replay meaning.
+    const fulfillmentNumber = await allocateReference('QF', async (candidate) =>
+      Boolean(
+        await this.prisma.gift.findUnique({
+          where: { fulfillmentNumber: candidate },
+          select: { id: true },
+        }),
+      ),
+    );
     let created: Prisma.GiftGetPayload<{ include: typeof GIFT_INCLUDE }>;
     try {
       created = await this.prisma.gift.create({
         data: {
+          fulfillmentNumber,
           senderId,
           receiverId: receiver.id,
           productName,

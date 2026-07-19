@@ -35,8 +35,19 @@ import {
 // details modal that splits the address into labelled rows). The raw
 // fields stay nullable because country-specific schemas only fill the
 // columns that apply (e.g. KW uses `governorate`, not `region`).
+// Track A.5: append the QF reference to a notification body so a user
+// reading the notification to support has something quotable. Safe for
+// surprise gifts — when the masked body is null, the reference alone
+// remains (a random reference reveals nothing).
+function withFulfillmentRef(body: string | null, ref: string): string {
+  return body ? `${body} · ${ref}` : ref;
+}
+
 export type StoreOrderRow = {
   giftId: string;
+  // Canonical merchant-fulfillment reference (QF-XXXX-XXXX) — the
+  // number the merchant quotes and searches by.
+  fulfillmentNumber: string;
   productName: string;
   storeName: string;
   receiverName: string;
@@ -177,6 +188,7 @@ export class StoreService {
 
     return gifts.map((g) => ({
       giftId: g.id,
+      fulfillmentNumber: g.fulfillmentNumber,
       productName: g.productName,
       storeName: g.storeName,
       receiverName:
@@ -253,14 +265,17 @@ export class StoreService {
       userId: gift.receiverId,
       type: NotificationType.GiftPreparing,
       title: 'هديتك قيد التجهيز',
-      body: bodyForReceiverGiftUpdate(updated, updated.productName),
+      body: withFulfillmentRef(
+        bodyForReceiverGiftUpdate(updated, updated.productName),
+        updated.fulfillmentNumber,
+      ),
       link: `/gifts/${gift.id}`,
     });
     void this.notifications.trigger({
       userId: gift.senderId,
       type: NotificationType.GiftPreparing,
       title: 'الهدية قيد التجهيز لدى المتجر',
-      body: updated.productName,
+      body: withFulfillmentRef(updated.productName, updated.fulfillmentNumber),
       link: `/gifts/${gift.id}`,
     });
 
@@ -354,14 +369,17 @@ export class StoreService {
       userId: gift.receiverId,
       type: NotificationType.GiftShipped,
       title: 'تم شحن هديتك 🚚',
-      body: bodyForReceiverGiftUpdate(updated, updated.productName),
+      body: withFulfillmentRef(
+        bodyForReceiverGiftUpdate(updated, updated.productName),
+        updated.fulfillmentNumber,
+      ),
       link: shippedLink,
     });
     void this.notifications.trigger({
       userId: gift.senderId,
       type: NotificationType.GiftShipped,
       title: 'تم شحن الهدية',
-      body: updated.productName,
+      body: withFulfillmentRef(updated.productName, updated.fulfillmentNumber),
       link: shippedLink,
     });
 
@@ -784,7 +802,7 @@ export class StoreService {
       userId: gift.senderId,
       type: NotificationType.GiftDelivered,
       title: 'تم استلام هديتك بنجاح 🎉',
-      body: updated.productName,
+      body: withFulfillmentRef(updated.productName, updated.fulfillmentNumber),
       link: deliveredLink,
     });
 

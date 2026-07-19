@@ -12,7 +12,11 @@ const SENDER_ID = 'sender-1';
 
 // Minimal prisma double covering exactly the calls create() makes.
 function buildPrisma() {
-  const order = { create: jest.fn() };
+  const order = {
+    create: jest.fn(),
+    // QP allocation uniqueness probe (Track A.5) — nothing taken.
+    findUnique: jest.fn().mockResolvedValue(null),
+  };
   const user = {
     findUnique: jest.fn().mockResolvedValue({ qiftUsername: 'sender' }),
     findFirst: jest.fn().mockResolvedValue({ id: 'receiver-1' }),
@@ -21,8 +25,9 @@ function buildPrisma() {
     findFirst: jest.fn().mockResolvedValue({ id: 'addr-1' }), // default address exists
   };
   // Echo the persisted data back so tests can assert on it.
-  order.create.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
-    Promise.resolve({ id: 'order-1', payment: null, gift: null, ...data }),
+  order.create.mockImplementation(
+    ({ data }: { data: Record<string, unknown> }) =>
+      Promise.resolve({ id: 'order-1', payment: null, gift: null, ...data }),
   );
   return { order, user, address };
 }
@@ -93,7 +98,10 @@ describe('OrdersService.create — server-side fee authority', () => {
 
   it('a malicious grand total never becomes authoritative', async () => {
     const { service, prisma } = buildService({ catalogPrice: 500 });
-    await service.create(baseBody({ totalAmount: 1, serviceFee: 0 }), SENDER_ID);
+    await service.create(
+      baseBody({ totalAmount: 1, serviceFee: 0 }),
+      SENDER_ID,
+    );
     expect(persisted(prisma).totalAmount).toBe(515);
   });
 
@@ -137,7 +145,11 @@ describe('OrdersService.create — server-side fee authority', () => {
     );
     expect(created).toMatchObject({ id: 'order-1' });
     const data = persisted(prisma);
-    expect(data).toMatchObject({ productPrice: 500, serviceFee: 15, totalAmount: 515 });
+    expect(data).toMatchObject({
+      productPrice: 500,
+      serviceFee: 15,
+      totalAmount: 515,
+    });
   });
 
   it('falls back to the client productPrice for sample/demo flows (no productId)', async () => {
@@ -150,5 +162,16 @@ describe('OrdersService.create — server-side fee authority', () => {
     expect(data.productPrice).toBe(200);
     expect(data.serviceFee).toBe(6); // round(200 * 0.03)
     expect(data.totalAmount).toBe(206);
+  });
+});
+
+describe('QP order reference (Track A.5 PR 6)', () => {
+  it('every created order carries a canonical QP reference', async () => {
+    const { service, prisma } = buildService({ catalogPrice: 100 });
+    await service.create(baseBody(), SENDER_ID);
+    const data = persisted(prisma);
+    expect(String(data.orderNumber)).toMatch(
+      /^QP-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/,
+    );
   });
 });

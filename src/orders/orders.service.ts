@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { allocateReference } from '../references/reference';
 import { validatePaymentProvider } from '../payments/providers';
 import { UsersService } from '../users/users.service';
 import { ProductsService } from '../products/products.service';
@@ -273,7 +274,11 @@ export class OrdersService {
     // any client-sent number; only sample/demo flows (no productId) fall
     // back to the client-supplied productPrice.
     const itemSubtotal = productInfo?.price ?? clientProductPrice;
-    if (itemSubtotal == null || !Number.isFinite(itemSubtotal) || itemSubtotal < 0) {
+    if (
+      itemSubtotal == null ||
+      !Number.isFinite(itemSubtotal) ||
+      itemSubtotal < 0
+    ) {
       throw new BadRequestException(
         'productPrice is required (no authoritative catalog price available)',
       );
@@ -285,36 +290,59 @@ export class OrdersService {
     // invoice work will read.
     const fees = computeFees({ itemSubtotal, deliverySpeed });
 
-    const created = await this.prisma.order.create({
-      data: {
-        userId: viewerUserId,
-        receiverUsername,
-        productName,
-        storeName,
-        // Persist catalog identifiers so PaymentsService can pass them
-        // through to GiftsService.create when the payment confirms.
-        productId: body.productId?.trim() || null,
-        storeId: resolvedStoreId,
-        // Optional Phase 6.4 gifting-context tag. Persisted as-given;
-        // validation happens at the Gift boundary (does the sender
-        // actually have a valid attach context for this occasion?).
-        occasionId: body.occasionId?.trim() || null,
-        productPrice: fees.itemSubtotal,
-        serviceFee: fees.serviceFee,
-        deliveryFee: fees.deliveryFee,
-        totalAmount: fees.grandTotal,
-        currency,
-        country,
-        paymentProvider: paymentProvider,
-        message,
-        mediaUrl,
-        mediaType,
-        isSurprise,
-        isAnonymous,
-        status: 'pending',
-      },
-      include: ORDER_INCLUDE,
-    });
+    // Canonical QP reference — allocated once, here; immutable through
+    // payment, cancellation, and refund. The unique index is the real
+    // guarantee; a same-instant race burns one bounded retry.
+    const createWithReference = async () => {
+      for (let attempt = 0; ; attempt++) {
+        const orderNumber = await allocateReference('QP', async (candidate) =>
+          Boolean(
+            await this.prisma.order.findUnique({
+              where: { orderNumber: candidate },
+              select: { id: true },
+            }),
+          ),
+        );
+        try {
+          return await this.prisma.order.create({
+            data: {
+              orderNumber,
+              userId: viewerUserId,
+              receiverUsername,
+              productName,
+              storeName,
+              // Persist catalog identifiers so PaymentsService can pass them
+              // through to GiftsService.create when the payment confirms.
+              productId: body.productId?.trim() || null,
+              storeId: resolvedStoreId,
+              // Optional Phase 6.4 gifting-context tag. Persisted as-given;
+              // validation happens at the Gift boundary (does the sender
+              // actually have a valid attach context for this occasion?).
+              occasionId: body.occasionId?.trim() || null,
+              productPrice: fees.itemSubtotal,
+              serviceFee: fees.serviceFee,
+              deliveryFee: fees.deliveryFee,
+              totalAmount: fees.grandTotal,
+              currency,
+              country,
+              paymentProvider: paymentProvider,
+              message,
+              mediaUrl,
+              mediaType,
+              isSurprise,
+              isAnonymous,
+              status: 'pending',
+            },
+            include: ORDER_INCLUDE,
+          });
+        } catch (e) {
+          const code = (e as { code?: string })?.code;
+          if (code === 'P2002' && attempt < 2) continue;
+          throw e;
+        }
+      }
+    };
+    const created = await createWithReference();
 
     if (process.env.ORDER_FLOW_DEBUG === '1') {
       this.logger.log(

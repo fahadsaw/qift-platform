@@ -21,6 +21,7 @@
 // walkthrough.
 
 import { Prisma, PrismaClient } from '@prisma/client';
+import { generateReference } from '../src/references/reference';
 import * as bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
@@ -764,13 +765,16 @@ async function main() {
         (m) => m.storeName === product.store,
       );
       const linkedStoreId = matchedMerchant
-        ? slugToStoreId.get(matchedMerchant.slug) ?? null
+        ? (slugToStoreId.get(matchedMerchant.slug) ?? null)
         : null;
 
       await prisma.gift.upsert({
         where: { id },
         create: {
           id,
+          // Seed-only: canonical QF reference (unique per run; the
+          // upsert keys on id so re-seeding never re-creates).
+          fulfillmentNumber: generateReference('QF'),
           senderId,
           receiverId,
           productName: product.product,
