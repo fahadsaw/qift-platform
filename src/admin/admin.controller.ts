@@ -10,6 +10,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import {
+  VatFactsService,
+  type VatFactsProposalInput,
+} from './vat-facts.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { AdminGuard } from './admin.guard';
 import { OpsRolesService } from '../ops-roles/ops-roles.service';
@@ -35,6 +39,7 @@ export class AdminController {
   constructor(
     private readonly admin: AdminService,
     private readonly opsRoles: OpsRolesService,
+    private readonly vatFacts: VatFactsService,
   ) {}
 
   // ── Self ─────────────────────────────────────────────────────────
@@ -359,6 +364,46 @@ export class AdminController {
   // per Constitution Ch. 18.2: read-only diagnosis FIRST (GET), then
   // the append-only idempotent repair (POST). finance.reconcile gates
   // both; every invocation is audited.
+  // VAT-facts maker-checker (Track B3 / PE-12). Constitution Ch. 14.1:
+  // Ops proposes with written verification evidence; a DIFFERENT
+  // operator approves (SoD enforced in-service, above the permission);
+  // every step audited. Applying affects FUTURE issuances only.
+  @Get('stores/:id/vat-facts')
+  @RequireOpsPermission('store.read_detail')
+  storeVatFacts(@Param('id') id: string) {
+    return this.vatFacts.getFacts(id);
+  }
+
+  @Post('stores/:id/vat-facts/proposals')
+  @RequireOpsPermission('finance.vat_facts')
+  proposeVatFacts(
+    @Param('id') id: string,
+    @Body() body: VatFactsProposalInput,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.vatFacts.propose(req.user.userId, id, body);
+  }
+
+  @Post('stores/:id/vat-facts/proposals/:proposalId/approve')
+  @RequireOpsPermission('finance.vat_facts')
+  approveVatFacts(
+    @Param('id') id: string,
+    @Param('proposalId') proposalId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.vatFacts.approve(req.user.userId, id, proposalId);
+  }
+
+  @Post('stores/:id/vat-facts/proposals/:proposalId/reject')
+  @RequireOpsPermission('finance.vat_facts')
+  rejectVatFacts(
+    @Param('id') id: string,
+    @Param('proposalId') proposalId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.vatFacts.reject(req.user.userId, id, proposalId);
+  }
+
   @Get('finance/reconciliation')
   @RequireOpsPermission('finance.reconcile')
   reconciliationReport(@Req() req: AuthedRequest) {

@@ -77,6 +77,11 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
   { method: 'systemStatus', path: 'system', opsPermission: null },
   { method: 'search', path: 'search', opsPermission: 'diagnostics.read' },
   {
+    method: 'storeVatFacts',
+    path: 'stores/:id/vat-facts',
+    opsPermission: 'store.read_detail',
+  },
+  {
     method: 'reconciliationReport',
     path: 'finance/reconciliation',
     opsPermission: 'finance.reconcile',
@@ -563,6 +568,27 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         opsPermission: 'finance.reconcile',
       },
       {
+        // Track B3 / PE-12 — VAT-facts maker-checker mutations. SoD
+        // (maker != checker) is enforced in-service above this
+        // permission per Financial Constitution Ch. 14.2.
+        method: 'proposeVatFacts',
+        path: 'stores/:id/vat-facts/proposals',
+        httpMethod: 'POST',
+        opsPermission: 'finance.vat_facts',
+      },
+      {
+        method: 'approveVatFacts',
+        path: 'stores/:id/vat-facts/proposals/:proposalId/approve',
+        httpMethod: 'POST',
+        opsPermission: 'finance.vat_facts',
+      },
+      {
+        method: 'rejectVatFacts',
+        path: 'stores/:id/vat-facts/proposals/:proposalId/reject',
+        httpMethod: 'POST',
+        opsPermission: 'finance.vat_facts',
+      },
+      {
         method: 'setUserRole',
         path: 'users/:id/role',
         httpMethod: 'PATCH',
@@ -759,6 +785,7 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             'finance.read_payouts': ['finance'],
             'finance.record_payout_event': ['finance'],
             'finance.reconcile': ['finance'],
+            'finance.vat_facts': ['finance'],
             'finance.approve_payout': ['finance'],
             'diagnostics.read': [
               'operations_manager',

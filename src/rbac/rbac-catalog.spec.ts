@@ -259,14 +259,15 @@ describe('RBAC catalog — finance role parity with apps/api/src/ops-roles/', ()
       'finance.record_payout_event',
       'finance.approve_payout',
       'finance.reconcile',
+      'finance.vat_facts',
       'store.read_detail',
       'analytics.read',
     ]);
     expect(new Set(ROLE_PERMISSIONS.finance)).toEqual(expected);
   });
 
-  it('finance role count is 7', () => {
-    expect(ROLE_PERMISSIONS.finance.length).toBe(7);
+  it('finance role count is 8', () => {
+    expect(ROLE_PERMISSIONS.finance.length).toBe(8);
   });
 
   it('finance does NOT hold expanded Stage 10 finance rights', () => {

@@ -12,29 +12,29 @@ migrated, no flag plumbed.
 
 ## 1. Verified backend reality
 
-| Item | Verified value |
-|---|---|
-| Framework | NestJS 11 (`@nestjs/common@^11.0.1`, `@nestjs/core@^11.0.1`) |
-| ORM | Prisma `^5.22.0` |
-| Auth | `passport-jwt@^4.0.1` via `@nestjs/passport@^11.0.5` + `@nestjs/jwt@^11.0.2` |
-| Test framework | Jest + `@nestjs/testing` |
-| Env-var pattern | **Raw `process.env`**. No `@nestjs/config`. No `ConfigService`. |
-| Existing boolean-flag precedent | `process.env.QIFT_GIFT_SESSION_HTTP_ENABLED === 'true'` (single-form) |
-| `User.role` enum | exactly `"user" \| "store" \| "admin"` per `prisma/schema.prisma` |
-| Guard locations | See § 2 |
-| Permission decorator | `@RequireOpsPermission(permission: OpsPermission)` — **singular**, defined in `ops-role.guard.ts` |
-| Audit infrastructure | **Partly in place** — `src/audit/`, `audit.service.spec.ts`, `test/audit-log.e2e-spec.ts` already exist |
-| Repo layout | Separate from frontend (`~/Dev/qift-platform/` ≠ `~/Dev/qift-ui-v2/`) |
+| Item                            | Verified value                                                                                          |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Framework                       | NestJS 11 (`@nestjs/common@^11.0.1`, `@nestjs/core@^11.0.1`)                                            |
+| ORM                             | Prisma `^5.22.0`                                                                                        |
+| Auth                            | `passport-jwt@^4.0.1` via `@nestjs/passport@^11.0.5` + `@nestjs/jwt@^11.0.2`                            |
+| Test framework                  | Jest + `@nestjs/testing`                                                                                |
+| Env-var pattern                 | **Raw `process.env`**. No `@nestjs/config`. No `ConfigService`.                                         |
+| Existing boolean-flag precedent | `process.env.QIFT_GIFT_SESSION_HTTP_ENABLED === 'true'` (single-form)                                   |
+| `User.role` enum                | exactly `"user" \| "store" \| "admin"` per `prisma/schema.prisma`                                       |
+| Guard locations                 | See § 2                                                                                                 |
+| Permission decorator            | `@RequireOpsPermission(permission: OpsPermission)` — **singular**, defined in `ops-role.guard.ts`       |
+| Audit infrastructure            | **Partly in place** — `src/audit/`, `audit.service.spec.ts`, `test/audit-log.e2e-spec.ts` already exist |
+| Repo layout                     | Separate from frontend (`~/Dev/qift-platform/` ≠ `~/Dev/qift-ui-v2/`)                                   |
 
 ## 2. Guard inventory
 
-| Guard | Path | Type |
-|---|---|---|
-| `JwtAuthGuard` | `src/auth/jwt.guard.ts` | Thin `AuthGuard('jwt')` wrapper |
-| `OptionalJwtGuard` | `src/auth/optional-jwt.guard.ts` | Public-with-attribution |
-| `AdminGuard` | `src/admin/admin.guard.ts` | **DB-backed role check** — re-loads `User.role` per request, rejects on `deletedAt` |
-| `StoreGuard` | `src/store/store.guard.ts` | **OWNERSHIP check** (calls `StoresService.ownedStoreIds`), NOT a role check; has `STORE_USER_IDS` env-var allow-list bypass |
-| `OpsRoleGuard` | `src/ops-roles/ops-role.guard.ts` | Permission-decorator reader; delegates to `OpsRolesService.userHasPermission` |
+| Guard              | Path                              | Type                                                                                                                        |
+| ------------------ | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `JwtAuthGuard`     | `src/auth/jwt.guard.ts`           | Thin `AuthGuard('jwt')` wrapper                                                                                             |
+| `OptionalJwtGuard` | `src/auth/optional-jwt.guard.ts`  | Public-with-attribution                                                                                                     |
+| `AdminGuard`       | `src/admin/admin.guard.ts`        | **DB-backed role check** — re-loads `User.role` per request, rejects on `deletedAt`                                         |
+| `StoreGuard`       | `src/store/store.guard.ts`        | **OWNERSHIP check** (calls `StoresService.ownedStoreIds`), NOT a role check; has `STORE_USER_IDS` env-var allow-list bypass |
+| `OpsRoleGuard`     | `src/ops-roles/ops-role.guard.ts` | Permission-decorator reader; delegates to `OpsRolesService.userHasPermission`                                               |
 
 No global `APP_GUARD` provider. Guards are bound per-controller via
 `@UseGuards(JwtAuthGuard, AdminGuard, OpsRoleGuard)`.
@@ -61,6 +61,7 @@ remains owned by the ownership-based `StoreGuard`.
 repositories with no shared workspace.
 
 **Revised approach**: vendored snapshot + drift check.
+
 - Each backend PR that touches `src/rbac/` includes (or implies an
   update to) a vendored snapshot of the frontend `lib/rbac/`
   identifiers at `apps/api/scripts/rbac-frontend-snapshot.json` (or
@@ -80,6 +81,7 @@ scope.**
 ### Adjustment C — PR B-4 (first guard migration): **REVISED for AdminGuard reality**
 
 `AdminGuard` does THREE things, not one:
+
 1. Loads the `User` row from the DB (does NOT trust JWT payload).
 2. Rejects soft-deleted users (`deletedAt != null`).
 3. Checks `user.role === 'admin'`.
@@ -88,6 +90,7 @@ scope.**
 dispatch and must be preserved exactly.
 
 **Migration shape**:
+
 ```
 async canActivate(ctx) {
   const userId = req.user?.userId

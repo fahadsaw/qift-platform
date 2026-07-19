@@ -20,6 +20,7 @@ function makeController(roles: string[]) {
   const controller = new AdminController(
     {} as unknown as AdminService,
     opsRoles,
+    {} as unknown as ConstructorParameters<typeof AdminController>[2],
   );
   return { controller, opsRoles };
 }
