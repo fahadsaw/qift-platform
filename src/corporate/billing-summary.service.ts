@@ -30,6 +30,10 @@ export type MerchantLegSummary = {
   leg: 'merchant_goods';
   seller: 'merchant';
   invoiceId: string;
+  // The MERCHANT's legal invoice number — supplied, never manufactured
+  // by Qift (agent model). Null until the merchant/connector provides it.
+  merchantInvoiceNumber: string | null;
+  invoiceNumberSource: string;
   status: string;
   issuedAt: Date | null;
   storeId: string;
@@ -136,6 +140,8 @@ export class BillingSummaryService {
           leg: 'merchant_goods',
           seller: 'merchant',
           invoiceId: merchant.id,
+          merchantInvoiceNumber: merchant.merchantInvoiceNumber ?? null,
+          invoiceNumberSource: merchant.invoiceNumberSource,
           status: merchant.status,
           issuedAt: merchant.issuedAt ?? null,
           storeId: merchant.storeId,

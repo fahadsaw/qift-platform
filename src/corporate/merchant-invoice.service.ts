@@ -63,6 +63,14 @@ type ApprovalSnapshot = {
   storeName?: string;
 };
 
+// Legal-number provenance (Track A.5 PR 5). QIFT_ON_BEHALF is legally
+// gated: it requires a signed invoicing mandate, referenced per row.
+const MERCHANT_INVOICE_SOURCES: ReadonlySet<string> = new Set([
+  'MERCHANT',
+  'ACCOUNTING_CONNECTOR',
+  'QIFT_ON_BEHALF',
+]);
+
 @Injectable()
 export class MerchantInvoiceService {
   private readonly logger = new Logger(MerchantInvoiceService.name);
@@ -264,6 +272,90 @@ export class MerchantInvoiceService {
     return this.prisma.merchantInvoice.findFirst({
       where: { campaignId, orgId },
     });
+  }
+
+  // ── Legal invoice reference (Track A.5 PR 5 — agent model) ────────
+  // The merchant is the legal seller; Qift NEVER manufactures the
+  // merchant's legal invoice number. Ops records what the merchant (or
+  // a future accounting connector, or a contractually authorized
+  // on-behalf issuance) supplies. Rules, pinned by tests:
+  //   * source must be MERCHANT | ACCOUNTING_CONNECTOR | QIFT_ON_BEHALF
+  //   * QIFT_ON_BEHALF REQUIRES onBehalfAuthorizationRef (the signed
+  //     invoicing mandate) — refused otherwise; no production default
+  //     ever assumes it.
+  //   * merchantInvoiceNumber is IMMUTABLE once set (same-value
+  //     idempotent OK); source freezes with it. Corrections are a
+  //     credit note + new document, never a renumber.
+  //   * externalId / url are operational pointers and may be updated.
+  async attachLegalReference(
+    actorUserId: string,
+    merchantInvoiceId: string,
+    input: {
+      merchantInvoiceNumber?: string;
+      merchantInvoiceExternalId?: string;
+      merchantInvoiceUrl?: string;
+      source?: string;
+      onBehalfAuthorizationRef?: string;
+    },
+  ) {
+    const invoice = await this.prisma.merchantInvoice.findUnique({
+      where: { id: merchantInvoiceId },
+    });
+    if (!invoice) throw new NotFoundException('merchant_invoice_not_found');
+
+    const source = input.source?.trim() ?? invoice.invoiceNumberSource;
+    if (!MERCHANT_INVOICE_SOURCES.has(source)) {
+      throw new BadRequestException('invalid_invoice_number_source');
+    }
+    const authRef =
+      input.onBehalfAuthorizationRef?.trim() ||
+      invoice.onBehalfAuthorizationRef ||
+      null;
+    if (source === 'QIFT_ON_BEHALF' && !authRef) {
+      throw new BadRequestException('on_behalf_authorization_required');
+    }
+
+    const number = input.merchantInvoiceNumber?.trim() || null;
+    if (invoice.merchantInvoiceNumber) {
+      // Frozen legal fact: same-value idempotent, different refused.
+      if (number && number !== invoice.merchantInvoiceNumber) {
+        throw new BadRequestException('merchant_invoice_number_immutable');
+      }
+      if (source !== invoice.invoiceNumberSource) {
+        throw new BadRequestException('invoice_number_source_frozen');
+      }
+    }
+
+    const updated = await this.prisma.merchantInvoice.update({
+      where: { id: merchantInvoiceId },
+      data: {
+        merchantInvoiceNumber: invoice.merchantInvoiceNumber ?? number,
+        merchantInvoiceExternalId:
+          input.merchantInvoiceExternalId?.trim() ??
+          invoice.merchantInvoiceExternalId,
+        merchantInvoiceUrl:
+          input.merchantInvoiceUrl?.trim() ?? invoice.merchantInvoiceUrl,
+        invoiceNumberSource: source,
+        onBehalfAuthorizationRef: authRef,
+      },
+    });
+
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'org.merchant_invoice.legal_reference_attached',
+      targetType: 'organization',
+      targetId: invoice.orgId,
+      metadata: {
+        merchantInvoiceId,
+        campaignId: invoice.campaignId,
+        storeId: invoice.storeId,
+        source,
+        merchantInvoiceNumber: updated.merchantInvoiceNumber,
+      },
+    });
+
+    return updated;
   }
 
   // Post-issuance ledger write — best-effort, never blocks issuance.

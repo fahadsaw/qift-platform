@@ -24,6 +24,8 @@ const QIFT_INVOICE = {
 
 const MERCHANT_INVOICE = {
   id: 'minv-1',
+  merchantInvoiceNumber: null,
+  invoiceNumberSource: 'MERCHANT',
   status: 'issued',
   currency: 'SAR',
   issuedAt: new Date('2026-07-03T10:00:01Z'),
@@ -85,6 +87,8 @@ describe('BillingSummaryService.getCampaignBillingSummary', () => {
         leg: 'merchant_goods',
         seller: 'merchant',
         invoiceId: 'minv-1',
+        merchantInvoiceNumber: null,
+        invoiceNumberSource: 'MERCHANT',
         status: 'issued',
         storeId: STORE,
         storeName: 'Rosary',
