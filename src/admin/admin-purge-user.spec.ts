@@ -79,7 +79,7 @@ function makePrismaMock() {
     .mockResolvedValue({ count: 0 });
 
   const $transaction = jest.fn(
-    async <T,>(cb: (tx: unknown) => Promise<T>): Promise<T> => {
+    async <T>(cb: (tx: unknown) => Promise<T>): Promise<T> => {
       // Same tx surface as the outer client — same mocks. Mirrors
       // the closed-beta backend usage where tx.delete and tx.update
       // are the prisma client methods themselves wrapped by the
@@ -153,7 +153,10 @@ function buildService() {
   const audit = {
     record: jest.fn().mockResolvedValue(undefined),
   } as unknown as ConstructorParameters<typeof AdminService>[2];
-  const service = new AdminService(prisma, stores, audit);
+  const opsRoles = {
+    userHasPermission: jest.fn().mockResolvedValue(false),
+  } as unknown as ConstructorParameters<typeof AdminService>[3];
+  const service = new AdminService(prisma, stores, audit, opsRoles);
   return { service, mocks };
 }
 
@@ -220,11 +223,7 @@ describe('AdminService.purgeUser', () => {
     it('inflight-gift query covers BOTH sender and receiver sides', async () => {
       const { service, mocks } = buildService();
       mocks.userFindUnique.mockResolvedValueOnce({ ...TARGET });
-      await service.purgeUser(
-        'usr_viewer',
-        TARGET.id,
-        TARGET.qiftUsername,
-      );
+      await service.purgeUser('usr_viewer', TARGET.id, TARGET.qiftUsername);
       const where = mocks.giftCount.mock.calls[0][0].where as {
         OR: Array<{ senderId?: string; receiverId?: string }>;
       };
@@ -266,11 +265,7 @@ describe('AdminService.purgeUser', () => {
     it('writes deterministic sentinels on User.phone and User.qiftUsername', async () => {
       const { service, mocks } = buildService();
       mocks.userFindUnique.mockResolvedValueOnce({ ...TARGET });
-      await service.purgeUser(
-        'usr_viewer',
-        TARGET.id,
-        TARGET.qiftUsername,
-      );
+      await service.purgeUser('usr_viewer', TARGET.id, TARGET.qiftUsername);
       const updateArgs = mocks.userUpdate.mock.calls[0][0] as {
         where: { id: string };
         data: Record<string, unknown>;
@@ -286,11 +281,7 @@ describe('AdminService.purgeUser', () => {
     it('nulls every PII column on the User row', async () => {
       const { service, mocks } = buildService();
       mocks.userFindUnique.mockResolvedValueOnce({ ...TARGET });
-      await service.purgeUser(
-        'usr_viewer',
-        TARGET.id,
-        TARGET.qiftUsername,
-      );
+      await service.purgeUser('usr_viewer', TARGET.id, TARGET.qiftUsername);
       const data = mocks.userUpdate.mock.calls[0][0].data as Record<
         string,
         unknown
@@ -323,11 +314,7 @@ describe('AdminService.purgeUser', () => {
     it('stamps deletedAt AND purgedAt on the same instant', async () => {
       const { service, mocks } = buildService();
       mocks.userFindUnique.mockResolvedValueOnce({ ...TARGET });
-      await service.purgeUser(
-        'usr_viewer',
-        TARGET.id,
-        TARGET.qiftUsername,
-      );
+      await service.purgeUser('usr_viewer', TARGET.id, TARGET.qiftUsername);
       const data = mocks.userUpdate.mock.calls[0][0].data as Record<
         string,
         unknown
@@ -343,11 +330,7 @@ describe('AdminService.purgeUser', () => {
     it('hard-deletes every identity-PII table inside the transaction', async () => {
       const { service, mocks } = buildService();
       mocks.userFindUnique.mockResolvedValueOnce({ ...TARGET });
-      await service.purgeUser(
-        'usr_viewer',
-        TARGET.id,
-        TARGET.qiftUsername,
-      );
+      await service.purgeUser('usr_viewer', TARGET.id, TARGET.qiftUsername);
       const filter = { userId: TARGET.id };
       expect(mocks.addressDeleteMany).toHaveBeenCalledWith({ where: filter });
       expect(mocks.socialAccountDeleteMany).toHaveBeenCalledWith({
@@ -378,16 +361,8 @@ describe('AdminService.purgeUser', () => {
     it('removes follow/block/giftAttempt rows on BOTH sides of the relation', async () => {
       const { service, mocks } = buildService();
       mocks.userFindUnique.mockResolvedValueOnce({ ...TARGET });
-      await service.purgeUser(
-        'usr_viewer',
-        TARGET.id,
-        TARGET.qiftUsername,
-      );
-      const checkBothSides = (
-        m: AnyMock,
-        a: string,
-        b: string,
-      ): boolean => {
+      await service.purgeUser('usr_viewer', TARGET.id, TARGET.qiftUsername);
+      const checkBothSides = (m: AnyMock, a: string, b: string): boolean => {
         const arg = m.mock.calls[0][0] as { where: { OR: unknown[] } };
         const ors = arg.where.OR as Array<Record<string, string>>;
         const aHit = ors.some((o) => o[a] === TARGET.id);
@@ -408,11 +383,7 @@ describe('AdminService.purgeUser', () => {
     it('runs every delete + the User update inside a single $transaction', async () => {
       const { service, mocks } = buildService();
       mocks.userFindUnique.mockResolvedValueOnce({ ...TARGET });
-      await service.purgeUser(
-        'usr_viewer',
-        TARGET.id,
-        TARGET.qiftUsername,
-      );
+      await service.purgeUser('usr_viewer', TARGET.id, TARGET.qiftUsername);
       expect(mocks.$transaction).toHaveBeenCalledTimes(1);
       // Every PII-table delete + the user.update must have fired
       // INSIDE the transaction callback, NOT outside it. We assert

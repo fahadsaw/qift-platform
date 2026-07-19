@@ -16,6 +16,9 @@ function makeService() {
     { auditLog: { findMany } } as unknown as PrismaService,
     {} as unknown as StoresService,
     {} as unknown as AuditService,
+    {
+      userHasPermission: jest.fn().mockResolvedValue(false),
+    } as unknown as ConstructorParameters<typeof AdminService>[3],
   );
   return { service, findMany };
 }

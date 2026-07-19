@@ -1568,6 +1568,10 @@ model Report {
   id             String   @id @default(cuid())
   reporterId     String
   reportedUserId String
+  // Optional dispute anchor (Track A.5 PR 9): the gift this report is
+  // about. Plain TEXT, no FK — the record survives purges. Filed only
+  // by a party to the gift (sender/receiver), validated in service.
+  giftId         String?
   reason         String
   details        String?
   status         String   @default("open")
@@ -1577,6 +1581,7 @@ model Report {
 
   @@index([status, createdAt])
   @@index([reportedUserId])
+  @@index([giftId])
 }
 
 // DORMANT — legacy generic-posting model.

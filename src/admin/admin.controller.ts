@@ -339,8 +339,8 @@ export class AdminController {
   // a separate per-resource permission.
   @Get('search')
   @RequireOpsPermission('diagnostics.read')
-  search(@Query('q') q?: string) {
-    return this.admin.opsSearch(q ?? '');
+  search(@Req() req: AuthedRequest, @Query('q') q?: string) {
+    return this.admin.opsSearch(q ?? '', req.user.userId);
   }
 
   // ── Finance operations ─────────────────────────────────────────
