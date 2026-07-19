@@ -499,6 +499,7 @@ describe('GiftsService — wishlist purchase fulfillment hook', () => {
             fullName: null,
           },
           address: null,
+          fulfillmentNumber: 'QF-CANC-TEST',
         };
         prisma.gift.findUnique.mockResolvedValue(giftRow);
         prisma.gift.updateMany.mockResolvedValue({ count: 1 });
@@ -516,11 +517,13 @@ describe('GiftsService — wishlist purchase fulfillment hook', () => {
         expect(call.type).toBe('gift.cancelled');
         // Title is generic — no product leak.
         expect(call.title).not.toContain('باقة جوري');
-        // CRITICAL: body must be null on surprise cancellation.
-        // This is the surprise-privacy invariant — a surprise that
-        // never resolved (because it was cancelled) must not leak
-        // the product via the cancellation push.
-        expect(call.body).toBeNull();
+        // CRITICAL: the surprise-privacy invariant survives with the
+        // reference attached — a surprise that never resolved must not
+        // leak the product via the cancellation push. The body is now
+        // EXACTLY the QF reference (Track A.5): quotable, reveals
+        // nothing.
+        expect(call.body).toBe('QF-CANC-TEST');
+        expect(call.body).not.toContain('باقة جوري');
       });
 
       it('reveals productName in the receiver cancellation body when isSurprise=false', async () => {
@@ -532,7 +535,7 @@ describe('GiftsService — wishlist purchase fulfillment hook', () => {
 
         const call = notifications.trigger.mock.calls[0][0];
         expect(call.userId).toBe(RECEIVER_ID);
-        expect(call.body).toBe('باقة جوري');
+        expect(call.body).toBe('باقة جوري · QF-CANC-TEST');
       });
     });
   });

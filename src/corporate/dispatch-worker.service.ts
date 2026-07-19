@@ -38,10 +38,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  DISPATCH_PROVIDER,
-  type DispatchProvider,
-} from './dispatch-provider';
+import { DISPATCH_PROVIDER, type DispatchProvider } from './dispatch-provider';
 import { ClaimMintService } from './claim-mint.service';
 
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -173,9 +170,9 @@ export class DispatchWorkerService implements OnModuleInit, OnModuleDestroy {
           campaignId: job.campaignId,
           contactId: job.contactId,
           channel,
-          channelValue:
-            channel === 'phone' ? contact.phone! : contact.email!,
+          channelValue: channel === 'phone' ? contact.phone! : contact.email!,
           claimUrl: minted.claimUrl,
+          giftReference: minted.giftReference,
         });
 
         if (result.ok) {

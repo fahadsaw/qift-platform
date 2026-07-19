@@ -273,8 +273,24 @@ export function renderWelcomeEmail(args: {
 // wants to push to the channel: gift sent, address confirmed, gift
 // shipped, gift delivered. Subject + heading come from the caller so
 // the template stays milestone-agnostic.
+// Track A.5: shared quotable-reference line for transactional emails.
+// Mono, LTR-pinned, with keep-this-for-support copy in both languages.
+function referenceBlock(reference: string, lang: EmailLang): string {
+  const ar = lang === 'ar';
+  const label = ar ? 'رقم المرجع' : 'Reference';
+  const hint = ar
+    ? 'احتفظ به — استخدمه عند التواصل مع الدعم.'
+    : 'Keep it — quote it when contacting support.';
+  return `
+      <p style="margin:0 0 2px 0;font-size:12px;color:${MUTED};">${escape(label)}</p>
+      <p dir="ltr" style="margin:0 0 4px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;font-weight:700;color:${INK};">${escape(reference)}</p>
+      <p style="margin:0 0 14px 0;font-size:11px;color:${MUTED};">${escape(hint)}</p>
+    `;
+}
+
 export function renderGiftNotificationEmail(args: {
   recipientName: string;
+  fulfillmentNumber?: string;
   headingAr: string;
   headingEn: string;
   bodyAr: string;
@@ -285,6 +301,9 @@ export function renderGiftNotificationEmail(args: {
 }): RenderedEmail {
   const { headingAr, headingEn, bodyAr, bodyEn, giftUrl, lang, supportEmail } =
     args;
+  const referenceLine = args.fulfillmentNumber
+    ? referenceBlock(args.fulfillmentNumber, lang)
+    : '';
   const ar = lang === 'ar';
   const subject = ar ? headingAr : headingEn;
   const heading = ar ? headingAr : headingEn;
@@ -294,6 +313,7 @@ export function renderGiftNotificationEmail(args: {
   const bodyHtml = `
       <h1 style="margin:0 0 8px 0;font-size:22px;font-weight:800;color:${INK};">${escape(heading)}</h1>
       <p style="margin:0 0 14px 0;font-size:14px;line-height:1.65;color:${TEXT_SOFT};">${escape(body)}</p>
+      ${referenceLine}
     `;
 
   const html = renderShell({
@@ -307,7 +327,7 @@ export function renderGiftNotificationEmail(args: {
       : ['A gift update from Qift.', `Questions? ${supportEmail}`],
   });
 
-  const text = `${heading}\n\n${body}\n\n${giftUrl}`;
+  const text = `${heading}\n\n${body}\n\n${args.fulfillmentNumber ? `${args.fulfillmentNumber}\n\n` : ''}${giftUrl}`;
   return { subject, html, text };
 }
 
@@ -365,6 +385,9 @@ export function renderPasswordResetEmail(args: {
 // ── Merchant notification ────────────────────────────────────────────
 export function renderMerchantNotificationEmail(args: {
   storeName: string;
+  // QF for fulfillment alerts; the merchant's own invoice number for
+  // billing alerts (Track A.5 propagation rule).
+  reference?: string;
   headingAr: string;
   headingEn: string;
   bodyAr: string;
@@ -391,9 +414,13 @@ export function renderMerchantNotificationEmail(args: {
   const body = ar ? bodyAr : bodyEn;
   const preheader = body.slice(0, 120);
 
+  const merchantReferenceLine = args.reference
+    ? referenceBlock(args.reference, lang)
+    : '';
   const bodyHtml = `
       <h1 style="margin:0 0 8px 0;font-size:22px;font-weight:800;color:${INK};">${escape(heading)}</h1>
       <p style="margin:0 0 6px 0;font-size:13px;color:${MUTED};">${escape(storeName)}</p>
+      ${merchantReferenceLine}
       <p style="margin:0 0 14px 0;font-size:14px;line-height:1.65;color:${TEXT_SOFT};">${escape(body)}</p>
     `;
 

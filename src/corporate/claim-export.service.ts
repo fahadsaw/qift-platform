@@ -56,7 +56,7 @@ export class ClaimExportService {
     // campaign id reads as missing even on the ops plane.
     const campaign = await this.prisma.giftCampaign.findFirst({
       where: { id: campaignId, orgId },
-      select: { id: true, name: true, status: true },
+      select: { id: true, referenceNumber: true, name: true, status: true },
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
 
@@ -107,6 +107,7 @@ export class ClaimExportService {
       targetId: orgId,
       metadata: {
         campaignId,
+        campaignReference: campaign.referenceNumber,
         exported: links.length,
         skippedFinalized,
         skippedUnreachable,
@@ -114,7 +115,11 @@ export class ClaimExportService {
     });
 
     return {
-      campaign: { id: campaign.id, name: campaign.name },
+      campaign: {
+        id: campaign.id,
+        referenceNumber: campaign.referenceNumber,
+        name: campaign.name,
+      },
       exported: links.length,
       skippedFinalized,
       skippedUnreachable,

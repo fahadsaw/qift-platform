@@ -206,7 +206,11 @@ export class ClaimService {
       action: 'corporate.claim.mismatch',
       targetType: 'organization',
       targetId: null,
-      metadata: { claimId: claim.id, campaignId: claim.campaignId },
+      metadata: {
+        claimId: claim.id,
+        giftReference: claim.giftReference,
+        campaignId: claim.campaignId,
+      },
     });
     return { ok: true };
   }
@@ -220,7 +224,11 @@ export class ClaimService {
       action: 'corporate.claim.decline',
       targetType: 'organization',
       targetId: null,
-      metadata: { claimId: claim.id, campaignId: claim.campaignId },
+      metadata: {
+        claimId: claim.id,
+        giftReference: claim.giftReference,
+        campaignId: claim.campaignId,
+      },
     });
     return { ok: true };
   }
@@ -314,7 +322,11 @@ export class ClaimService {
       action: 'corporate.claim.claimed',
       targetType: 'organization',
       targetId: null,
-      metadata: { claimId: claim.id, campaignId: claim.campaignId },
+      metadata: {
+        claimId: claim.id,
+        giftReference: claim.giftReference,
+        campaignId: claim.campaignId,
+      },
     });
     return { ok: true, status: 'claimed' };
   }

@@ -9,7 +9,10 @@ import {
   NotificationsService,
   NotificationType,
 } from '../notifications/notifications.service';
-import { bodyForReceiverGiftUpdate } from '../notifications/notification-privacy';
+import {
+  bodyForReceiverGiftUpdate,
+  withFulfillmentRef,
+} from '../notifications/notification-privacy';
 import type { GiftStatus } from './gift-status';
 import { matchAddressToStoreZones } from '../stores/delivery-zones';
 
@@ -90,6 +93,7 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
       },
       select: {
         id: true,
+        fulfillmentNumber: true,
         senderId: true,
         receiverId: true,
         productName: true,
@@ -216,9 +220,12 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
             userId: gift.receiverId,
             type: NotificationType.GiftAutoFallbackBlocked,
             title: 'لم نتمكن من تأكيد العنوان تلقائياً',
-            body: bodyForReceiverGiftUpdate(
-              { isSurprise: gift.isSurprise, status: 'pending_address' },
-              gift.productName,
+            body: withFulfillmentRef(
+              bodyForReceiverGiftUpdate(
+                { isSurprise: gift.isSurprise, status: 'pending_address' },
+                gift.productName,
+              ),
+              gift.fulfillmentNumber,
             ),
             link: giftLink,
           });
@@ -226,7 +233,7 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
             userId: gift.senderId,
             type: NotificationType.GiftAutoFallbackBlocked,
             title: 'هديتك بانتظار اختيار عنوان مدعوم من المتجر',
-            body: gift.productName,
+            body: withFulfillmentRef(gift.productName, gift.fulfillmentNumber),
             link: giftLink,
           });
           continue;
@@ -259,9 +266,12 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
           userId: gift.receiverId,
           type: NotificationType.GiftDefaultAddressUsed,
           title: 'تم استخدام عنوانك المحفوظ لإرسال الهدية',
-          body: bodyForReceiverGiftUpdate(
-            { isSurprise: gift.isSurprise, status: 'default_address_used' },
-            gift.productName,
+          body: withFulfillmentRef(
+            bodyForReceiverGiftUpdate(
+              { isSurprise: gift.isSurprise, status: 'default_address_used' },
+              gift.productName,
+            ),
+            gift.fulfillmentNumber,
           ),
           link: giftLink,
         });
@@ -269,7 +279,7 @@ export class GiftsAutoDefaultService implements OnModuleInit, OnModuleDestroy {
           userId: gift.senderId,
           type: NotificationType.GiftDefaultAddressUsed,
           title: 'تم استخدام العنوان الافتراضي للتوصيل',
-          body: gift.productName,
+          body: withFulfillmentRef(gift.productName, gift.fulfillmentNumber),
           link: giftLink,
         });
       } catch (err) {

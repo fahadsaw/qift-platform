@@ -99,7 +99,7 @@ export class MerchantInvoiceService {
     // The campaign must exist under this org and be approved.
     const campaign = await this.prisma.giftCampaign.findFirst({
       where: { id: campaignId, orgId },
-      select: { id: true, status: true },
+      select: { id: true, referenceNumber: true, status: true },
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
     if (campaign.status !== 'approved') {
@@ -244,6 +244,7 @@ export class MerchantInvoiceService {
         targetId: orgId,
         metadata: {
           campaignId,
+          campaignReference: campaign.referenceNumber,
           invoiceId: invoice.id,
           storeId: invoice.storeId,
           totalAmount: moneyToNumber(invoice.totalAmount),

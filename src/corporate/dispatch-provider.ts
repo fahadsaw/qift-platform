@@ -26,6 +26,12 @@ export type DispatchDelivery = {
   channelValue: string;
   // PR 5 seam: the claim URL once the claim flow mints tokens.
   claimUrl: string | null;
+  // Canonical recipient-gift reference (QG-XXXX-XXXX). REQUIRED in any
+  // future real provider's message template (SMS/email/social): the
+  // recipient must receive a quotable support handle NEXT TO the claim
+  // link — a broken/expired link otherwise leaves them nothing to
+  // quote but their own phone number (PII). Track A.5 propagation rule.
+  giftReference: string;
 };
 
 export type DispatchResult =

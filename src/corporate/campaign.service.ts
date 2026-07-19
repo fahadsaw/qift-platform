@@ -91,7 +91,12 @@ export class CampaignService {
   private async loadCampaign(orgId: string, campaignId: string) {
     const campaign = await this.prisma.giftCampaign.findFirst({
       where: { id: campaignId, orgId },
-      select: { id: true, status: true, createdBy: true },
+      select: {
+        id: true,
+        referenceNumber: true,
+        status: true,
+        createdBy: true,
+      },
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
     return campaign;
@@ -164,7 +169,11 @@ export class CampaignService {
       action: 'org.campaign.create',
       targetType: 'organization',
       targetId: orgId,
-      metadata: { campaignId: campaign.id, name },
+      metadata: {
+        campaignId: campaign.id,
+        campaignReference: campaign.referenceNumber,
+        name,
+      },
     });
     return campaign;
   }
@@ -234,7 +243,11 @@ export class CampaignService {
       action: 'org.campaign.set_option',
       targetType: 'organization',
       targetId: orgId,
-      metadata: { campaignId, productId },
+      metadata: {
+        campaignId,
+        campaignReference: campaign.referenceNumber,
+        productId,
+      },
     });
     return { ok: true };
   }
@@ -388,7 +401,11 @@ export class CampaignService {
       action: 'org.campaign.submit',
       targetType: 'organization',
       targetId: orgId,
-      metadata: { campaignId, recipients: recipientCount },
+      metadata: {
+        campaignId,
+        campaignReference: campaign.referenceNumber,
+        recipients: recipientCount,
+      },
     });
     return updated;
   }
@@ -469,7 +486,11 @@ export class CampaignService {
       action: 'org.campaign.approve',
       targetType: 'organization',
       targetId: orgId,
-      metadata: { campaignId, productId: product.id },
+      metadata: {
+        campaignId,
+        campaignReference: campaign.referenceNumber,
+        productId: product.id,
+      },
     });
 
     // Approval IS the commercial commitment point: issue the corporate
@@ -543,7 +564,11 @@ export class CampaignService {
       action: 'org.campaign.request_changes',
       targetType: 'organization',
       targetId: orgId,
-      metadata: { campaignId, note: trimmed },
+      metadata: {
+        campaignId,
+        campaignReference: campaign.referenceNumber,
+        note: trimmed,
+      },
     });
     return updated;
   }
@@ -568,7 +593,11 @@ export class CampaignService {
       action: 'org.campaign.cancel',
       targetType: 'organization',
       targetId: orgId,
-      metadata: { campaignId, fromStatus: campaign.status },
+      metadata: {
+        campaignId,
+        campaignReference: campaign.referenceNumber,
+        fromStatus: campaign.status,
+      },
     });
     return updated;
   }
