@@ -62,9 +62,11 @@ describe('FulfillmentExportService', () => {
   beforeEach(() => {
     prisma = {
       giftCampaign: {
-        findFirst: jest
-          .fn()
-          .mockResolvedValue({ id: 'camp-1', name: 'Eid 2026' }),
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'camp-1',
+          referenceNumber: 'QB-TEST-2026',
+          name: 'Eid 2026',
+        }),
       },
       campaignGiftOption: {
         findFirst: jest.fn().mockResolvedValue({
@@ -101,6 +103,7 @@ describe('FulfillmentExportService', () => {
 
     expect(out.campaign).toEqual({
       campaignId: 'camp-1',
+      campaignReference: 'QB-TEST-2026',
       campaignName: 'Eid 2026',
       productName: 'Oud Set',
       storeName: 'Dar Alteeb',

@@ -38,6 +38,7 @@ export const NON_PARTICIPATION_STATUSES: readonly string[] = [
 
 const REPORT_CAMPAIGN_SELECT = {
   id: true,
+  referenceNumber: true,
   name: true,
   occasion: true,
   status: true,

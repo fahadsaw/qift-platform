@@ -2428,6 +2428,12 @@ model GiftCampaign {
   id          String    @id @default(cuid())
   orgId       String
   name        String
+  // Canonical business-purchase reference (Track A.5): QB-XXXX-XXXX.
+  // Allocated once at creation, immutable forever — status changes and
+  // cancellation never touch it. Safe to expose: random, no PII, and
+  // NOT an auth secret (every lookup stays org/ops-authorized). See
+  // docs/CANONICAL_REFERENCE_ARCHITECTURE.md.
+  referenceNumber String @unique
   occasion    String?   // free-text label ('Eid', 'Founding Day', ...)
   message     String?   // greeting shown to recipients at claim time
   status      String    @default("draft")

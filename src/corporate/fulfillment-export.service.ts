@@ -47,6 +47,7 @@ export type FulfillmentRow = {
 // The non-PII gift context the merchant needs on the delivery sheet.
 type CampaignFulfillmentHeader = {
   campaignId: string;
+  campaignReference: string;
   campaignName: string;
   productName: string | null;
   storeName: string | null;
@@ -74,7 +75,7 @@ export class FulfillmentExportService {
     // campaign id reads as missing even on the ops plane.
     const campaign = await this.prisma.giftCampaign.findFirst({
       where: { id: campaignId, orgId },
-      select: { id: true, name: true },
+      select: { id: true, referenceNumber: true, name: true },
     });
     if (!campaign) throw new NotFoundException('campaign_not_found');
 
@@ -144,6 +145,7 @@ export class FulfillmentExportService {
     return {
       campaign: {
         campaignId,
+        campaignReference: campaign.referenceNumber,
         campaignName: campaign.name,
         productName: snapshot?.productName ?? null,
         storeName: snapshot?.storeName ?? null,
