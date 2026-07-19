@@ -36,6 +36,7 @@ export type ExportedClaimLink = {
   contactName: string;
   channel: 'phone' | 'email';
   claimUrl: string;
+  giftReference: string;
 };
 
 @Injectable()
@@ -92,6 +93,7 @@ export class ClaimExportService {
         contactName: contact?.fullName ?? '—',
         channel: contact?.phone ? 'phone' : 'email',
         claimUrl: minted.claimUrl,
+        giftReference: minted.giftReference,
       });
     }
 

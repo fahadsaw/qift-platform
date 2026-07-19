@@ -2563,6 +2563,12 @@ model ClaimableGift {
   contactId        String
   jobId            String?   @unique
   tokenHash        String    @unique
+  // Canonical recipient-gift reference (Track A.5): QG-XXXX-XXXX.
+  // Allocated once at FIRST mint, immutable forever — pending re-mints
+  // rotate the token but never the reference; finalization never
+  // touches it. NOT a secret (the token is); safe to show the
+  // recipient and to quote to support/merchants.
+  giftReference    String    @unique
   status           String    @default("pending")
   recipientName    String
   channel          String // 'phone' | 'email'

@@ -2,8 +2,8 @@
 //
 // Pinned, in the order the scope demanded:
 //
-//   * PRIVACY — the payload is contactName + channel + claimUrl
-//     and nothing else: no channel values, no addresses (the
+//   * PRIVACY — the payload is contactName + channel + claimUrl +
+//     giftReference and nothing else: no channel values, no addresses (the
 //     service never touches ClaimAddress — the mock doesn't even
 //     have it), and the audit row carries counts, never URLs.
 //   * TOKEN ROTATION — every dispatched job is re-minted through
@@ -39,7 +39,11 @@ describe('ClaimExportService', () => {
       giftCampaign: {
         findFirst: jest
           .fn()
-          .mockResolvedValue({ id: 'camp-1', name: 'Eid 2026', status: 'completed' }),
+          .mockResolvedValue({
+            id: 'camp-1',
+            name: 'Eid 2026',
+            status: 'completed',
+          }),
       },
       dispatchJob: {
         findMany: jest.fn().mockResolvedValue([
@@ -54,15 +58,14 @@ describe('ClaimExportService', () => {
       },
     };
     claimMint = {
-      mintForJob: jest
-        .fn()
-        .mockImplementation(({ jobId }: { jobId: string }) =>
-          Promise.resolve({
-            ok: true,
-            claimId: `claim-${jobId}`,
-            claimUrl: `https://www.qift.net/claim/fresh-${jobId}`,
-          }),
-        ),
+      mintForJob: jest.fn().mockImplementation(({ jobId }: { jobId: string }) =>
+        Promise.resolve({
+          ok: true,
+          claimId: `claim-${jobId}`,
+          claimUrl: `https://www.qift.net/claim/fresh-${jobId}`,
+          giftReference: `QG-${jobId.toUpperCase()}`,
+        }),
+      ),
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     service = new ClaimExportService(
@@ -76,27 +79,37 @@ describe('ClaimExportService', () => {
 
   // ═════════════════════════════════════════════════════════════════
   describe('privacy', () => {
-    it('each link is EXACTLY { contactName, channel, claimUrl } — channel value never leaves', async () => {
-      const res = await service.exportCampaignClaimLinks('ops-1', 'org-1', 'camp-1');
+    it('each link is EXACTLY { contactName, channel, claimUrl, giftReference } — channel value never leaves', async () => {
+      const res = await service.exportCampaignClaimLinks(
+        'ops-1',
+        'org-1',
+        'camp-1',
+      );
       expect(res.links).toHaveLength(2);
       for (const link of res.links) {
         expect(Object.keys(link).sort()).toEqual([
           'channel',
           'claimUrl',
           'contactName',
+          'giftReference',
         ]);
       }
       expect(res.links[0]).toEqual({
         contactName: 'سارة العتيبي',
         channel: 'phone',
         claimUrl: 'https://www.qift.net/claim/fresh-job-1',
+        giftReference: 'QG-JOB-1',
       });
       // The phone NUMBER appears nowhere in the response.
       expect(JSON.stringify(res)).not.toContain(PHONE);
     });
 
     it('top-level shape is pinned — no address-shaped keys can sneak in', async () => {
-      const res = await service.exportCampaignClaimLinks('ops-1', 'org-1', 'camp-1');
+      const res = await service.exportCampaignClaimLinks(
+        'ops-1',
+        'org-1',
+        'camp-1',
+      );
       expect(Object.keys(res).sort()).toEqual([
         'campaign',
         'exported',
@@ -145,15 +158,24 @@ describe('ClaimExportService', () => {
     });
 
     it('two exports produce two distinct link sets (rotation is the mint’s job; the export just reflects it)', async () => {
-      const first = await service.exportCampaignClaimLinks('ops-1', 'org-1', 'camp-1');
+      const first = await service.exportCampaignClaimLinks(
+        'ops-1',
+        'org-1',
+        'camp-1',
+      );
       claimMint.mintForJob.mockImplementation(({ jobId }: { jobId: string }) =>
         Promise.resolve({
           ok: true,
           claimId: `claim-${jobId}`,
           claimUrl: `https://www.qift.net/claim/rotated-${jobId}`,
+          giftReference: `QG-${jobId.toUpperCase()}`,
         }),
       );
-      const second = await service.exportCampaignClaimLinks('ops-1', 'org-1', 'camp-1');
+      const second = await service.exportCampaignClaimLinks(
+        'ops-1',
+        'org-1',
+        'camp-1',
+      );
       expect(first.links[0].claimUrl).not.toBe(second.links[0].claimUrl);
     });
   });
@@ -168,7 +190,11 @@ describe('ClaimExportService', () => {
           claimId: 'claim-job-2',
           claimUrl: 'https://www.qift.net/claim/fresh-job-2',
         });
-      const res = await service.exportCampaignClaimLinks('ops-1', 'org-1', 'camp-1');
+      const res = await service.exportCampaignClaimLinks(
+        'ops-1',
+        'org-1',
+        'camp-1',
+      );
       expect(res.exported).toBe(1);
       expect(res.skippedFinalized).toBe(1);
       expect(res.links).toHaveLength(1);
@@ -183,7 +209,11 @@ describe('ClaimExportService', () => {
           claimId: 'claim-job-2',
           claimUrl: 'https://www.qift.net/claim/fresh-job-2',
         });
-      const res = await service.exportCampaignClaimLinks('ops-1', 'org-1', 'camp-1');
+      const res = await service.exportCampaignClaimLinks(
+        'ops-1',
+        'org-1',
+        'camp-1',
+      );
       expect(res.skippedUnreachable).toBe(1);
       expect(res.exported).toBe(1);
     });

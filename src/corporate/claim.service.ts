@@ -126,6 +126,7 @@ export class ClaimService {
     campaignMessage: string | null;
     giftSnapshot: unknown;
     expiresAt: Date;
+    giftReference: string;
   }) {
     return {
       recipientName: claim.recipientName,
@@ -133,6 +134,9 @@ export class ClaimService {
       message: claim.campaignMessage,
       gift: claim.giftSnapshot,
       expiresAt: claim.expiresAt,
+      // Post-OTP only (the teaser stays anonymous): the recipient's
+      // quotable support reference. Not a secret — the token is.
+      giftReference: claim.giftReference,
     };
   }
 

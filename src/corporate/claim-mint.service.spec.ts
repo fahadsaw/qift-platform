@@ -28,8 +28,14 @@ describe('ClaimMintService', () => {
     prisma = {
       claimableGift: {
         findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockResolvedValue({ id: 'claim-1' }),
-        update: jest.fn().mockResolvedValue({ id: 'claim-1' }),
+        create: jest.fn().mockResolvedValue({
+          id: 'claim-1',
+          giftReference: 'QG-FRSH-MINT',
+        }),
+        update: jest.fn().mockResolvedValue({
+          id: 'claim-1',
+          giftReference: 'QG-KEPT-SAME',
+        }),
       },
       corporateContact: {
         findUnique: jest.fn().mockResolvedValue({
@@ -97,6 +103,29 @@ describe('ClaimMintService', () => {
     expect(prisma.claimableGift.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'claim-1' } }),
     );
+  });
+
+  it('QG allocated at first mint: format pinned, echoed in the result', async () => {
+    const res = await service.mintForJob(input);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const { data } = prisma.claimableGift.create.mock.calls[0][0];
+    expect(data.giftReference).toMatch(
+      /^QG-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/,
+    );
+    expect(res.giftReference).toBe('QG-FRSH-MINT'); // echoed from the row
+  });
+
+  it('QG IMMUTABILITY: a pending re-mint rotates the token, NEVER the reference', async () => {
+    prisma.claimableGift.findUnique.mockResolvedValue({
+      id: 'claim-1',
+      status: 'pending',
+    });
+    const res = await service.mintForJob(input);
+    expect(res.ok).toBe(true);
+    const { data } = prisma.claimableGift.update.mock.calls[0][0];
+    expect(data).not.toHaveProperty('giftReference');
+    if (res.ok) expect(res.giftReference).toBe('QG-KEPT-SAME');
   });
 
   it('refuses to touch a finalized claim (claimed gifts are irrevocable)', async () => {

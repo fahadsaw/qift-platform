@@ -12,6 +12,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { allocateReference } from '../references/reference';
 import { generateClaimToken, hashClaimToken } from './claim-token';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -24,7 +25,7 @@ export type MintInput = {
 };
 
 export type MintResult =
-  | { ok: true; claimId: string; claimUrl: string }
+  | { ok: true; claimId: string; giftReference: string; claimUrl: string }
   | { ok: false; error: string };
 
 function claimTtlDays(): number {
@@ -93,27 +94,52 @@ export class ClaimMintService {
       recipientName: contact.fullName,
       channel: contact.phone ? 'phone' : 'email',
       channelValue: contact.phone ?? contact.email!,
-      orgDisplayName:
-        campaign.org.displayNameAr || campaign.org.displayName,
+      orgDisplayName: campaign.org.displayNameAr || campaign.org.displayName,
       campaignMessage: campaign.message,
       giftSnapshot: snapshot,
       expiresAt,
+    };
+
+    // QG reference: allocated once at FIRST mint only. A pending
+    // re-mint rotates the token but `data` above carries no
+    // giftReference, so the original reference survives (pinned by
+    // test). The unique index is the real guarantee; a same-instant
+    // race burns one bounded retry.
+    const createWithReference = async () => {
+      for (let attempt = 0; ; attempt++) {
+        const giftReference = await allocateReference('QG', async (candidate) =>
+          Boolean(
+            await this.prisma.claimableGift.findUnique({
+              where: { giftReference: candidate },
+              select: { id: true },
+            }),
+          ),
+        );
+        try {
+          return await this.prisma.claimableGift.create({
+            data: { ...data, giftReference, jobId: input.jobId },
+            select: { id: true, giftReference: true },
+          });
+        } catch (e) {
+          const code = (e as { code?: string })?.code;
+          if (code === 'P2002' && attempt < 2) continue;
+          throw e;
+        }
+      }
     };
 
     const claim = existing
       ? await this.prisma.claimableGift.update({
           where: { id: existing.id },
           data,
-          select: { id: true },
+          select: { id: true, giftReference: true },
         })
-      : await this.prisma.claimableGift.create({
-          data: { ...data, jobId: input.jobId },
-          select: { id: true },
-        });
+      : await createWithReference();
 
     return {
       ok: true,
       claimId: claim.id,
+      giftReference: claim.giftReference,
       claimUrl: `${claimBaseUrl()}/claim/${token}`,
     };
   }

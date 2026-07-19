@@ -24,15 +24,21 @@
 //     and because sensitive-PII responses don't belong on cacheable
 //     GETs.
 
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { normalizeReference } from '../references/reference';
 
 // Matches the campaign recipient cap — one export covers any
 // pilot-scale wave in a single call.
 const MAX_EXPORT_ROWS = 1000;
 
 export type FulfillmentRow = {
+  giftReference: string;
   recipientName: string;
   phone: string;
   country: string;
@@ -91,7 +97,12 @@ export class FulfillmentExportService {
     // delivery. Everyone else stays invisible.
     const claims = await this.prisma.claimableGift.findMany({
       where: { campaignId, status: 'claimed' },
-      select: { id: true, recipientName: true, claimedAt: true },
+      select: {
+        id: true,
+        giftReference: true,
+        recipientName: true,
+        claimedAt: true,
+      },
       orderBy: { claimedAt: 'asc' },
       take: MAX_EXPORT_ROWS,
     });
@@ -113,6 +124,9 @@ export class FulfillmentExportService {
         continue;
       }
       rows.push({
+        // The merchant's quotable per-row handle — lets support map a
+        // delivery problem to one recipient WITHOUT quoting name/phone.
+        giftReference: claim.giftReference,
         // Prefer the name the recipient entered with their address;
         // fall back to the roster name the claim was minted with.
         recipientName: addr.fullName?.trim() || claim.recipientName,
@@ -152,6 +166,68 @@ export class FulfillmentExportService {
       },
       count: rows.length,
       rows,
+    };
+  }
+
+  // Support lookup by QG reference (Track A.5 PR 3) — the ops answer
+  // to "a recipient/merchant quoted QG-XXXX-XXXX". STRICTLY READ-ONLY:
+  // unlike the claim-link export, this NEVER mints and NEVER rotates a
+  // token (pinned by test). Returns claim state + campaign context —
+  // no address, no channel value, no token material.
+  async lookupClaimByReference(actorUserId: string, reference: string) {
+    const normalized = normalizeReference(reference);
+    if (!normalized || !normalized.startsWith('QG-')) {
+      throw new BadRequestException('invalid_gift_reference');
+    }
+    const claim = await this.prisma.claimableGift.findUnique({
+      where: { giftReference: normalized },
+      select: {
+        giftReference: true,
+        status: true,
+        recipientName: true,
+        channel: true,
+        claimedAt: true,
+        declinedAt: true,
+        expiresAt: true,
+        campaign: {
+          select: {
+            id: true,
+            referenceNumber: true,
+            name: true,
+            orgId: true,
+          },
+        },
+      },
+    });
+    if (!claim) throw new NotFoundException('claim_not_found');
+
+    // Reference only in the audit — never the recipient's name.
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'org.claim.lookup',
+      targetType: 'organization',
+      targetId: claim.campaign.orgId,
+      metadata: {
+        giftReference: normalized,
+        campaignId: claim.campaign.id,
+      },
+    });
+
+    return {
+      giftReference: claim.giftReference,
+      status: claim.status,
+      recipientName: claim.recipientName,
+      channel: claim.channel,
+      claimedAt: claim.claimedAt,
+      declinedAt: claim.declinedAt,
+      expiresAt: claim.expiresAt,
+      campaign: {
+        campaignId: claim.campaign.id,
+        campaignReference: claim.campaign.referenceNumber,
+        campaignName: claim.campaign.name,
+        orgId: claim.campaign.orgId,
+      },
     };
   }
 }
