@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -20,6 +21,7 @@ import { ReportService } from './report.service';
 import { ClaimExportService } from './claim-export.service';
 import { FulfillmentExportService } from './fulfillment-export.service';
 import { CampaignService } from './campaign.service';
+import { MerchantInvoiceService } from './merchant-invoice.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -41,10 +43,33 @@ export class OrgAdminController {
     private readonly claimExport: ClaimExportService,
     private readonly fulfillmentExport: FulfillmentExportService,
     private readonly campaigns: CampaignService,
+    private readonly merchantInvoices: MerchantInvoiceService,
   ) {}
 
-  // Review queue. ?status=submitted is the default operator view;
-  // unknown status values fall back to the unfiltered list.
+  // Attach the merchant's legal invoice reference (Track A.5 PR 5).
+  // Agent model: records what the merchant/connector supplies (or a
+  // contractually authorized on-behalf issuance) — Qift never
+  // manufactures this number. Literal segment, declared before :orgId.
+  @Patch('merchant-invoices/:invoiceId/legal-reference')
+  attachMerchantInvoiceReference(
+    @Param('invoiceId') invoiceId: string,
+    @Body()
+    body: {
+      merchantInvoiceNumber?: string;
+      merchantInvoiceExternalId?: string;
+      merchantInvoiceUrl?: string;
+      source?: string;
+      onBehalfAuthorizationRef?: string;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.merchantInvoices.attachLegalReference(
+      req.user.userId,
+      invoiceId,
+      body,
+    );
+  }
+
   // Support lookup by QG reference (Track A.5 PR 3): resolves what a
   // recipient or merchant quoted, WITHOUT rotating anything. Declared
   // before the :orgId routes so the literal segment wins the match.
@@ -59,6 +84,8 @@ export class OrgAdminController {
     );
   }
 
+  // Review queue. ?status=submitted is the default operator view;
+  // unknown status values fall back to the unfiltered list.
   @Get()
   list(@Query('status') status?: string) {
     return this.orgs.listOrgsForReview(status);

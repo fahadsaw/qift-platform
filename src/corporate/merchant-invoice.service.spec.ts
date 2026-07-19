@@ -491,3 +491,139 @@ describe('MerchantInvoiceService.getMerchantInvoiceForCampaign', () => {
     });
   });
 });
+
+describe('attachLegalReference (Track A.5 PR 5 — agent model)', () => {
+  // The merchant is the legal seller. These tests pin the three
+  // constitutional rules: no manufactured numbers, on-behalf requires
+  // authorization evidence, and set-once immutability.
+  const BASE_INVOICE = {
+    id: 'minv-1',
+    orgId: 'org-1',
+    campaignId: 'camp-1',
+    storeId: 's-1',
+    merchantInvoiceNumber: null,
+    merchantInvoiceExternalId: null,
+    merchantInvoiceUrl: null,
+    invoiceNumberSource: 'MERCHANT',
+    onBehalfAuthorizationRef: null,
+  };
+
+  const mk = (row: Record<string, unknown> = BASE_INVOICE) => {
+    const prisma = {
+      merchantInvoice: {
+        findUnique: jest.fn().mockResolvedValue(row),
+        update: jest
+          .fn()
+          .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+            Promise.resolve({ ...row, ...data }),
+          ),
+      },
+    };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const service = new MerchantInvoiceService(
+      prisma as never,
+      audit as never,
+      { record: jest.fn() } as never,
+    );
+    return { prisma, audit, service };
+  };
+
+  it('records a merchant-supplied number (source MERCHANT) and audits it', async () => {
+    const { prisma, audit, service } = mk();
+    const out = await service.attachLegalReference('ops-1', 'minv-1', {
+      merchantInvoiceNumber: 'DAT-2026-0042',
+      merchantInvoiceUrl: 'https://merchant.example/inv/42.pdf',
+    });
+    expect(out.merchantInvoiceNumber).toBe('DAT-2026-0042');
+    expect(out.invoiceNumberSource).toBe('MERCHANT');
+    expect(prisma.merchantInvoice.update).toHaveBeenCalledTimes(1);
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'org.merchant_invoice.legal_reference_attached',
+        metadata: expect.objectContaining({
+          merchantInvoiceId: 'minv-1',
+          source: 'MERCHANT',
+          merchantInvoiceNumber: 'DAT-2026-0042',
+        }),
+      }),
+    );
+  });
+
+  it('NEVER manufactures a number: attaching nothing leaves the number null', async () => {
+    const { service } = mk();
+    const out = await service.attachLegalReference('ops-1', 'minv-1', {
+      merchantInvoiceExternalId: 'zoho-778',
+      source: 'ACCOUNTING_CONNECTOR',
+    });
+    expect(out.merchantInvoiceNumber).toBeNull();
+    expect(out.invoiceNumberSource).toBe('ACCOUNTING_CONNECTOR');
+    expect(out.merchantInvoiceExternalId).toBe('zoho-778');
+  });
+
+  it('QIFT_ON_BEHALF is REFUSED without authorization evidence', async () => {
+    const { prisma, service } = mk();
+    await expect(
+      service.attachLegalReference('ops-1', 'minv-1', {
+        source: 'QIFT_ON_BEHALF',
+        merchantInvoiceNumber: 'QOB-001',
+      }),
+    ).rejects.toThrow('on_behalf_authorization_required');
+    expect(prisma.merchantInvoice.update).not.toHaveBeenCalled();
+  });
+
+  it('QIFT_ON_BEHALF succeeds WITH the signed-mandate reference', async () => {
+    const { service } = mk();
+    const out = await service.attachLegalReference('ops-1', 'minv-1', {
+      source: 'QIFT_ON_BEHALF',
+      merchantInvoiceNumber: 'QOB-001',
+      onBehalfAuthorizationRef: 'mandate:dar-alteeb:2026-07-01',
+    });
+    expect(out.invoiceNumberSource).toBe('QIFT_ON_BEHALF');
+    expect(out.onBehalfAuthorizationRef).toBe('mandate:dar-alteeb:2026-07-01');
+  });
+
+  it('rejects unknown sources outright', async () => {
+    const { service } = mk();
+    await expect(
+      service.attachLegalReference('ops-1', 'minv-1', { source: 'MAGIC' }),
+    ).rejects.toThrow('invalid_invoice_number_source');
+  });
+
+  it('IMMUTABILITY: a set number can never be changed (same-value idempotent OK)', async () => {
+    const { service } = mk({
+      ...BASE_INVOICE,
+      merchantInvoiceNumber: 'DAT-2026-0042',
+    });
+    await expect(
+      service.attachLegalReference('ops-1', 'minv-1', {
+        merchantInvoiceNumber: 'DAT-2026-9999',
+      }),
+    ).rejects.toThrow('merchant_invoice_number_immutable');
+    // Same value passes through (idempotent re-submit).
+    const out = await service.attachLegalReference('ops-1', 'minv-1', {
+      merchantInvoiceNumber: 'DAT-2026-0042',
+    });
+    expect(out.merchantInvoiceNumber).toBe('DAT-2026-0042');
+  });
+
+  it('IMMUTABILITY: source freezes once the number is set', async () => {
+    const { service } = mk({
+      ...BASE_INVOICE,
+      merchantInvoiceNumber: 'DAT-2026-0042',
+      invoiceNumberSource: 'MERCHANT',
+    });
+    await expect(
+      service.attachLegalReference('ops-1', 'minv-1', {
+        source: 'ACCOUNTING_CONNECTOR',
+      }),
+    ).rejects.toThrow('invoice_number_source_frozen');
+  });
+
+  it('404s an unknown invoice', async () => {
+    const { prisma, service } = mk();
+    prisma.merchantInvoice.findUnique.mockResolvedValue(null);
+    await expect(
+      service.attachLegalReference('ops-1', 'nope', {}),
+    ).rejects.toThrow('merchant_invoice_not_found');
+  });
+});

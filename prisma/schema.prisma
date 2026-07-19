@@ -2281,6 +2281,29 @@ model MerchantInvoice {
   // approval; downstream transitions land with settlement.
   status String @default("issued")
 
+  // ── Legal invoice reference (Track A.5 PR 5 — agent model) ────────
+  // The merchant is the LEGAL SELLER of the goods; this row is Qift's
+  // facilitation record, NOT the legal document. Qift never
+  // manufactures the merchant's legal invoice number.
+  //   merchantInvoiceNumber    — from the merchant's own series;
+  //                              IMMUTABLE once set (corrections =
+  //                              credit note + new document, never a
+  //                              renumber).
+  //   merchantInvoiceExternalId— id in the merchant's accounting
+  //                              system / connector.
+  //   merchantInvoiceUrl       — pointer to the hosted legal document.
+  //   invoiceNumberSource      — MERCHANT (default; merchant supplies)
+  //                              | ACCOUNTING_CONNECTOR (future
+  //                              connector) | QIFT_ON_BEHALF (ONLY
+  //                              with contractual authorization).
+  //   onBehalfAuthorizationRef — REQUIRED when QIFT_ON_BEHALF: pointer
+  //                              to the signed invoicing mandate.
+  merchantInvoiceNumber     String?
+  merchantInvoiceExternalId String?
+  merchantInvoiceUrl        String?
+  invoiceNumberSource       String  @default("MERCHANT")
+  onBehalfAuthorizationRef  String?
+
   currency       String  @default("SAR")
   recipientCount Int
   // FIN-3: exact NUMERIC money (see CorporateInvoice note).
