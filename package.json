@@ -22,6 +22,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:e2e:rbac-matrix": "jest --config ./test/jest-e2e.json --testPathPatterns=rbac-matrix --runInBand",
     "db:guard": "node scripts/assert-not-prod-db.mjs",
+    "lint:migrations": "node scripts/lint-migrations.mjs",
     "db:migrate:dev": "pnpm db:guard && prisma migrate dev",
     "db:reset": "pnpm db:guard && prisma migrate reset",
     "db:seed:local": "pnpm db:guard && prisma db seed"

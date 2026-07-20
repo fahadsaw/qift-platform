@@ -1,17 +1,20 @@
 // Qift platform schema.
 //
-// Datasource is SQLite (see datasource block below). A few SQLite-specific
-// constraints to keep in mind when extending this file:
+// Datasource is PostgreSQL (Railway in production; local Postgres 18
+// for dev — see docker-compose.yml + scripts/assert-not-prod-db.mjs).
+// House conventions when extending this file:
 //   - Prisma `enum` declarations are not used; allowed values for status-like
 //     columns are documented inline as comments next to each field.
-//   - All `@unique`/`@@unique` constraints are case-sensitive. Username and
+//   - `@unique`/`@@unique` constraints are case-sensitive. Username and
 //     email are normalised to lowercase at the application layer.
-//   - Foreign-key cascade rules behave the same as Postgres in Prisma's
-//     emitted SQL, so `onDelete: Cascade | SetNull | Restrict` are honoured.
+//   - Financial tables are FORWARD-ONLY (Core Invariants #22): additive
+//     migrations, no down-migrations, exact NUMERIC money columns.
+//   - Migration folders are hand-authored SQL with UNIQUE leading
+//     timestamps across the whole chain (enforced by
+//     scripts/lint-migrations.mjs in CI).
 //
-// Naming convention: camelCase fields in Prisma (Prisma maps these to the
-// same names in the SQLite tables — no `@@map` is used elsewhere in this
-// file, so we keep that consistency here too).
+// Naming convention: camelCase fields in Prisma mapped 1:1 to column
+// names — no `@@map` anywhere; keep that consistency.
 
 generator client {
   provider = "prisma-client-js"
