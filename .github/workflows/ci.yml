@@ -41,6 +41,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Migration-chain lint (Track B5 / PE-17) — BLOCKING per Financial
+      # Constitution Ch. 20.1/13.16: unique timestamps across the whole
+      # chain, well-formed folder names, non-empty SQL. Validates only;
+      # never touches executed history.
+      - name: Migration chain lint
+        run: node scripts/lint-migrations.mjs
+
       # `pnpm build` = `prisma generate && nest build`. prisma generate
       # only reads the schema; it does not connect to a database.
       - name: Build (prisma generate + nest build)
