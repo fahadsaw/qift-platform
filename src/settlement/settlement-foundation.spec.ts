@@ -215,12 +215,15 @@ function mkEngine(items: Row[]) {
   );
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'led-1' }) };
+  // Rule 2: tests inject a FIXED clock — engine time is deterministic.
+  const clock = { now: () => new Date('2026-07-20T12:00:00.000Z') };
   const engine = new SettlementEngineService(
     prisma as unknown as PrismaService,
     audit as unknown as AuditService,
     ledger as unknown as FinancialLedgerService,
+    clock,
   );
-  return { prisma, audit, ledger, engine, batches, items };
+  return { prisma, audit, ledger, engine, batches, items, clock };
 }
 
 const eligibleItem = (id: string, amount: number): Row => ({

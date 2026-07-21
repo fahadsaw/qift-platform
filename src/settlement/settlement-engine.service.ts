@@ -33,6 +33,7 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -55,6 +56,7 @@ import {
   type BatchState,
   type ItemState,
 } from './settlement-states';
+import { SETTLEMENT_CLOCK, type SettlementClock } from './settlement-clock';
 
 // SC §2 Superseded row: items return per cause. Closed set — a new
 // cause is a constitutional read, not a convenience.
@@ -84,6 +86,9 @@ export class SettlementEngineService {
     private prisma: PrismaService,
     private audit: AuditService,
     private ledger: FinancialLedgerService,
+    // Rule 2 (permanent): time reaches the engine ONLY through this
+    // injectable clock — direct system-time reads are pinned out.
+    @Inject(SETTLEMENT_CLOCK) private clock: SettlementClock,
   ) {}
 
   // ── §30 Simulation — the same calculator, ZERO side effects ───────
@@ -92,7 +97,7 @@ export class SettlementEngineService {
     if (items.length === 0) {
       return {
         simulation: true as const,
-        snapshotAt: new Date().toISOString(),
+        snapshotAt: this.clock.now().toISOString(),
         storeId,
         currency: currency.toUpperCase(),
         itemCount: 0,
@@ -116,7 +121,7 @@ export class SettlementEngineService {
       // (§30.6 staleness law). snapshotAt is a recorded fact, not a
       // calculation input — §34.4 binds calculation paths only.
       simulation: true as const,
-      snapshotAt: new Date().toISOString(),
+      snapshotAt: this.clock.now().toISOString(),
       storeId,
       currency: calculation.currency,
       itemCount: items.length,

@@ -141,6 +141,8 @@ describe('Track C PR 1 — end-to-end financial walkthrough (S01 numbers)', () =
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,
       ledger as unknown as FinancialLedgerService,
+      // Rule 2: a fixed clock — the walkthrough is time-deterministic.
+      { now: () => new Date('2026-07-20T12:00:00.000Z') },
     );
 
     // ── STAGE 2: Simulation (mandatory pre-execution review, §30.4) ─
