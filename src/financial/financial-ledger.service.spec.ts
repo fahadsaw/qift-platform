@@ -10,15 +10,13 @@ import {
 
 function buildService() {
   const financialLedgerEntry = {
-    create: jest
-      .fn()
-      .mockImplementation(({ data }: { data: unknown }) =>
-        Promise.resolve({
-          id: 'ledger-1',
-          createdAt: new Date(0),
-          ...(data as object),
-        }),
-      ),
+    create: jest.fn().mockImplementation(({ data }: { data: unknown }) =>
+      Promise.resolve({
+        id: 'ledger-1',
+        createdAt: new Date(0),
+        ...(data as object),
+      }),
+    ),
     findMany: jest.fn().mockResolvedValue([]),
     findUnique: jest.fn().mockResolvedValue(null),
     count: jest.fn().mockResolvedValue(0),
@@ -296,5 +294,58 @@ describe('FinancialLedgerService', () => {
         where: { idempotencyKey: 'k' },
       });
     });
+  });
+});
+
+describe('settlement lifecycle markers (SC v2.0 §11.1 — Track C PR 1)', () => {
+  // Zero-amount is lawful ONLY for the closed marker family; every
+  // money event keeps the strictly-positive law.
+  it('accepts amount 0 for settlement.started/completed/superseded', async () => {
+    const { service, financialLedgerEntry } = buildService();
+    for (const eventType of [
+      'settlement.started',
+      'settlement.completed',
+      'settlement.superseded',
+    ]) {
+      financialLedgerEntry.create.mockClear();
+      await service.record({
+        eventType,
+        reasonCode: 'SETTLEMENT_LIFECYCLE',
+        actorType: 'user',
+        amount: 0,
+        currency: 'SAR',
+        direction: 'debit',
+        idempotencyKey: `${eventType}:stl-1`,
+      });
+      expect(financialLedgerEntry.create).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('still refuses amount 0 for every money event', async () => {
+    const { service } = buildService();
+    await expect(
+      service.record({
+        eventType: 'merchant.payable.accrued',
+        reasonCode: 'MERCHANT_PAYABLE',
+        actorType: 'system',
+        amount: 0,
+        currency: 'SAR',
+        direction: 'credit',
+      }),
+    ).rejects.toThrow(/positive, finite/);
+  });
+
+  it('refuses negative amounts even for markers', async () => {
+    const { service } = buildService();
+    await expect(
+      service.record({
+        eventType: 'settlement.started',
+        reasonCode: 'SETTLEMENT_LIFECYCLE',
+        actorType: 'user',
+        amount: -1,
+        currency: 'SAR',
+        direction: 'debit',
+      }),
+    ).rejects.toThrow(/positive, finite/);
   });
 });

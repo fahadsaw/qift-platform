@@ -20,6 +20,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { FINANCIAL_EVENTS } from './financial-events';
 
 export type LedgerDirection = 'credit' | 'debit';
 
@@ -100,16 +101,48 @@ export function sanitizeLedgerMetadata(
   return stripSensitive(metadata) as Record<string, unknown>;
 }
 
+// The zero-amount marker family (SC v2.0 §11.1). Closed set — adding
+// an event here is a constitutional decision, not a convenience.
+const SETTLEMENT_LIFECYCLE_MARKERS: ReadonlySet<string> = new Set([
+  FINANCIAL_EVENTS.SETTLEMENT_STARTED,
+  FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
+  FINANCIAL_EVENTS.SETTLEMENT_SUPERSEDED,
+]);
+
 @Injectable()
 export class FinancialLedgerService {
   constructor(private prisma: PrismaService) {}
 
-  // Append a single ledger entry. The ONLY write path.
-  async record(input: RecordLedgerInput) {
+  // Append a single ledger entry. The ONLY write path. `client` lets
+  // a caller post INSIDE its own transaction (Track C: lifecycle
+  // markers must commit atomically with the state change they record —
+  // SC §18.2's superseded/crashed distinction depends on it); the
+  // validation and idempotency semantics are identical on both paths.
+  async record(
+    input: RecordLedgerInput,
+    client: Pick<PrismaService, 'financialLedgerEntry'> = this.prisma,
+  ) {
+    // SC v2.0 §11.1: the settlement LIFECYCLE events are zero-amount
+    // MARKERS on the single write path — they open/close a batch's
+    // disposition with a deterministic key and move no money (their
+    // posting group is trivially zero-sum, §11.3). ONLY this family
+    // may post amount 0; every money event stays strictly positive.
+    // Object.is: rejects -0 (input.amount === 0 would accept it).
+    const isLifecycleMarker =
+      SETTLEMENT_LIFECYCLE_MARKERS.has(input.eventType ?? '') &&
+      Object.is(input.amount, 0);
+    if (isLifecycleMarker && !input.idempotencyKey?.trim()) {
+      // §11.2: settlement events carry deterministic keys — a marker
+      // without one cannot close a disposition reliably.
+      throw new BadRequestException(
+        'settlement lifecycle markers require a deterministic idempotencyKey',
+      );
+    }
     if (
-      typeof input.amount !== 'number' ||
-      !Number.isFinite(input.amount) ||
-      input.amount <= 0
+      !isLifecycleMarker &&
+      (typeof input.amount !== 'number' ||
+        !Number.isFinite(input.amount) ||
+        input.amount <= 0)
     ) {
       throw new BadRequestException(
         'ledger amount must be a positive, finite number',
@@ -141,7 +174,7 @@ export class FinancialLedgerService {
     const idempotencyKey = input.idempotencyKey?.trim() || null;
 
     try {
-      return await this.prisma.financialLedgerEntry.create({
+      return await client.financialLedgerEntry.create({
         data: {
           eventType,
           reasonCode,

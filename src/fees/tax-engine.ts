@@ -31,11 +31,19 @@
 //                      vatRegistered (+ merchant_not_vat_registered
 //                      treatment) and per-merchant pricesIncludeVat;
 //                      snapshot carries the registration facts.
+//   sa-vat-agent-v3  — Track C PR 1 (Settlement Validation Pack F5 /
+//                      S11; Settlement Constitution §34.4): ALL tax
+//                      arithmetic moves to exact integer minor units.
+//                      Identical results everywhere except exact-
+//                      halfway inputs, where IEEE doubles previously
+//                      rounded DOWN (fee 41.30 → VAT 6.19) against the
+//                      Financial Constitution Ch. 5.2 half-up law
+//                      (correct: 6.20). Same treatments, same rates.
 
-import { roundMoney } from './money';
+import { fromMinor, toMinor } from './money';
 
 export const SAUDI_VAT_RATE = 0.15; // KSA standard rate
-export const TAX_RULE_VERSION = 'sa-vat-agent-v2';
+export const TAX_RULE_VERSION = 'sa-vat-agent-v3';
 
 export type TaxTreatment =
   // Qift as principal (legacy): 15% VAT on (subtotal + platform fee).
@@ -92,10 +100,53 @@ const PROVISIONAL_NOTE =
   'is excluded as facilitated pass-through. No VAT is remitted to ZATCA ' +
   'yet. Frozen on the invoice for historical correctness.';
 
-// FIN-3: rounding is delegated to the Shared Financial Core's Money
-// policy (integer minor units) so there is exactly one rounding rule.
+// v3 — EXACT integer-minor-unit arithmetic (FC Ch. 5.2; Settlement
+// Constitution §34.4: no floating-point path may influence a stored
+// amount). Rates are scaled to basis points (4 dp) so every VAT
+// computation is pure integer math with explicit round-half-up at the
+// single division — the S11 halfway case (41.30 × 15% = 619.5 halalas)
+// rounds UP to 6.20 by law, where IEEE doubles drifted to 6.19.
+const RATE_SCALE = 10_000;
+
+function rateBasisPoints(rate: number): number {
+  return Math.round(rate * RATE_SCALE);
+}
+
+// v3 domain law: tax bases are non-negative. Credit/refund flows pass
+// positive magnitudes and apply sign at posting (documents reverse via
+// credit notes, never negative tax computation) — a negative operand
+// here would floor toward −∞ instead of half-up, so it is refused.
+function assertNonNegativeMinor(minor: number): void {
+  if (minor < 0) {
+    throw new Error('tax_engine_negative_base_unsupported');
+  }
+}
+
+// VAT on an exclusive base: minor * rate, half-up, in integers.
+function vatOnMinor(baseMinor: number, rateBp: number): number {
+  assertNonNegativeMinor(baseMinor);
+  const scaled = baseMinor * rateBp;
+  const q = Math.floor(scaled / RATE_SCALE);
+  const r = scaled % RATE_SCALE;
+  return q + (2 * r >= RATE_SCALE ? 1 : 0);
+}
+
+// Net extraction from a VAT-inclusive gross: gross / (1 + rate),
+// half-up, in integers. VAT is the complement (gross − net), so the
+// pair always sums exactly to the gross — no independent-rounding leak.
+function extractNetMinor(grossMinor: number, rateBp: number): number {
+  assertNonNegativeMinor(grossMinor);
+  const den = RATE_SCALE + rateBp;
+  const num = grossMinor * RATE_SCALE;
+  const q = Math.floor(num / den);
+  const r = num % den;
+  return q + (2 * r >= den ? 1 : 0);
+}
+
+// Major-unit boundary: inputs arrive as SAR majors; all computation is
+// minor-unit; outputs return to majors via the Money policy.
 function round2(n: number): number {
-  return roundMoney(n);
+  return fromMinor(toMinor(n, 'SAR'), 'SAR');
 }
 
 export function computeTax(input: TaxInput): TaxBreakdown {
@@ -122,18 +173,24 @@ export function computeTax(input: TaxInput): TaxBreakdown {
   let totalBeforeVat: number;
   let totalAmount: number;
 
+  const rateBp = rateBasisPoints(vatRate);
+  const chargeMinor = toMinor(qiftChargeBase, 'SAR');
+
   if (pricesIncludeVat) {
     // The Qift charge already includes VAT — extract the tax portion.
-    taxableAmount = round2(qiftChargeBase / (1 + vatRate));
-    vatAmount = round2(qiftChargeBase - taxableAmount);
-    totalAmount = round2(qiftChargeBase);
-    totalBeforeVat = round2(totalAmount - vatAmount);
+    // Net by half-up division; VAT as the exact complement.
+    const netMinor = extractNetMinor(chargeMinor, rateBp);
+    taxableAmount = fromMinor(netMinor, 'SAR');
+    vatAmount = fromMinor(chargeMinor - netMinor, 'SAR');
+    totalAmount = fromMinor(chargeMinor, 'SAR');
+    totalBeforeVat = taxableAmount;
   } else {
     // VAT added on top of the Qift charge.
-    taxableAmount = round2(qiftChargeBase);
-    vatAmount = round2(taxableAmount * vatRate);
-    totalBeforeVat = round2(qiftChargeBase);
-    totalAmount = round2(totalBeforeVat + vatAmount);
+    const vatMinor = vatOnMinor(chargeMinor, rateBp);
+    taxableAmount = fromMinor(chargeMinor, 'SAR');
+    vatAmount = fromMinor(vatMinor, 'SAR');
+    totalBeforeVat = taxableAmount;
+    totalAmount = fromMinor(chargeMinor + vatMinor, 'SAR');
   }
 
   return {
@@ -274,16 +331,22 @@ export function computeMerchantGoodsTax(
   let vatAmount: number;
   let totalAmount: number;
 
+  const rateBp = rateBasisPoints(vatRate);
+  const goodsMinor = toMinor(goods, 'SAR');
+
   if (pricesIncludeVat) {
-    // The goods price already includes VAT — extract the tax portion.
-    taxableAmount = round2(goods / (1 + vatRate));
-    vatAmount = round2(goods - taxableAmount);
-    totalAmount = round2(goods);
+    // The goods price already includes VAT — extract the tax portion
+    // (net by half-up division; VAT as the exact complement).
+    const netMinor = extractNetMinor(goodsMinor, rateBp);
+    taxableAmount = fromMinor(netMinor, 'SAR');
+    vatAmount = fromMinor(goodsMinor - netMinor, 'SAR');
+    totalAmount = fromMinor(goodsMinor, 'SAR');
   } else {
     // VAT added on top of the goods base.
-    taxableAmount = round2(goods);
-    vatAmount = round2(taxableAmount * vatRate);
-    totalAmount = round2(taxableAmount + vatAmount);
+    const vatMinor = vatOnMinor(goodsMinor, rateBp);
+    taxableAmount = fromMinor(goodsMinor, 'SAR');
+    vatAmount = fromMinor(vatMinor, 'SAR');
+    totalAmount = fromMinor(goodsMinor + vatMinor, 'SAR');
   }
 
   return {

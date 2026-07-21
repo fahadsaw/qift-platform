@@ -55,15 +55,21 @@ describe('reference grammar', () => {
       expect(REFERENCE_PREFIXES.QG.kind).toBe('random');
       expect(REFERENCE_PREFIXES.QF.kind).toBe('random');
       expect(REFERENCE_PREFIXES.QC.kind).toBe('sequential');
-      expect(REFERENCE_PREFIXES.QS.kind).toBe('reserved');
+      expect(REFERENCE_PREFIXES.QS.kind).toBe('random'); // ACTIVE per RC v2.0
     });
 
     it('refuses to randomly generate the sequential invoice prefix (QC)', () => {
       expect(() => generateReference('QC')).toThrow(/not_random.*sequential/i);
     });
 
-    it('refuses to generate the reserved settlement prefix (QS)', () => {
-      expect(() => generateReference('QS')).toThrow(/not_random.*reserved/i);
+    it('QS is ACTIVE (RC v2.0): random settlement-batch reference generates', () => {
+      // The v1.0 refusal pin is retired BY the activating amendment
+      // (RC v2.0 Ch. 10.2) and replaced by allocation-at-assembly
+      // discipline pinned in the settlement engine spec: QS only at
+      // batch assembly, immutable across retries, renewed on
+      // re-assembly, never on simulations.
+      const ref = generateReference('QS');
+      expect(ref).toMatch(/^QS-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/);
     });
 
     it('refuses to format a random prefix as sequential', () => {

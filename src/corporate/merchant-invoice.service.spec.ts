@@ -179,7 +179,7 @@ describe('MerchantInvoiceService.ensureMerchantInvoiceForCampaign', () => {
     await service.ensureMerchantInvoiceForCampaign(ORG, CAMPAIGN, ACTOR);
     const d = createdData(prisma);
     expect(d.taxSnapshot).toMatchObject({
-      ruleVersion: 'sa-vat-agent-v2',
+      ruleVersion: 'sa-vat-agent-v3',
       vatRate: 0.15,
       taxTreatment: 'merchant_goods_standard',
       // FIN-1 — the merchant's VAT facts are frozen with the rule.

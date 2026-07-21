@@ -3,7 +3,9 @@ import { buildOrderLedgerEntries, LEDGER_REASON } from './order-ledger';
 
 // A paid order carrying the server-authoritative FeeEngine amounts:
 //   productPrice 500 + serviceFee 15 + deliveryFee 15 = totalAmount 530.
-function paidOrder(overrides: Partial<Parameters<typeof buildOrderLedgerEntries>[0]> = {}) {
+function paidOrder(
+  overrides: Partial<Parameters<typeof buildOrderLedgerEntries>[0]> = {},
+) {
   return {
     id: 'order-1',
     userId: 'buyer-1',
@@ -78,7 +80,14 @@ describe('buildOrderLedgerEntries', () => {
         paymentProvider: 'mada',
       });
       const flat = JSON.stringify(e).toLowerCase();
-      for (const banned of ['address', 'phone', 'receiver', 'street', 'claim', 'message']) {
+      for (const banned of [
+        'address',
+        'phone',
+        'receiver',
+        'street',
+        'claim',
+        'message',
+      ]) {
         expect(flat).not.toContain(banned);
       }
     }

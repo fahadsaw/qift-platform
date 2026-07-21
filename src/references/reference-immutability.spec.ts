@@ -54,4 +54,34 @@ describe('reference immutability tripwire (source pins)', () => {
       count('gifts/gifts-auto-default.service.ts', 'fulfillmentNumber'),
     ).toBe(5);
   });
+
+  // ── QS (Track C PR 1 — the RC v2.0 Ch. 10.2 replacement pins) ─────
+  // The v1.0 generator-refusal pin is retired by the activating
+  // amendment; these are its equal-strength replacements: QS is minted
+  // in EXACTLY ONE place (the settlement engine's assembly), and the
+  // settlementReference column is written exactly once at creation.
+
+  it('QS: allocated ONLY by settlement-engine assembly — nowhere else', () => {
+    // 1 = the single allocateReference('QS', ...) call at assembly.
+    expect(
+      count('settlement/settlement-engine.service.ts', 'allocateReference('),
+    ).toBe(1);
+    // No other module may mint QS: generateReference('QS') appears
+    // only in the reference module's own kind-check + spec.
+    expect(
+      count('settlement/settlement-engine.service.ts', 'generateReference'),
+    ).toBe(0);
+  });
+
+  it('settlementReference: written once at create; engine only READS it afterwards', () => {
+    // 15 occurrences, all read-or-create-time: allocation const +
+    // uniqueness-probe where + create data key (the ONLY write) +
+    // twelve READS (assembly marker metadata + assembly audit + the
+    // batch.settlementReference reads in markFailed/retry/holdBatch/
+    // supersede marker/supersede audit). No update path writes it —
+    // the write-once law (RC Ch. 8.1/10.2 replacement pin).
+    expect(
+      count('settlement/settlement-engine.service.ts', 'settlementReference'),
+    ).toBe(15);
+  });
 });
