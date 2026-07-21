@@ -65,6 +65,69 @@ with a **new** QS (SC §2, §14.1, §34.2).
   frozen fields survive the whole lane, and that change requires
   Supersede → terminal → successor batch with a different QS.
 
+## Rule 4 — The Settlement Statement is a constitutional output
+
+Enacted by founder directive on 2026-07-22, after PR #84 approval.
+The Settlement Statement (SC §15.1) is generated **only** by the pure
+function in `src/settlement/settlement-statement.ts`, over frozen data
+(QS, composition, calculation snapshot) plus supplied business facts
+(issuance date, remittance evidence). **Replay must regenerate the
+identical statement**: the generator never recomputes money (it renders
+the frozen §4 lines verbatim), never reads a clock, DB, or randomness.
+Format changes are a `statementVersion` bump; issued statements are
+immutable.
+
+- Serves SC §15.1 and extends §34 (Deterministic Replay Law) to the
+  merchant-facing document.
+- Pins: byte-identical regeneration (canonical JSON + hash equality);
+  tampered frozen data flows through verbatim (proving no
+  recomputation); purity import pin (exactly `crypto` + the calculator
+  *type*); every date is a supplied input.
+
+## Rule 5 — Execution Preview before Execute, on the one calculator
+
+An **Execution Preview must exist before Execute**, produced by
+`buildExecutionPreview` (`src/settlement/settlement-execution-binding.ts`):
+it renders the frozen snapshot (never recomputed values), carries the
+snapshot's `calculationHash` as the binding token, §34-verifies by
+recomputing the frozen composition through the **one calculator**
+(`calculateSettlement`) and **comparing** — a mismatch is surfaced as
+`replayVerified: false`, never masked, and blocks execution at the
+Rule 6 gate. The preview's statement draft uses the Rule 4 generator.
+
+- Serves SC §30.3 (one-calculator law) and §30.4 (mandatory
+  pre-execution review).
+- Pins: the calculator's only lawful production importers are the
+  engine and the binding module (Rule 1 pin, updated); the binding
+  module's imports are exactly the calculator + the statement module;
+  tampered snapshots surface as unverified while frozen values still
+  render.
+
+## Rule 6 — Execution only from an approved preview; one frozen snapshot
+
+**No execution may calculate anything independently.** The chain
+
+```
+Preview  ──►  Approval  ──►  Execute
+```
+
+binds to the **identical frozen calculation snapshot**, named by one
+`calculationHash`. Every money-moving execution path MUST pass
+`assertExecutionBinding(frozen, preview, approvals, executorUserId)`,
+which refuses: a preview of another batch, a preview or approval whose
+hash differs from the frozen snapshot's, an unverified §34 replay,
+missing approvals, and an executor who appears among the approvers
+(SC §33 separation, strict form — no emergency collapses it). SETTLE-2's
+execute service consumes this gate and uses only the frozen snapshot
+thereafter.
+
+- Serves SC §31–§33 (approvals, thresholds, approval/execution
+  separation) and §34.
+- Pins: the full refusal matrix (each violation by name); the lawful
+  chain passes; hash canonicalization (key-order independence, one-
+  halala sensitivity); preview/approval/statement all carry the same
+  token.
+
 ## Amending these rules
 
 A change to any rule (or its pins) must name the rule, cite the
