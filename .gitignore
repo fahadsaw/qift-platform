@@ -75,3 +75,6 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # once; it held source code, not secrets — verified by gitleaks over
 # the full history, Track A7).
 .envnano
+
+# Generated simulation artifacts (never commit)
+test/simulations/reports/

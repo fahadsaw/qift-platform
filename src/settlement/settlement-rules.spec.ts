@@ -86,15 +86,23 @@ describe('RULE 1 — settlement calculations live ONLY in the Settlement Engine'
 // ─────────────────────────────────────────────────────────────────────
 describe('RULE 2 — no direct system time in the Settlement Engine', () => {
   // Every settlement production source EXCEPT the sanctioned adapter.
-  const GOVERNED = [
+  // PURE files may not construct Date at all; SERVICE files may parse
+  // operator-supplied dates (new Date(<evidence string>) is data, not
+  // time) but never read the machine clock (bare new Date() or
+  // Date.now()).
+  const GOVERNED_PURE = [
     'settlement-engine.service.ts',
     'settlement-calculator.ts',
     'settlement-states.ts',
     'settlement.module.ts',
   ];
+  const GOVERNED_SERVICES = [
+    'settlement-receipts.service.ts',
+    'settlement-eligibility.service.ts',
+  ];
 
-  it('governed settlement sources contain zero Date.now / new Date / Math.random', () => {
-    for (const name of GOVERNED) {
+  it('pure settlement sources contain zero Date.now / new Date / Math.random', () => {
+    for (const name of GOVERNED_PURE) {
       const text = read(join(SETTLEMENT, name));
       expect({ name, hits: count(text, 'Date.now(') }).toEqual({
         name,
@@ -105,6 +113,36 @@ describe('RULE 2 — no direct system time in the Settlement Engine', () => {
         hits: 0,
       });
       expect({ name, hits: count(text, 'Math.random(') }).toEqual({
+        name,
+        hits: 0,
+      });
+    }
+  });
+
+  it('settlement services never read the machine clock and inject SettlementClock', () => {
+    for (const name of GOVERNED_SERVICES) {
+      const text = read(join(SETTLEMENT, name));
+      expect({ name, hits: count(text, 'Date.now(') }).toEqual({
+        name,
+        hits: 0,
+      });
+      // Bare construction = a system-time read.
+      expect({ name, hits: count(text, 'new Date()') }).toEqual({
+        name,
+        hits: 0,
+      });
+      expect({ name, hits: count(text, 'Math.random(') }).toEqual({
+        name,
+        hits: 0,
+      });
+      expect(count(text, 'SETTLEMENT_CLOCK')).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('settlement services never touch SettlementBatch — batch mutation is engine-only', () => {
+    for (const name of GOVERNED_SERVICES) {
+      const text = read(join(SETTLEMENT, name));
+      expect({ name, hits: count(text, 'settlementBatch') }).toEqual({
         name,
         hits: 0,
       });

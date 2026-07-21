@@ -8,6 +8,7 @@ import { OpsRolesModule } from '../ops-roles/ops-roles.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AuditModule } from '../audit/audit.module';
 import { FinancialLedgerModule } from '../financial/financial-ledger.module';
+import { SettlementModule } from '../settlement/settlement.module';
 import { VatFactsService } from './vat-facts.service';
 
 // AdminModule. Pulls StoresModule for the v2 review endpoints
@@ -34,6 +35,10 @@ import { VatFactsService } from './vat-facts.service';
     // Track B2 / PE-11 — the constitutionally required reconciliation
     // surface (Financial Constitution Ch. 5.6) rides the admin plane.
     FinancialLedgerModule,
+    // SETTLE-1 (Track C PR 2) — receipts + eligibility ride the same
+    // admin plane behind finance.receipts; the services live in the
+    // settlement module (RULE 1: calculations never leave it).
+    SettlementModule,
   ],
   controllers: [AdminController, AdminWorkersController],
   providers: [VatFactsService, AdminService, AdminGuard],

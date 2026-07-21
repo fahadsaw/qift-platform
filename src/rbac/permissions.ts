@@ -108,6 +108,12 @@ export const FINANCE_PERMISSIONS = [
   // than finance.write_financial_config (reserved for the Stage 10
   // finance_admin): this grants exactly the merchant-VAT-facts flow.
   'finance.vat_facts',
+  // SETTLE-1 (Track C PR 2): payment receipts (record/list), the
+  // receivables-aging read model, §5 eligibility evaluation, and
+  // payout-identity verification. Collections surface only — batch
+  // EXECUTION rights are a separate later permission (SC §31–§33
+  // approval/execution separation).
+  'finance.receipts',
   'finance.reject_payout',
   'finance.read_payout_overview',
 

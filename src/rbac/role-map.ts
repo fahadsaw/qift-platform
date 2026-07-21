@@ -119,6 +119,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     'finance.approve_payout',
     'finance.reconcile',
     'finance.vat_facts',
+    'finance.receipts',
     'store.read_detail',
     'analytics.read',
   ],

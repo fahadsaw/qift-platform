@@ -36,11 +36,15 @@ the settlement subsystem. Tests and the §34 replay harness inject fixed
 clocks.
 
 - Serves SC §34 (Deterministic Replay Law) and §30.6.
-- Pins: governed settlement sources (engine, calculator, states,
-  module) contain zero direct system-time or randomness reads;
-  `settlement-clock.ts` contains exactly one; the engine constructor
-  injects the clock; a fixed clock makes `simulate` byte-identical
-  across runs.
+- Pins: PURE settlement sources (engine, calculator, states, module)
+  contain zero Date construction, system-time, or randomness reads;
+  settlement SERVICE sources (receipts, eligibility — SETTLE-1) may
+  parse operator-supplied dates (evidence is data, not time) but are
+  pinned to zero machine-clock reads and must inject the clock;
+  `settlement-clock.ts` contains exactly one system-time read; a fixed
+  clock makes `simulate` byte-identical across runs. Settlement
+  services are additionally pinned to zero `settlementBatch` access —
+  batch mutation is engine-only (Rule 3's perimeter).
 
 ## Rule 3 — SettlementBatch is immutable after assembly
 

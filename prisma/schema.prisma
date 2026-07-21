@@ -526,6 +526,16 @@ model Store {
   // VAT rule. Distinct from countryOfRegistration (a docs concern).
   taxCountry String @default("SA")
 
+  // ── Payout identity (SETTLE-1, SC §5.4/§13.4/§20) ─────────────
+  // Merchant bank identity verified by ops at onboarding; settlement
+  // eligibility HARD-REQUIRES verifiedAt non-null. Evidence names the
+  // verification artifact (never the bank details themselves — no
+  // account numbers in this row). Re-verification on bank change is
+  // law; at pilot there is no in-system bank-detail record to change,
+  // so ops re-runs this action when the merchant reports a change.
+  payoutIdentityVerifiedAt DateTime?
+  payoutIdentityEvidence   String?
+
   // ── Contact PoC ───────────────────────────────────────────────
   contactPerson String?
   contactPhone  String?
@@ -2815,4 +2825,48 @@ model SettlementItem {
   @@unique([occurrenceType, occurrenceId])
   @@index([storeId, state])
   @@index([batchId])
+}
+
+// PaymentReceipt — SETTLE-1 (Track C PR 2). The Ch. 4.7 document:
+// confirmation of money received against an invoice, and THE
+// occurrence entity for `invoice.payment.received:{receiptId}`
+// (FC Ch. 3.2 reserved taxonomy; SC §5.1 "cash settles, accruals
+// never"). IMMUTABLE once recorded — a wrong receipt is corrected by
+// compensating entries, never edited (FC Rule 13.8).
+//
+// Partial payments are LAWFUL (FC 6.2/roadmap 308): multiple receipts
+// against one invoice; the invoice's `paid` status DERIVES from
+// receipts covering the total — never a bare flag.
+//
+// Idempotency (SC §18.1): the [invoiceType, invoiceId, bankReference]
+// unique makes re-recording the same bank transfer collide with the
+// original — retries and double-clicks never duplicate money.
+model PaymentReceipt {
+  id            String   @id @default(cuid())
+  // 'corporate_invoice' (Qift fee leg → operating account) |
+  // 'merchant_invoice'  (goods leg → safeguarding account, SC §13.3)
+  invoiceType   String
+  invoiceId     String // plain TEXT, no FK (financial rows outlive joins)
+  // Denormalized correlation ids (purge-survivable, RC Ch. 14.4).
+  orgId         String?
+  campaignId    String?
+  storeId       String? // set for merchant_invoice receipts
+  amount        Decimal  @db.Decimal(12, 2)
+  currency      String   @default("SAR")
+  // Rail (SC §12.2): 'manual_bank_transfer' at pilot; PSP rails later
+  // produce IDENTICAL postings/documents/lifecycle.
+  rail          String   @default("manual_bank_transfer")
+  // Evidence (SC §13.2): the bank's transfer reference. REQUIRED.
+  bankReference String
+  // Business fact supplied by the operator (value date), not a
+  // machine clock — replay-safe by construction.
+  receivedAt    DateTime
+  recordedBy    String // ops user id (plain TEXT)
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@unique([invoiceType, invoiceId, bankReference])
+  @@index([invoiceType, invoiceId])
+  @@index([storeId])
+  @@index([campaignId])
 }
