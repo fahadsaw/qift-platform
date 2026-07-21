@@ -2793,6 +2793,10 @@ model SettlementBatch {
   // Set when superseded: the successor batch id (new QS). Terminal.
   supersededById      String?
   failureEvidence     String?
+  // The PROPOSER (§31.1 L2 maker–checker; §33.4 evidence chain):
+  // recorded at assembly, immutable. Approvers must differ from it;
+  // nullable only for pre-SETTLE-2 rows — approval refuses null.
+  assembledBy         String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -2869,4 +2873,89 @@ model PaymentReceipt {
   @@index([invoiceType, invoiceId])
   @@index([storeId])
   @@index([campaignId])
+}
+
+// ── SETTLE-2 (Track C PR 3): approvals, remittance, statements ──────
+// SC v2.0 §31–§33 + permanent RULES 4–6. Financial-record discipline:
+// plain-TEXT ids, no FKs, no PII, exact NUMERIC money, immutable rows.
+
+// One approval act (§31/§33.1): binds to the batch's EXACT frozen
+// calculation via calculationHash (RULE 6). Any recomposition is a new
+// batch + QS, voiding these rows by construction. Approvals lapse
+// after the §31.3 policy TTL — lapse is evaluated at execution time,
+// never by mutating the row.
+model SettlementApproval {
+  id                  String   @id @default(cuid())
+  settlementId        String
+  settlementReference String
+  // The RULE 6 binding token (sha256 of the frozen calculation).
+  calculationHash     String
+  // Required §32 level computed AT approval time (recorded fact; the
+  // authoritative check re-computes at execution).
+  requiredLevel       Int
+  approvedBy          String // server-verified user id (§31.4)
+  approvedAt          DateTime
+  note                String?
+  createdAt           DateTime @default(now())
+
+  // §31.5: one human, one identity, one vote — per ROUND. A vote that
+  // LAPSED (§31.3 TTL) may be recast as a NEW immutable row (fresh
+  // approvedAt); the service refuses a second ACTIVE vote and the
+  // execution gate counts DISTINCT identities among active votes.
+  @@unique([settlementId, approvedBy, approvedAt])
+  @@index([settlementId])
+}
+
+// The §30.4 preview ACT, recorded as a fact (append-only). RULE 5's
+// "a preview must exist before Execute" is enforced against THESE
+// rows — possessing the hash is not reviewing the preview.
+model SettlementExecutionPreview {
+  id                  String   @id @default(cuid())
+  settlementId        String
+  settlementReference String
+  calculationHash     String
+  replayVerified      Boolean
+  previewedBy         String
+  previewedAt         DateTime
+  createdAt           DateTime @default(now())
+
+  @@index([settlementId, previewedAt])
+}
+
+// The executed bank movement (§13.2 manual rail). ONE remittance per
+// batch at pilot (full-net; partial remittances are a future statement
+// enumeration). Idempotency anchor for merchant.remittance.paid.
+model SettlementRemittance {
+  id                    String   @id @default(cuid())
+  settlementId          String   @unique
+  settlementReference   String
+  storeId               String
+  currency              String   @default("SAR")
+  amount                Decimal  @db.Decimal(12, 2) // == frozen net, always
+  // SC §13.2: the bank's transfer reference IS the evidence.
+  bankTransferReference String
+  executedAt            DateTime // bank value date — business fact
+  executedBy            String // the EXECUTOR (§33.2 distinctness proof)
+  createdAt             DateTime @default(now())
+
+  @@index([storeId, executedAt])
+}
+
+// The issued Settlement Statement (RULE 4: constitutional output).
+// payload = the full statement exactly as generated from frozen data;
+// statementHash pins it — §34 replay regenerates and compares.
+// Immutable: corrections are compensating documents on the NEXT
+// statement (§16.3), never edits.
+model SettlementStatementRecord {
+  id                  String   @id @default(cuid())
+  settlementId        String   @unique
+  settlementReference String
+  storeId             String
+  statementVersion    String
+  payload             Json
+  statementHash       String
+  issuedAt            DateTime
+  createdAt           DateTime @default(now())
+
+  @@index([storeId, issuedAt])
 }

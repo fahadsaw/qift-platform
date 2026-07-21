@@ -263,14 +263,17 @@ describe('RBAC catalog — finance role parity with apps/api/src/ops-roles/', ()
       // SETTLE-1 (Track C PR 2): receipts + aging + §5 eligibility +
       // payout-identity verification. Execution stays future-gated.
       'finance.receipts',
+      // SETTLE-2 (Track C PR 3): §33.1 two powers.
+      'finance.settlement_approve',
+      'finance.settlement_execute',
       'store.read_detail',
       'analytics.read',
     ]);
     expect(new Set(ROLE_PERMISSIONS.finance)).toEqual(expected);
   });
 
-  it('finance role count is 9', () => {
-    expect(ROLE_PERMISSIONS.finance.length).toBe(9);
+  it('finance role count is 11', () => {
+    expect(ROLE_PERMISSIONS.finance.length).toBe(11);
   });
 
   it('finance does NOT hold expanded Stage 10 finance rights', () => {

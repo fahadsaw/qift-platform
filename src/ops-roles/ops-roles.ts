@@ -121,6 +121,11 @@ export const OPS_PERMISSIONS = [
   // verification. Batch execution stays a future permission (SC
   // §31–§33 approval/execution separation).
   'finance.receipts',
+  // SETTLE-2 (Track C PR 3): §33.1 approval vs execution — two
+  // distinct acts under two distinct permissions; executor ∉
+  // approvers is enforced in-service on identity (RULE 6 gate).
+  'finance.settlement_approve',
+  'finance.settlement_execute',
   // Diagnostics / debug.
   'diagnostics.read',
   'diagnostics.run_seed',
@@ -176,6 +181,8 @@ const PERMISSIONS_BY_ROLE: Record<
     'finance.reconcile',
     'finance.vat_facts',
     'finance.receipts',
+    'finance.settlement_approve',
+    'finance.settlement_execute',
     'store.read_detail',
     'analytics.read',
   ],
@@ -251,6 +258,8 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'finance.reconcile',
   'finance.vat_facts',
   'finance.receipts',
+  'finance.settlement_approve',
+  'finance.settlement_execute',
   'diagnostics.read',
   'diagnostics.run_seed',
   'report.read',

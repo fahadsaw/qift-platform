@@ -48,6 +48,7 @@ import { allocateReference } from '../references/reference';
 import { moneyToNumber } from '../fees/money';
 import {
   calculateSettlement,
+  type SettlementCalculation,
   type SettlementItemInput,
 } from './settlement-calculator';
 import {
@@ -139,15 +140,17 @@ export class SettlementEngineService {
 
     // §34: freeze composition + calculation AT assembly. These JSON
     // snapshots are the replay inputs — never rewritten afterward.
-    // (Per-occurrence canonical references resolve through the
-    // occurrence ids' immutable documents; SETTLE-2's statements
-    // denormalize them when statements exist.)
+    // Canonical references are DENORMALIZED here (SC §15.1: the
+    // statement carries each occurrence's references and document
+    // numbers; RC Ch. 14.4: purge-survivable, no live joins later).
+    const references = await this.occurrenceReferences(items);
     const composition = items.map((i) => ({
       itemId: i.id,
       occurrenceType: i.occurrenceType,
       occurrenceId: i.occurrenceId,
       amount: moneyToNumber(i.amount),
       currency: i.currency,
+      references: references.get(`${i.occurrenceType}:${i.occurrenceId}`) ?? {},
     }));
 
     for (const item of items) {
@@ -180,6 +183,9 @@ export class SettlementEngineService {
               netAmount: calculation.netAmount,
               composition,
               calculationSnapshot: calculation,
+              // The PROPOSER (§31.1) — create-time frozen fact; the
+              // §33 separation checks bind to it.
+              assembledBy: actorUserId,
             },
           });
           // CONCURRENCY GUARD (§18.1): bind ONLY items still eligible
@@ -352,6 +358,20 @@ export class SettlementEngineService {
     }
     const batch = await this.loadBatch(batchId);
     assertBatchTransition(batch.status as BatchState, 'superseded');
+    // ANTI-DOUBLE-PAY (adversarial review, PR 3): a batch with a
+    // recorded bank movement may NEVER be superseded — its items
+    // would return to circulation and be paid a second time. A wrong
+    // remittance is the §2 Reversed / §18.3 incident lane, not
+    // supersession. (The remittance row is created atomically with
+    // settled status, so a ready batch with a remittance cannot
+    // exist — this check still stands as the recorded law.)
+    const remitted = await this.prisma.settlementRemittance.findUnique({
+      where: { settlementId: batchId },
+      select: { id: true },
+    });
+    if (remitted) {
+      throw new ConflictException('supersede_refused_remittance_exists');
+    }
 
     const items = await this.prisma.settlementItem.findMany({
       where: { batchId },
@@ -435,6 +455,160 @@ export class SettlementEngineService {
     return this.loadBatch(batchId);
   }
 
+  // ── Settled (SETTLE-2, §13.2 / §11.1) ────────────────────────────
+  // Ready → Settled + the REMITTANCE ROW + the settlement.completed
+  // marker, ALL in one transaction — the only lawful close of a
+  // started batch besides supersession (SC §2). The atomicity is the
+  // anti-double-pay law: a SettlementRemittance row can exist ONLY
+  // for a batch that actually settled (a concurrent supersession
+  // makes the guarded status update fail, rolling the remittance
+  // back), and a settled batch can never re-enter circulation.
+  // The remittance amount is the batch's FROZEN net — never supplied
+  // (RULE 6). Idempotent: an already-settled batch returns its
+  // recorded remittance (evidence identity re-checked by the caller).
+  async markSettled(
+    actorUserId: string,
+    batchId: string,
+    evidence: {
+      bankTransferReference: string;
+      executedAt: Date;
+      executedBy: string;
+    },
+  ) {
+    const batch = await this.loadBatch(batchId);
+    if (batch.status === 'settled') {
+      // Idempotent re-run: the recorded movement stands.
+      const remittance = await this.prisma.settlementRemittance.findUnique({
+        where: { settlementId: batchId },
+      });
+      if (!remittance) {
+        // Settled without a remittance cannot exist under this
+        // atomicity — if seen, it is a §18.3 incident for repair.
+        throw new ConflictException('settled_without_remittance');
+      }
+      return { batch, remittance, replayed: true as const };
+    }
+    assertBatchTransition(batch.status as BatchState, 'settled');
+    const memberIds = (
+      batch.composition as Array<{ itemId: string }>
+    ).map((c) => c.itemId);
+    const remittance = await this.prisma.$transaction(async (tx) => {
+      const closed = await tx.settlementBatch.updateMany({
+        where: { id: batchId, status: 'ready' },
+        data: { status: 'settled' },
+      });
+      if (closed.count !== 1) {
+        throw new ConflictException('settlement_batch_contended');
+      }
+      assertItemTransition('ready', 'settled'); // state law consulted, always
+      const settledItems = await tx.settlementItem.updateMany({
+        where: { id: { in: memberIds }, batchId, state: 'ready' },
+        data: { state: 'settled' satisfies ItemState },
+      });
+      if (settledItems.count !== memberIds.length) {
+        // Drift the execution service should have refused (§33.3) —
+        // roll everything back rather than settle a changed batch.
+        throw new ConflictException('settlement_items_contended');
+      }
+      const created = await tx.settlementRemittance.create({
+        data: {
+          settlementId: batch.id,
+          settlementReference: batch.settlementReference,
+          storeId: batch.storeId,
+          currency: batch.currency,
+          amount: batch.netAmount, // the FROZEN net — RULE 6
+          bankTransferReference: evidence.bankTransferReference,
+          executedAt: evidence.executedAt,
+          executedBy: evidence.executedBy,
+        },
+      });
+      await this.ledger.record(
+        {
+          eventType: FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
+          reasonCode: 'SETTLEMENT_COMPLETED',
+          actorType: 'user',
+          actorId: actorUserId,
+          amount: 0,
+          currency: batch.currency,
+          direction: 'debit',
+          storeId: batch.storeId,
+          idempotencyKey: ledgerIdempotencyKey(
+            FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
+            batch.id,
+          ),
+          metadata: {
+            settlementReference: batch.settlementReference,
+            remittanceId: created.id,
+            bankTransferReference: evidence.bankTransferReference,
+          },
+        },
+        tx,
+      );
+      return created;
+    });
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'settlement.batch.settled',
+      targetType: 'store',
+      targetId: batch.storeId,
+      metadata: {
+        settlementId: batchId,
+        settlementReference: batch.settlementReference,
+        remittanceId: remittance.id,
+        itemCount: memberIds.length,
+      },
+    });
+    return {
+      batch: await this.loadBatch(batchId),
+      remittance,
+      replayed: false as const,
+    };
+  }
+
+  // ── Read seams (SETTLE-2) — the engine is the ONLY code that
+  //    touches SettlementBatch rows; consumers read through here ─────
+  async frozenRecord(batchId: string) {
+    const batch = await this.loadBatch(batchId);
+    return {
+      status: batch.status as BatchState,
+      assembledBy: batch.assembledBy ?? null,
+      frozen: {
+        settlementId: batch.id,
+        settlementReference: batch.settlementReference,
+        storeId: batch.storeId,
+        currency: batch.currency,
+        windowType: batch.windowType,
+        composition: batch.composition as Array<{
+          itemId: string;
+          occurrenceType: string;
+          occurrenceId: string;
+          amount: number;
+          currency: string;
+          references?: Record<string, string | null>;
+        }>,
+        calculationSnapshot:
+          batch.calculationSnapshot as unknown as SettlementCalculation,
+      },
+    };
+  }
+
+  async batchItems(batchId: string) {
+    await this.loadBatch(batchId);
+    return this.prisma.settlementItem.findMany({
+      where: { batchId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+  }
+
+  async listBatches(storeId?: string) {
+    return this.prisma.settlementBatch.findMany({
+      where: storeId ? { storeId } : undefined,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 100,
+    });
+  }
+
   // Link the successor for the audit chain. Write-once, race-safe.
   async linkSuccessor(supersededId: string, successorId: string) {
     if (supersededId === successorId) {
@@ -454,6 +628,42 @@ export class SettlementEngineService {
   }
 
   // ── helpers ───────────────────────────────────────────────────────
+
+  // SC §15.1 / RC 14.4: resolve each occurrence's canonical references
+  // AT assembly and freeze them into the composition. The merchant's
+  // legal number is SUPPLIED data quoted verbatim (RC Ch. 9 — never
+  // manufactured); QB resolves through the campaign row.
+  private async occurrenceReferences(
+    items: Array<{ occurrenceType: string; occurrenceId: string }>,
+  ) {
+    const out = new Map<string, Record<string, string | null>>();
+    const invoiceIds = items
+      .filter((i) => i.occurrenceType === 'merchant_invoice')
+      .map((i) => i.occurrenceId);
+    if (invoiceIds.length === 0) return out;
+    const invoices = await this.prisma.merchantInvoice.findMany({
+      where: { id: { in: invoiceIds } },
+      select: { id: true, merchantInvoiceNumber: true, campaignId: true },
+    });
+    const campaignIds = [...new Set(invoices.map((i) => i.campaignId))];
+    const campaigns = campaignIds.length
+      ? await this.prisma.giftCampaign.findMany({
+          where: { id: { in: campaignIds } },
+          select: { id: true, referenceNumber: true },
+        })
+      : [];
+    const qbByCampaign = new Map(
+      campaigns.map((c) => [c.id, c.referenceNumber]),
+    );
+    for (const inv of invoices) {
+      out.set(`merchant_invoice:${inv.id}`, {
+        merchantInvoiceNumber: inv.merchantInvoiceNumber ?? null,
+        campaignReference: qbByCampaign.get(inv.campaignId) ?? null,
+      });
+    }
+    return out;
+  }
+
   private async loadBatch(batchId: string) {
     const batch = await this.prisma.settlementBatch.findUnique({
       where: { id: batchId },

@@ -33,6 +33,11 @@ export const FINANCIAL_EVENTS = {
   // anchored on the invoiceId (recognized once per invoice).
   QIFT_REVENUE_RECOGNIZED: 'qift.revenue.recognized',
 
+  // ── Remittance (SETTLE-2 — FC Ch. 3.2 reserved, now live) ────────
+  // Anchored on remittanceId: the executed bank movement that
+  // extinguishes the merchant payable (SC §13.2/§13.3).
+  MERCHANT_REMITTANCE_PAID: 'merchant.remittance.paid',
+
   // ── Settlement lifecycle (Track C — the engine produces these) ───
   // Zero-amount MARKER events (SC v2.0 §11.1): they close/open batch
   // dispositions on the single write path with deterministic keys and

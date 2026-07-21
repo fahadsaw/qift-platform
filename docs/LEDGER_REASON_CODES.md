@@ -19,7 +19,8 @@ here is a review error.
 | `SETTLEMENT_SUPERSEDED` | Lifecycle marker (zero-amount) | — | `settlement.superseded` | C-PR1 |
 | `INVOICE_PAYMENT` | Cash-in (collection against a document) — goods → safeguarding, fee → operating (metadata `account`) | Goods: client money · Fee: Qift | `invoice.payment.received:{receiptId}` | C-PR2 |
 | `QIFT_REVENUE` | Qift revenue recognized (fee net of VAT; VAT posted at issuance per FC 7.6) | Qift | `qift.revenue.recognized:{invoiceId}` under the recorded recognition-policy version | C-PR2 |
+| `MERCHANT_REMITTANCE` | Payable extinguishment (safeguarding → merchant bank) | Merchant (leaving) | `merchant.remittance.paid:{remittanceId}` | C-PR3 |
+| `SETTLEMENT_COMPLETED` | Lifecycle marker (zero-amount) | — | `settlement.completed:{settlementId}` | C-PR3 |
 
-Reserved next (enter here before first use): remittance
-(`merchant.remittance.paid`), receivable accrual/recovery, reserve
-held/released, refund/chargeback families.
+Reserved next (enter here before first use): receivable
+accrual/recovery, reserve held/released, refund/chargeback families.

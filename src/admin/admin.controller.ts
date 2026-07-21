@@ -28,6 +28,11 @@ import {
   type RecordReceiptInput,
 } from '../settlement/settlement-receipts.service';
 import { SettlementEligibilityService } from '../settlement/settlement-eligibility.service';
+import { SettlementEngineService } from '../settlement/settlement-engine.service';
+import {
+  SettlementExecutionService,
+  type ExecuteInput,
+} from '../settlement/settlement-execution.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -48,6 +53,8 @@ export class AdminController {
     private readonly vatFacts: VatFactsService,
     private readonly receipts: SettlementReceiptsService,
     private readonly eligibility: SettlementEligibilityService,
+    private readonly settlementEngine: SettlementEngineService,
+    private readonly settlementExecution: SettlementExecutionService,
   ) {}
 
   // ── Self ─────────────────────────────────────────────────────────
@@ -461,6 +468,77 @@ export class AdminController {
       id,
       body.evidence,
     );
+  }
+
+  // ── SETTLE-2 (Track C PR 3) — the execution surface. Two distinct
+  // powers (§33.1): finance.settlement_approve (prepare/simulate/
+  // assemble/preview/approve) vs finance.settlement_execute (make
+  // money move). Controllers DELEGATE ONLY (RULE 1); the RULE 6
+  // frozen-snapshot binding is enforced in the settlement module.
+
+  @Post('finance/settlement/simulate')
+  @RequireOpsPermission('finance.settlement_approve')
+  simulateSettlement(
+    @Body() body: { storeId: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementEngine.simulate(req.user.userId, body.storeId);
+  }
+
+  @Post('finance/settlement/assemble')
+  @RequireOpsPermission('finance.settlement_approve')
+  assembleSettlement(
+    @Body() body: { storeId: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementEngine.assembleBatch(req.user.userId, body.storeId);
+  }
+
+  @Get('finance/settlement/batches')
+  @RequireOpsPermission('finance.receipts')
+  listSettlementBatches(@Query('storeId') storeId?: string) {
+    return this.settlementExecution.listBatches(storeId);
+  }
+
+  @Post('finance/settlement/:id/preview')
+  @RequireOpsPermission('finance.settlement_approve')
+  previewSettlementExecution(
+    @Param('id') id: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementExecution.preview(req.user.userId, id);
+  }
+
+  @Post('finance/settlement/:id/approve')
+  @RequireOpsPermission('finance.settlement_approve')
+  approveSettlementExecution(
+    @Param('id') id: string,
+    @Body() body: { calculationHash: string; note?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementExecution.approve(req.user.userId, id, body);
+  }
+
+  @Post('finance/settlement/:id/execute')
+  @RequireOpsPermission('finance.settlement_execute')
+  executeSettlement(
+    @Param('id') id: string,
+    @Body() body: ExecuteInput,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementExecution.execute(req.user.userId, id, body);
+  }
+
+  @Get('finance/settlement/:id/statement')
+  @RequireOpsPermission('finance.receipts')
+  settlementStatement(@Param('id') id: string) {
+    return this.settlementExecution.statement(id);
+  }
+
+  @Get('finance/settlement/:id/replay')
+  @RequireOpsPermission('finance.receipts')
+  replaySettlement(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.settlementExecution.replay(req.user.userId, id);
   }
 
   @Get('finance/reconciliation')

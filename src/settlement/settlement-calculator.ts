@@ -23,7 +23,7 @@ import { fromMinor, toMinor, type CurrencyCode } from '../fees/money';
 // Widening first, then registry addition (review finding 11a).
 const KNOWN_CURRENCIES: ReadonlySet<string> = new Set(['SAR', 'AED', 'QAR']);
 
-function asCurrencyCode(raw: string): CurrencyCode {
+export function asCurrencyCode(raw: string): CurrencyCode {
   const c = raw.toUpperCase();
   if (!KNOWN_CURRENCIES.has(c)) {
     // FC Ch. 5.4 storage law: an unregistered currency has no defined

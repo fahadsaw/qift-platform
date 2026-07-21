@@ -187,6 +187,11 @@ function mkEngine(items: Row[]) {
         return Promise.resolve(row);
       }),
     },
+    // Reference denormalization reads (SC §15.1) — empty world here.
+    merchantInvoice: { findMany: jest.fn().mockResolvedValue([]) },
+    giftCampaign: { findMany: jest.fn().mockResolvedValue([]) },
+    // Anti-double-pay check in supersede — no remittances in PR-1 world.
+    settlementRemittance: { findUnique: jest.fn().mockResolvedValue(null) },
     settlementBatch: {
       findUnique: jest.fn().mockImplementation(({ where }: never) => {
         const w = where as { id?: string; settlementReference?: string };

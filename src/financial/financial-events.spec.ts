@@ -14,6 +14,9 @@ describe('financial event taxonomy (FIN-4)', () => {
       // under a RECORDED policy version (FC 7.6).
       INVOICE_PAYMENT_RECEIVED: 'invoice.payment.received',
       QIFT_REVENUE_RECOGNIZED: 'qift.revenue.recognized',
+      // SETTLE-2 (Track C PR 3): the executed bank movement, anchored
+      // on remittanceId (FC Ch. 3.2 reserved, now live).
+      MERCHANT_REMITTANCE_PAID: 'merchant.remittance.paid',
       SETTLEMENT_STARTED: 'settlement.started',
       SETTLEMENT_COMPLETED: 'settlement.completed',
       // Track C PR 1 (SC v2.0 §11.1): the third lifecycle marker —
