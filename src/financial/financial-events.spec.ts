@@ -9,6 +9,11 @@ describe('financial event taxonomy (FIN-4)', () => {
       DELIVERY_FEE_ACCRUED: 'delivery.fee.accrued',
       CORPORATE_INVOICE_ISSUED: 'corporate.invoice.issued',
       MERCHANT_INVOICE_ISSUED: 'merchant.invoice.issued',
+      // SETTLE-1 (Track C PR 2): FC Ch. 3.2 reserved events now live —
+      // receipts anchor on receiptId; recognition anchors on invoiceId
+      // under a RECORDED policy version (FC 7.6).
+      INVOICE_PAYMENT_RECEIVED: 'invoice.payment.received',
+      QIFT_REVENUE_RECOGNIZED: 'qift.revenue.recognized',
       SETTLEMENT_STARTED: 'settlement.started',
       SETTLEMENT_COMPLETED: 'settlement.completed',
       // Track C PR 1 (SC v2.0 §11.1): the third lifecycle marker —

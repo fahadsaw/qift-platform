@@ -22,6 +22,12 @@ import {
   OpsRoleGuard,
   RequireOpsPermission,
 } from '../ops-roles/ops-role.guard';
+import {
+  SettlementReceiptsService,
+  type InvoiceType,
+  type RecordReceiptInput,
+} from '../settlement/settlement-receipts.service';
+import { SettlementEligibilityService } from '../settlement/settlement-eligibility.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -40,6 +46,8 @@ export class AdminController {
     private readonly admin: AdminService,
     private readonly opsRoles: OpsRolesService,
     private readonly vatFacts: VatFactsService,
+    private readonly receipts: SettlementReceiptsService,
+    private readonly eligibility: SettlementEligibilityService,
   ) {}
 
   // ── Self ─────────────────────────────────────────────────────────
@@ -402,6 +410,57 @@ export class AdminController {
     @Req() req: AuthedRequest,
   ) {
     return this.vatFacts.reject(req.user.userId, id, proposalId);
+  }
+
+  // ── SETTLE-1 (Track C PR 2) — receipts + eligibility ─────────────
+  // Controllers DELEGATE ONLY (permanent RULE 1): every financial
+  // computation lives in the settlement module's services.
+
+  @Post('finance/receipts')
+  @RequireOpsPermission('finance.receipts')
+  recordReceipt(
+    @Body() body: RecordReceiptInput,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.receipts.recordReceipt(req.user.userId, body);
+  }
+
+  @Get('finance/receipts')
+  @RequireOpsPermission('finance.receipts')
+  listReceipts(
+    @Query('invoiceType') invoiceType: InvoiceType,
+    @Query('invoiceId') invoiceId: string,
+  ) {
+    return this.receipts.listReceipts(invoiceType, invoiceId);
+  }
+
+  @Get('finance/receivables-aging')
+  @RequireOpsPermission('finance.receipts')
+  receivablesAging() {
+    return this.receipts.receivablesAging();
+  }
+
+  @Post('finance/settlement/eligibility')
+  @RequireOpsPermission('finance.receipts')
+  evaluateEligibility(
+    @Body() body: { storeId: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.eligibility.evaluate(req.user.userId, body.storeId);
+  }
+
+  @Post('finance/stores/:id/payout-identity')
+  @RequireOpsPermission('finance.receipts')
+  verifyPayoutIdentity(
+    @Param('id') id: string,
+    @Body() body: { evidence: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.eligibility.verifyPayoutIdentity(
+      req.user.userId,
+      id,
+      body.evidence,
+    );
   }
 
   @Get('finance/reconciliation')

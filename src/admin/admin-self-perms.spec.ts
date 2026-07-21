@@ -21,6 +21,8 @@ function makeController(roles: string[]) {
     {} as unknown as AdminService,
     opsRoles,
     {} as unknown as ConstructorParameters<typeof AdminController>[2],
+    {} as unknown as ConstructorParameters<typeof AdminController>[3],
+    {} as unknown as ConstructorParameters<typeof AdminController>[4],
   );
   return { controller, opsRoles };
 }

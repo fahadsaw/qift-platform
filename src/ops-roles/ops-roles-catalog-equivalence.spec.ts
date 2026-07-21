@@ -119,7 +119,7 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       expect(OPS_ROLES.length).toBe(8);
     });
 
-    it('OPS_PERMISSIONS contains exactly 24 documented permission identifiers', () => {
+    it('OPS_PERMISSIONS contains exactly 25 documented permission identifiers', () => {
       // Same freeze-point reasoning as above. Adding a new
       // OpsPermission requires updating both ops-roles.ts
       // (PERMISSIONS_BY_ROLE + SUPER_ADMIN_ALL) and role-map.ts
@@ -144,7 +144,12 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       //   24 — `finance.vat_facts` added with the
       //        VAT-facts maker-checker (Track B3 / PE-12). Granted to
       //        super_admin + finance; SoD enforced in-service.
-      expect(OPS_PERMISSIONS.length).toBe(24);
+      //   25 — `finance.receipts` added with SETTLE-1 (Track C PR 2):
+      //        payment receipts + receivables aging + §5 eligibility
+      //        + payout-identity verification. Granted to super_admin
+      //        + finance. Batch EXECUTION stays a future permission
+      //        (SC §31–§33 approval/execution separation).
+      expect(OPS_PERMISSIONS.length).toBe(25);
     });
   });
 });

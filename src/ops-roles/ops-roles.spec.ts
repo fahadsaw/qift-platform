@@ -87,7 +87,7 @@ describe('isOpsRole', () => {
 });
 
 describe('OPS_PERMISSIONS', () => {
-  it('contains exactly the 22 expected identifiers', () => {
+  it('contains exactly the expected identifiers, in pinned order', () => {
     expect([...OPS_PERMISSIONS]).toEqual([
       'store.review',
       'store.set_plan',
@@ -105,6 +105,7 @@ describe('OPS_PERMISSIONS', () => {
       'finance.approve_payout',
       'finance.reconcile',
       'finance.vat_facts',
+      'finance.receipts',
       'diagnostics.read',
       'diagnostics.run_seed',
       'report.read',
@@ -184,6 +185,7 @@ describe('permissionsFor — single role behaviour (pre-refactor parity)', () =>
         'finance.approve_payout',
         'finance.reconcile',
         'finance.vat_facts',
+        'finance.receipts',
         'store.read_detail',
         'analytics.read',
       ]),

@@ -23,6 +23,16 @@ export const FINANCIAL_EVENTS = {
   CORPORATE_INVOICE_ISSUED: 'corporate.invoice.issued',
   MERCHANT_INVOICE_ISSUED: 'merchant.invoice.issued',
 
+  // ── Payment receipts (SETTLE-1 — FC Ch. 3.2 reserved, now live) ──
+  // Anchored on receiptId (partial payments on credit terms never
+  // collide — FC Ch. 3.2). Cash-in against a document; the invoice's
+  // `paid` status DERIVES from receipts covering the total.
+  INVOICE_PAYMENT_RECEIVED: 'invoice.payment.received',
+  // Fee-leg revenue recognition per the recognition clock (FC 7.6):
+  // an advisor-set, VERSIONED policy choice recorded in metadata —
+  // anchored on the invoiceId (recognized once per invoice).
+  QIFT_REVENUE_RECOGNIZED: 'qift.revenue.recognized',
+
   // ── Settlement lifecycle (Track C — the engine produces these) ───
   // Zero-amount MARKER events (SC v2.0 §11.1): they close/open batch
   // dispositions on the single write path with deterministic keys and

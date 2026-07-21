@@ -87,6 +87,18 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
     opsPermission: 'finance.reconcile',
   },
   {
+    // SETTLE-1 (Track C PR 2) — receipts per invoice (read model).
+    method: 'listReceipts',
+    path: 'finance/receipts',
+    opsPermission: 'finance.receipts',
+  },
+  {
+    // SETTLE-1 — receivables aging (SC §10.2 read model).
+    method: 'receivablesAging',
+    path: 'finance/receivables-aging',
+    opsPermission: 'finance.receipts',
+  },
+  {
     method: 'financeStoreBalances',
     path: 'finance/stores',
     opsPermission: 'finance.read_payouts',
@@ -568,6 +580,28 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         opsPermission: 'finance.reconcile',
       },
       {
+        // SETTLE-1 (Track C PR 2) — receipt recording posts money
+        // facts (invoice.payment.received + payable conversion).
+        method: 'recordReceipt',
+        path: 'finance/receipts',
+        httpMethod: 'POST',
+        opsPermission: 'finance.receipts',
+      },
+      {
+        // SETTLE-1 — §5 eligibility evaluation (state transitions).
+        method: 'evaluateEligibility',
+        path: 'finance/settlement/eligibility',
+        httpMethod: 'POST',
+        opsPermission: 'finance.receipts',
+      },
+      {
+        // SETTLE-1 — §5.4 payout-identity verification (evidence).
+        method: 'verifyPayoutIdentity',
+        path: 'finance/stores/:id/payout-identity',
+        httpMethod: 'POST',
+        opsPermission: 'finance.receipts',
+      },
+      {
         // Track B3 / PE-12 — VAT-facts maker-checker mutations. SoD
         // (maker != checker) is enforced in-service above this
         // permission per Financial Constitution Ch. 14.2.
@@ -786,6 +820,7 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             'finance.record_payout_event': ['finance'],
             'finance.reconcile': ['finance'],
             'finance.vat_facts': ['finance'],
+            'finance.receipts': ['finance'],
             'finance.approve_payout': ['finance'],
             'diagnostics.read': [
               'operations_manager',

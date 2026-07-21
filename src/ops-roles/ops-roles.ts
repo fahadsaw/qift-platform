@@ -116,6 +116,11 @@ export const OPS_PERMISSIONS = [
   // finance.write_financial_config (reserved for finance_admin). SoD (maker != checker) is
   // enforced in the service ABOVE this permission.
   'finance.vat_facts',
+  // SETTLE-1 (Track C PR 2): record/list payment receipts,
+  // receivables aging, §5 eligibility evaluation, payout-identity
+  // verification. Batch execution stays a future permission (SC
+  // §31–§33 approval/execution separation).
+  'finance.receipts',
   // Diagnostics / debug.
   'diagnostics.read',
   'diagnostics.run_seed',
@@ -170,6 +175,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'finance.approve_payout',
     'finance.reconcile',
     'finance.vat_facts',
+    'finance.receipts',
     'store.read_detail',
     'analytics.read',
   ],
@@ -244,6 +250,7 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'finance.approve_payout',
   'finance.reconcile',
   'finance.vat_facts',
+  'finance.receipts',
   'diagnostics.read',
   'diagnostics.run_seed',
   'report.read',
