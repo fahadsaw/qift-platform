@@ -99,6 +99,24 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
     opsPermission: 'finance.receipts',
   },
   {
+    // SETTLE-2 — batch listing (read model via the engine seam).
+    method: 'listSettlementBatches',
+    path: 'finance/settlement/batches',
+    opsPermission: 'finance.receipts',
+  },
+  {
+    // SETTLE-2 — the issued Settlement Statement (immutable document).
+    method: 'settlementStatement',
+    path: 'finance/settlement/:id/statement',
+    opsPermission: 'finance.receipts',
+  },
+  {
+    // SETTLE-2 — §34 replay harness (read + audit line).
+    method: 'replaySettlement',
+    path: 'finance/settlement/:id/replay',
+    opsPermission: 'finance.receipts',
+  },
+  {
     method: 'financeStoreBalances',
     path: 'finance/stores',
     opsPermission: 'finance.read_payouts',
@@ -602,6 +620,41 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         opsPermission: 'finance.receipts',
       },
       {
+        // SETTLE-2 — §30 simulation (audit line only).
+        method: 'simulateSettlement',
+        path: 'finance/settlement/simulate',
+        httpMethod: 'POST',
+        opsPermission: 'finance.settlement_approve',
+      },
+      {
+        // SETTLE-2 — batch assembly (QS born; §14.1).
+        method: 'assembleSettlement',
+        path: 'finance/settlement/assemble',
+        httpMethod: 'POST',
+        opsPermission: 'finance.settlement_approve',
+      },
+      {
+        // SETTLE-2 — §30.4 mandatory pre-execution preview.
+        method: 'previewSettlementExecution',
+        path: 'finance/settlement/:id/preview',
+        httpMethod: 'POST',
+        opsPermission: 'finance.settlement_approve',
+      },
+      {
+        // SETTLE-2 — §31 approval (binds to the frozen calculation).
+        method: 'approveSettlementExecution',
+        path: 'finance/settlement/:id/approve',
+        httpMethod: 'POST',
+        opsPermission: 'finance.settlement_approve',
+      },
+      {
+        // SETTLE-2 — §33 execution (RULE 6 binding gate in-service).
+        method: 'executeSettlement',
+        path: 'finance/settlement/:id/execute',
+        httpMethod: 'POST',
+        opsPermission: 'finance.settlement_execute',
+      },
+      {
         // Track B3 / PE-12 — VAT-facts maker-checker mutations. SoD
         // (maker != checker) is enforced in-service above this
         // permission per Financial Constitution Ch. 14.2.
@@ -821,6 +874,8 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             'finance.reconcile': ['finance'],
             'finance.vat_facts': ['finance'],
             'finance.receipts': ['finance'],
+            'finance.settlement_approve': ['finance'],
+            'finance.settlement_execute': ['finance'],
             'finance.approve_payout': ['finance'],
             'diagnostics.read': [
               'operations_manager',

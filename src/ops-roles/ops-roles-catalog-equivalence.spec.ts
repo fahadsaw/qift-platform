@@ -119,7 +119,7 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       expect(OPS_ROLES.length).toBe(8);
     });
 
-    it('OPS_PERMISSIONS contains exactly 25 documented permission identifiers', () => {
+    it('OPS_PERMISSIONS contains exactly 27 documented permission identifiers', () => {
       // Same freeze-point reasoning as above. Adding a new
       // OpsPermission requires updating both ops-roles.ts
       // (PERMISSIONS_BY_ROLE + SUPER_ADMIN_ALL) and role-map.ts
@@ -149,7 +149,13 @@ describe('ops-roles legacy vs catalog content equivalence (PR B-6a)', () => {
       //        + payout-identity verification. Granted to super_admin
       //        + finance. Batch EXECUTION stays a future permission
       //        (SC §31–§33 approval/execution separation).
-      expect(OPS_PERMISSIONS.length).toBe(25);
+      //   26+27 — `finance.settlement_approve` +
+      //        `finance.settlement_execute` added with SETTLE-2
+      //        (Track C PR 3): the §33.1 approval/execution
+      //        separation as two structural permissions. Granted to
+      //        super_admin + finance; executor ∉ approvers enforced
+      //        in-service on identity (RULE 6).
+      expect(OPS_PERMISSIONS.length).toBe(27);
     });
   });
 });

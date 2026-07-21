@@ -8,6 +8,7 @@ import { FinancialLedgerModule } from '../financial/financial-ledger.module';
 import { SettlementEngineService } from './settlement-engine.service';
 import { SettlementReceiptsService } from './settlement-receipts.service';
 import { SettlementEligibilityService } from './settlement-eligibility.service';
+import { SettlementExecutionService } from './settlement-execution.service';
 import { SETTLEMENT_CLOCK, SystemSettlementClock } from './settlement-clock';
 
 @Module({
@@ -16,6 +17,7 @@ import { SETTLEMENT_CLOCK, SystemSettlementClock } from './settlement-clock';
     SettlementEngineService,
     SettlementReceiptsService,
     SettlementEligibilityService,
+    SettlementExecutionService,
     // Rule 2: the ONLY binding of real system time into settlement.
     { provide: SETTLEMENT_CLOCK, useClass: SystemSettlementClock },
   ],
@@ -23,6 +25,7 @@ import { SETTLEMENT_CLOCK, SystemSettlementClock } from './settlement-clock';
     SettlementEngineService,
     SettlementReceiptsService,
     SettlementEligibilityService,
+    SettlementExecutionService,
   ],
 })
 export class SettlementModule {}

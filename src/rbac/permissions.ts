@@ -114,6 +114,13 @@ export const FINANCE_PERMISSIONS = [
   // EXECUTION rights are a separate later permission (SC §31–§33
   // approval/execution separation).
   'finance.receipts',
+  // SETTLE-2 (Track C PR 3): the §33.1 TWO POWERS — approval
+  // (simulate/assemble/preview/approve: deciding money should move)
+  // and execution (making it move) are distinct permissions. Holding
+  // both never merges the acts: the RULE 6 binding gate enforces
+  // executor ∉ approvers on server-verified identity.
+  'finance.settlement_approve',
+  'finance.settlement_execute',
   'finance.reject_payout',
   'finance.read_payout_overview',
 

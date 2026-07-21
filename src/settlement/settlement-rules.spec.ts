@@ -92,21 +92,28 @@ describe('RULE 1 — settlement calculations live ONLY in the Settlement Engine'
       .filter((p) => !p.endsWith('.spec.ts'))
       .map((p) => p.split('/').pop())
       .sort();
-    // The TWO lawful production consumers (§30.3 one-calculator law):
+    // The TWO lawful CALCULATING consumers (§30.3 one-calculator law):
     // the engine (simulate + assemble) and the execution-binding
     // module (RULE 5 — recompute-and-COMPARE only, never output).
-    // settlement-statement.ts imports the TYPE only, which is erased —
-    // it must never call the calculator (RULE 4: statements render
-    // frozen data verbatim).
+    // settlement-statement.ts imports the TYPE only (erased);
+    // settlement-execution.service.ts imports ONLY the currency
+    // guard (asCurrencyCode) — both are pinned below to ZERO
+    // calculateSettlement invocations.
     expect(nonSpec).toEqual([
       'settlement-engine.service.ts',
       'settlement-execution-binding.ts',
+      'settlement-execution.service.ts',
       'settlement-statement.ts',
     ]);
-    const statement = read(join(SETTLEMENT, 'settlement-statement.ts'));
-    // Type-only import, zero invocations.
-    expect(count(statement, 'import type')).toBeGreaterThanOrEqual(1);
-    expect(count(statement, 'calculateSettlement')).toBe(0);
+    for (const nonCalculating of [
+      'settlement-statement.ts',
+      'settlement-execution.service.ts',
+    ]) {
+      expect({
+        file: nonCalculating,
+        hits: count(read(join(SETTLEMENT, nonCalculating)), 'calculateSettlement'),
+      }).toEqual({ file: nonCalculating, hits: 0 });
+    }
   });
 });
 
@@ -127,10 +134,15 @@ describe('RULE 2 — no direct system time in the Settlement Engine', () => {
     // and lawful).
     'settlement-statement.ts',
     'settlement-execution-binding.ts',
+    // §31–§32 policy: structure canon, values versioned policy — pure.
+    'settlement-approval-policy.ts',
   ];
   const GOVERNED_SERVICES = [
     'settlement-receipts.service.ts',
     'settlement-eligibility.service.ts',
+    // SETTLE-2 execution surface: clock-injected (TTL, issuance);
+    // bank dates are supplied evidence; batch access via engine only.
+    'settlement-execution.service.ts',
   ];
 
   it('pure settlement sources contain zero Date.now / new Date / Math.random', () => {
@@ -246,14 +258,17 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
     const engine = read(join(SETTLEMENT, 'settlement-engine.service.ts'));
     // Pinned write-site census — a new site must be enumerated here and
     // justified against RULE 3:
-    //   settlementBatch.create   1  (assembly — the freeze itself)
+    //   settlementBatch.create   1  (assembly — the freeze itself;
+    //                                assembledBy is a create-time
+    //                                frozen fact, §31.1 proposer)
     //   settlementBatch.update   4  (markFailed, retry, holdBatch,
     //                                supersede: status/evidence only)
-    //   settlementBatch.updateMany 1 (linkSuccessor: supersededById,
-    //                                 write-once guarded)
+    //   settlementBatch.updateMany 2 (linkSuccessor: supersededById,
+    //                                 write-once guarded; markSettled:
+    //                                 guarded ready→settled, SETTLE-2)
     expect(count(engine, 'settlementBatch.create(')).toBe(1);
     expect(count(engine, 'settlementBatch.update(')).toBe(4);
-    expect(count(engine, 'settlementBatch.updateMany(')).toBe(1);
+    expect(count(engine, 'settlementBatch.updateMany(')).toBe(2);
 
     // Extract each update's data block and assert its keys.
     const sites = [
@@ -261,7 +276,7 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
         /settlementBatch\.update(?:Many)?\(\s*\{[\s\S]*?data:\s*\{([\s\S]*?)\},?\s*\}\s*\)/g,
       ),
     ];
-    expect(sites.length).toBe(5);
+    expect(sites.length).toBe(6);
     for (const m of sites) {
       const keys = [...m[1].matchAll(/(?:^|[,{])\s*(\w+)\s*:/gm)].map(
         (k) => k[1],
@@ -275,11 +290,13 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
 
   it('item membership is written at assembly (unbound-only) and supersession ONLY (source pin)', () => {
     const engine = read(join(SETTLEMENT, 'settlement-engine.service.ts'));
-    // Two sites, both enumerated:
+    // Three sites, all enumerated:
     //   assembleBatch — WHERE requires state:'eligible' AND batchId:null
     //     (an item can never be bound INTO an already-assembled batch);
-    //   supersede — batch is transitioning to terminal 'superseded'.
-    expect(count(engine, 'settlementItem.updateMany(')).toBe(2);
+    //   supersede — batch is transitioning to terminal 'superseded';
+    //   markSettled — guarded ready→settled of the batch's OWN items
+    //     (SETTLE-2), count-checked against the frozen composition.
+    expect(count(engine, 'settlementItem.updateMany(')).toBe(3);
     expect(count(engine, "state: 'eligible',\n              batchId: null,")).toBe(1);
   });
 
@@ -288,12 +305,17 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
       Object.getOwnPropertyNames(SettlementEngineService.prototype).sort(),
     ).toEqual([
       'assembleBatch',
+      'batchItems', // SETTLE-2 read seam (items of a batch)
       'constructor',
       'eligibleItems',
+      'frozenRecord', // SETTLE-2 read seam (the §34 frozen record)
       'holdBatch',
       'linkSuccessor',
+      'listBatches', // SETTLE-2 read seam (admin listing)
       'loadBatch',
       'markFailed',
+      'markSettled', // SETTLE-2: ready→settled + completed marker
+      'occurrenceReferences', // §15.1 reference denormalization at assembly
       'retry',
       'simulate',
       'supersede',
@@ -320,6 +342,9 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
     const writtenKeys: string[] = [];
     let seq = 0;
     const prisma = {
+      merchantInvoice: { findMany: jest.fn().mockResolvedValue([]) },
+      giftCampaign: { findMany: jest.fn().mockResolvedValue([]) },
+      settlementRemittance: { findUnique: jest.fn().mockResolvedValue(null) },
       settlementItem: {
         findMany: jest.fn().mockImplementation(({ where }: never) => {
           const w = where as { batchId?: string; state?: string };

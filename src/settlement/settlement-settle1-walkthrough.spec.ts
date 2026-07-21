@@ -154,6 +154,17 @@ describe('Track C PR 2 — end-to-end financial walkthrough (S01, receipts → e
         }),
       },
       merchantInvoice: {
+        findMany: jest
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve([
+              {
+                id: merchInvoice.id,
+                merchantInvoiceNumber: merchInvoice.merchantInvoiceNumber,
+                campaignId: merchInvoice.campaignId,
+              },
+            ]),
+          ),
         findUnique: jest.fn().mockResolvedValue(merchInvoice),
         updateMany: jest.fn().mockImplementation(({ where, data }: never) => {
           const w = where as Row;
@@ -221,6 +232,13 @@ describe('Track C PR 2 — end-to-end financial walkthrough (S01, receipts → e
       },
       claimableGift: {
         findMany: jest.fn().mockResolvedValue(claims),
+      },
+      giftCampaign: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { id: 'camp-eid', referenceNumber: REFERENCES.campaign },
+          ]),
       },
       settlementBatch: {
         findUnique: jest.fn().mockResolvedValue(null),
