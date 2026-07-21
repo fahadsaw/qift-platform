@@ -45,9 +45,13 @@ export const REFERENCE_PREFIXES = {
   // this is the ONLY invoice number Qift generates for itself; a
   // merchant's goods-invoice number is the merchant's to issue).
   QC: { kind: 'sequential', object: 'qift_service_invoice' },
-  // Settlement reference — reserved for Track C. Registered so the
-  // grammar is closed; generation refuses it until settlement lands.
-  QS: { kind: 'reserved', object: 'settlement' },
+  // Settlement batch reference — ACTIVE as of Reference Constitution
+  // v2.0 (the QS-activation amendment) + Settlement Constitution §14:
+  // random operational, ONE per batch, allocated only at batch
+  // assembly, immutable across retries, renewed on re-assembly, never
+  // on simulations (SC §30.2). Allocation lives in the settlement
+  // engine — nothing else may mint a QS.
+  QS: { kind: 'random', object: 'settlement_batch' },
 } as const satisfies Record<string, { kind: ReferenceKind; object: string }>;
 
 export type ReferencePrefix = keyof typeof REFERENCE_PREFIXES;
@@ -128,8 +132,8 @@ export function normalizeReference(input: string): string | null {
     return formatSequentialReference(prefix, Number(m[1]), value);
   }
 
-  // random + reserved share the random shape (QS parses so a future
-  // settlement ref round-trips, even though generation refuses it).
+  // random + reserved share the random shape. (QS has been ACTIVE
+  // since RC v2.0 — it parses and generates like every random kind.)
   if (!RANDOM_BODY_RE.test(body)) return null;
   return `${prefix}-${body.slice(0, RANDOM_GROUP)}-${body.slice(RANDOM_GROUP)}`;
 }

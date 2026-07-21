@@ -36,6 +36,7 @@ import { InvitesModule } from './invites/invites.module';
 import { BetaAccessModule } from './beta-access/beta-access.module';
 import { CorporateModule } from './corporate/corporate.module';
 import { FinancialLedgerModule } from './financial/financial-ledger.module';
+import { SettlementModule } from './settlement/settlement.module';
 
 @Module({
   imports: [
@@ -75,6 +76,8 @@ import { FinancialLedgerModule } from './financial/financial-ledger.module';
     // Financial ledger substrate (PR 2). Dark-launched: the service is
     // available for injection but no producer writes to it yet.
     FinancialLedgerModule,
+    // Track C PR 1 — Settlement Engine Foundation (SC v2.0).
+    SettlementModule,
   ],
   // UsersController + UsersService now live inside UsersModule —
   // imported above. Registering them here would create a duplicate

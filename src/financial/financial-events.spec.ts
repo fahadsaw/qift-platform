@@ -11,6 +11,9 @@ describe('financial event taxonomy (FIN-4)', () => {
       MERCHANT_INVOICE_ISSUED: 'merchant.invoice.issued',
       SETTLEMENT_STARTED: 'settlement.started',
       SETTLEMENT_COMPLETED: 'settlement.completed',
+      // Track C PR 1 (SC v2.0 §11.1): the third lifecycle marker —
+      // every started batch closes with completed OR superseded.
+      SETTLEMENT_SUPERSEDED: 'settlement.superseded',
       REFUND_REQUESTED: 'refund.requested',
       REFUND_APPROVED: 'refund.approved',
       REFUND_PAID: 'refund.paid',

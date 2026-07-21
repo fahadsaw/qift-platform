@@ -112,10 +112,10 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
   });
 
   describe('taxSnapshot (frozen for historical correctness)', () => {
-    it('carries the current rule version (bumped to v2 by FIN-1)', () => {
-      expect(TAX_RULE_VERSION).toBe('sa-vat-agent-v2');
+    it('carries the current rule version (bumped to v3 by Track C PR 1 — integer minor units)', () => {
+      expect(TAX_RULE_VERSION).toBe('sa-vat-agent-v3');
       const t = computeTax({ subtotalAmount: 100, platformFeeAmount: 5 });
-      expect(t.taxSnapshot.ruleVersion).toBe('sa-vat-agent-v2');
+      expect(t.taxSnapshot.ruleVersion).toBe('sa-vat-agent-v3');
     });
 
     it('records rule version, rate, treatment, facilitated value and a note', () => {
@@ -205,7 +205,7 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
         pricesIncludeVat: false,
       });
       expect(t.taxSnapshot).toMatchObject({
-        ruleVersion: TAX_RULE_VERSION, // sa-vat-agent-v2
+        ruleVersion: TAX_RULE_VERSION, // sa-vat-agent-v3
         vatRate: 0.15,
         taxTreatment: MERCHANT_GOODS_TAX_TREATMENT,
         vatRegistered: true,
@@ -241,5 +241,50 @@ describe('TaxEngine (Saudi VAT — agent model)', () => {
       expect(qift.totalAmount + registered.totalAmount).toBe(5922.5);
       expect(qift.totalAmount + unregistered.totalAmount).toBe(5172.5);
     });
+  });
+});
+
+describe('v3 integer-minor-unit law (Settlement Validation Pack F5 / S11; SC §34.4)', () => {
+  it('S11 PIN — the exact-halfway fee: 41.30 × 15% = 619.5 halalas rounds UP to 6.20', () => {
+    // Under IEEE doubles 41.30*0.15 = 6.194999999999999 and the old
+    // engine emitted 6.19 — violating FC Ch. 5.2 half-up. v3 computes
+    // 4130 × 1500 / 10000 = 619.5 in integers and rounds up by law.
+    const t = computeTax({ subtotalAmount: 500, platformFeeAmount: 41.3 });
+    expect(t.vatAmount).toBe(6.2);
+    expect(t.totalAmount).toBe(47.5);
+  });
+
+  it('non-halfway cases are unchanged from v2 (20.65 → 3.10; 150 → 22.50)', () => {
+    expect(
+      computeTax({ subtotalAmount: 230, platformFeeAmount: 20.65 }).vatAmount,
+    ).toBe(3.1);
+    expect(
+      computeTax({ subtotalAmount: 5000, platformFeeAmount: 150 }).vatAmount,
+    ).toBe(22.5);
+  });
+
+  it('inclusive extraction: net + VAT always reconstitute the gross exactly (complement law)', () => {
+    for (const gross of [5000, 150, 268.75, 9200, 41.3, 0.01, 123.45]) {
+      const t = computeMerchantGoodsTax({
+        goodsSubtotalAmount: gross,
+        vatRegistered: true,
+        pricesIncludeVat: true,
+      });
+      expect(Math.round((t.taxableAmount + t.vatAmount) * 100) / 100).toBe(
+        t.totalAmount,
+      );
+      expect(t.totalAmount).toBe(gross);
+    }
+  });
+
+  it('merchant goods halfway case follows the same half-up law', () => {
+    // 41.30 exclusive goods on a registered merchant: VAT 6.20.
+    const t = computeMerchantGoodsTax({
+      goodsSubtotalAmount: 41.3,
+      vatRegistered: true,
+      pricesIncludeVat: false,
+    });
+    expect(t.vatAmount).toBe(6.2);
+    expect(t.totalAmount).toBe(47.5);
   });
 });

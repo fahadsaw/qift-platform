@@ -23,9 +23,14 @@ export const FINANCIAL_EVENTS = {
   CORPORATE_INVOICE_ISSUED: 'corporate.invoice.issued',
   MERCHANT_INVOICE_ISSUED: 'merchant.invoice.issued',
 
-  // ── Settlement (reserved — SETTLE-1/2 will produce these) ────────
+  // ── Settlement lifecycle (Track C — the engine produces these) ───
+  // Zero-amount MARKER events (SC v2.0 §11.1): they close/open batch
+  // dispositions on the single write path with deterministic keys and
+  // move no money. Every settlement.started is closed by exactly ONE
+  // of completed | superseded (SC §2 state law).
   SETTLEMENT_STARTED: 'settlement.started',
   SETTLEMENT_COMPLETED: 'settlement.completed',
+  SETTLEMENT_SUPERSEDED: 'settlement.superseded',
 
   // ── Refunds / disputes (reserved — refunds phase) ────────────────
   REFUND_REQUESTED: 'refund.requested',
