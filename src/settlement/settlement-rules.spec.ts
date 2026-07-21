@@ -22,6 +22,19 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { SettlementEngineService } from './settlement-engine.service';
+import { calculateSettlement } from './settlement-calculator';
+import {
+  calculationHash,
+  canonicalJson,
+  generateSettlementStatement,
+  statementHash,
+  type FrozenBatchRecord,
+} from './settlement-statement';
+import {
+  assertExecutionBinding,
+  buildExecutionPreview,
+  type ExecutionApproval,
+} from './settlement-execution-binding';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { AuditService } from '../audit/audit.service';
 import type { FinancialLedgerService } from '../financial/financial-ledger.service';
@@ -69,7 +82,7 @@ describe('RULE 1 — settlement calculations live ONLY in the Settlement Engine'
     expect(offenders).toEqual([]);
   });
 
-  it('calculateSettlement is imported by the engine and specs ONLY', () => {
+  it('calculateSettlement is imported by the engine, the execution-binding law, and specs ONLY', () => {
     const importers = walk(SRC).filter(
       (p) =>
         read(p).includes("from './settlement-calculator'") ||
@@ -77,9 +90,23 @@ describe('RULE 1 — settlement calculations live ONLY in the Settlement Engine'
     );
     const nonSpec = importers
       .filter((p) => !p.endsWith('.spec.ts'))
-      .map((p) => p.split('/').pop());
-    // The ONE lawful production consumer (§30.3 one-calculator law).
-    expect(nonSpec).toEqual(['settlement-engine.service.ts']);
+      .map((p) => p.split('/').pop())
+      .sort();
+    // The TWO lawful production consumers (§30.3 one-calculator law):
+    // the engine (simulate + assemble) and the execution-binding
+    // module (RULE 5 — recompute-and-COMPARE only, never output).
+    // settlement-statement.ts imports the TYPE only, which is erased —
+    // it must never call the calculator (RULE 4: statements render
+    // frozen data verbatim).
+    expect(nonSpec).toEqual([
+      'settlement-engine.service.ts',
+      'settlement-execution-binding.ts',
+      'settlement-statement.ts',
+    ]);
+    const statement = read(join(SETTLEMENT, 'settlement-statement.ts'));
+    // Type-only import, zero invocations.
+    expect(count(statement, 'import type')).toBeGreaterThanOrEqual(1);
+    expect(count(statement, 'calculateSettlement')).toBe(0);
   });
 });
 
@@ -95,6 +122,11 @@ describe('RULE 2 — no direct system time in the Settlement Engine', () => {
     'settlement-calculator.ts',
     'settlement-states.ts',
     'settlement.module.ts',
+    // RULES 4-6 modules: pure functions over frozen data — every date
+    // is a supplied business fact (crypto hashing is deterministic
+    // and lawful).
+    'settlement-statement.ts',
+    'settlement-execution-binding.ts',
   ];
   const GOVERNED_SERVICES = [
     'settlement-receipts.service.ts',
@@ -412,5 +444,272 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
         frozen[k as keyof typeof frozen],
       );
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// RULES 4–6 (enacted after PR #84): the Settlement Statement is a
+// constitutional, replay-identical output; an Execution Preview must
+// exist before Execute using the ONE calculator; execution binds to an
+// approved preview's IDENTICAL frozen calculation snapshot.
+// ─────────────────────────────────────────────────────────────────────
+
+function frozenFixture(): FrozenBatchRecord {
+  const composition: FrozenBatchRecord['composition'] = [
+    {
+      itemId: 'sitem-1',
+      occurrenceType: 'merchant_invoice',
+      occurrenceId: 'minv-1',
+      amount: 5750,
+      currency: 'SAR',
+      references: { merchantInvoiceNumber: 'DAT-2026-0042' },
+    },
+    {
+      itemId: 'sitem-2',
+      occurrenceType: 'merchant_invoice',
+      occurrenceId: 'minv-2',
+      amount: 2300.5,
+      currency: 'SAR',
+      references: {},
+    },
+  ];
+  return {
+    settlementId: 'stl-1',
+    settlementReference: 'QS-K7MP-4WX2',
+    storeId: 's-daralteeb',
+    currency: 'SAR',
+    windowType: 'manual',
+    composition,
+    calculationSnapshot: calculateSettlement(
+      composition.map((c) => ({
+        itemId: c.itemId,
+        occurrenceType: c.occurrenceType,
+        occurrenceId: c.occurrenceId,
+        amount: c.amount,
+        currency: c.currency,
+      })),
+    ),
+  };
+}
+
+describe('RULE 4 — the Settlement Statement is a constitutional, replay-identical output', () => {
+  it('same frozen inputs → byte-identical statement and hash, every time', () => {
+    const a = generateSettlementStatement(frozenFixture(), {
+      issuedAt: '2026-07-22T10:00:00.000Z',
+    });
+    const b = generateSettlementStatement(frozenFixture(), {
+      issuedAt: '2026-07-22T10:00:00.000Z',
+    });
+    expect(b).toEqual(a);
+    expect(canonicalJson(b)).toBe(canonicalJson(a));
+    expect(statementHash(b)).toBe(statementHash(a));
+    // The statement quotes its QS and every §4 line VERBATIM.
+    expect(a.settlementReference).toBe('QS-K7MP-4WX2');
+    expect(a.lines).toEqual(frozenFixture().calculationSnapshot.lines);
+    expect(a.netAmount).toBe(8050.5);
+    expect(a.coveredOccurrences[0].references.merchantInvoiceNumber).toBe(
+      'DAT-2026-0042',
+    );
+  });
+
+  it('the statement RENDERS frozen data — it never recomputes (a tampered snapshot flows through, changing the hash)', () => {
+    const frozen = frozenFixture();
+    const before = generateSettlementStatement(frozen, {
+      issuedAt: '2026-07-22T10:00:00.000Z',
+    });
+    // Tamper the frozen snapshot: a recomputing generator would mask
+    // this; a constitutional renderer must surface it verbatim.
+    frozen.calculationSnapshot.netAmount = 1;
+    const after = generateSettlementStatement(frozen, {
+      issuedAt: '2026-07-22T10:00:00.000Z',
+    });
+    expect(after.netAmount).toBe(1);
+    expect(after.calculationHash).not.toBe(before.calculationHash);
+    expect(statementHash(after)).not.toBe(statementHash(before));
+  });
+
+  it('every date on a statement is a SUPPLIED business fact (issuedAt, remittance evidence)', () => {
+    const stmt = generateSettlementStatement(frozenFixture(), {
+      issuedAt: '2026-07-22T10:00:00.000Z',
+      remittance: {
+        remittanceId: 'rem-1',
+        bankTransferReference: 'BANK-OUT-7001',
+        executedAt: '2026-07-22T09:45:00.000Z',
+        amount: 8050.5,
+      },
+    });
+    expect(stmt.issuedAt).toBe('2026-07-22T10:00:00.000Z');
+    expect(stmt.remittance).toEqual({
+      remittanceId: 'rem-1',
+      bankTransferReference: 'BANK-OUT-7001',
+      executedAt: '2026-07-22T09:45:00.000Z',
+      amount: 8050.5,
+    });
+  });
+
+  it('purity source pins: the statement module touches no framework, no DB, no clock', () => {
+    const src = read(join(SETTLEMENT, 'settlement-statement.ts'));
+    expect(count(src, '@nestjs')).toBe(0);
+    expect(count(src, 'prisma')).toBe(0);
+    expect(count(src, 'PrismaService')).toBe(0);
+    // Exactly two import sources: crypto (deterministic hashing) and
+    // the calculator TYPE.
+    const importSources = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
+    expect(importSources.sort()).toEqual([
+      './settlement-calculator',
+      'crypto',
+    ]);
+  });
+
+  it('canonicalJson is key-order independent — the hash names the DATA, not the construction', () => {
+    const a = { x: 1, y: { b: 2, a: 3 }, z: [1, 2] };
+    const b = { z: [1, 2], y: { a: 3, b: 2 }, x: 1 };
+    expect(canonicalJson(a)).toBe(canonicalJson(b));
+    // One halala of difference → a different name.
+    const s1 = frozenFixture().calculationSnapshot;
+    const s2 = frozenFixture().calculationSnapshot;
+    s2.netAmount = s2.netAmount + 0.01;
+    expect(calculationHash(s1)).not.toBe(calculationHash(s2));
+  });
+});
+
+describe('RULE 5 — Execution Preview before Execute, on the ONE calculator', () => {
+  it('the preview renders the FROZEN snapshot and §34-verifies it via the one calculator', () => {
+    const preview = buildExecutionPreview(frozenFixture(), {
+      asOf: '2026-07-22T08:00:00.000Z',
+    });
+    expect(preview.preview).toBe(true);
+    expect(preview.netAmount).toBe(8050.5);
+    expect(preview.replayVerified).toBe(true);
+    expect(preview.calculationHash).toBe(
+      calculationHash(frozenFixture().calculationSnapshot),
+    );
+    // The draft is the SAME generator execution will use (RULE 4).
+    expect(preview.statementDraft).toEqual(
+      generateSettlementStatement(frozenFixture(), {
+        issuedAt: '2026-07-22T08:00:00.000Z',
+        remittance: null,
+      }),
+    );
+  });
+
+  it('a frozen record that no longer reproduces itself is SURFACED, never masked', () => {
+    const frozen = frozenFixture();
+    frozen.calculationSnapshot.netAmount = 999999;
+    const preview = buildExecutionPreview(frozen, {
+      asOf: '2026-07-22T08:00:00.000Z',
+    });
+    expect(preview.replayVerified).toBe(false);
+    // The preview still renders the FROZEN value — the recomputed one
+    // is never substituted (frozen data is the only truth; refusal
+    // happens at the binding gate).
+    expect(preview.netAmount).toBe(999999);
+  });
+
+  it('purity source pin: the binding module uses the calculator to COMPARE, and reads no clock/DB/framework', () => {
+    const src = read(join(SETTLEMENT, 'settlement-execution-binding.ts'));
+    expect(count(src, '@nestjs')).toBe(0);
+    expect(count(src, 'prisma')).toBe(0);
+    const importSources = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
+    expect(importSources.sort()).toEqual([
+      './settlement-calculator',
+      './settlement-statement',
+    ]);
+  });
+});
+
+describe('RULE 6 — execution only from an approved preview; one identical frozen snapshot end to end', () => {
+  const approval = (over: Partial<ExecutionApproval> = {}): ExecutionApproval => ({
+    settlementId: 'stl-1',
+    settlementReference: 'QS-K7MP-4WX2',
+    calculationHash: calculationHash(frozenFixture().calculationSnapshot),
+    approvedBy: 'founder-finance',
+    level: 1,
+    approvedAt: '2026-07-22T08:30:00.000Z',
+    ...over,
+  });
+
+  it('the lawful chain passes: frozen ≡ preview ≡ approval, executor ∉ approvers', () => {
+    const frozen = frozenFixture();
+    const preview = buildExecutionPreview(frozen, {
+      asOf: '2026-07-22T08:00:00.000Z',
+    });
+    expect(() =>
+      assertExecutionBinding(frozen, preview, [approval()], 'ops-executor'),
+    ).not.toThrow();
+  });
+
+  it('refusal matrix: every break in the chain throws its named violation', () => {
+    const frozen = frozenFixture();
+    const preview = buildExecutionPreview(frozen, {
+      asOf: '2026-07-22T08:00:00.000Z',
+    });
+    // No approval at all.
+    expect(() =>
+      assertExecutionBinding(frozen, preview, [], 'ops-executor'),
+    ).toThrow('illegal_execution_binding:approval_required');
+    // The frozen snapshot changed AFTER preview — stale preview.
+    const drifted = frozenFixture();
+    drifted.calculationSnapshot.netAmount = 1;
+    expect(() =>
+      assertExecutionBinding(drifted, preview, [approval()], 'ops-executor'),
+    ).toThrow('illegal_execution_binding:preview_snapshot_mismatch');
+    // A preview from a DIFFERENT batch.
+    expect(() =>
+      assertExecutionBinding(
+        frozen,
+        { ...preview, settlementId: 'stl-OTHER' },
+        [approval()],
+        'ops-executor',
+      ),
+    ).toThrow('illegal_execution_binding:preview_batch_mismatch');
+    // An approval quoting a DIFFERENT calculation.
+    expect(() =>
+      assertExecutionBinding(
+        frozen,
+        preview,
+        [approval({ calculationHash: 'deadbeef' })],
+        'ops-executor',
+      ),
+    ).toThrow('illegal_execution_binding:approval_snapshot_mismatch');
+    // An approval for a different batch.
+    expect(() =>
+      assertExecutionBinding(
+        frozen,
+        preview,
+        [approval({ settlementId: 'stl-OTHER' })],
+        'ops-executor',
+      ),
+    ).toThrow('illegal_execution_binding:approval_batch_mismatch');
+    // §34 failed — nothing executes off a self-inconsistent record.
+    expect(() =>
+      assertExecutionBinding(
+        frozen,
+        { ...preview, replayVerified: false },
+        [approval()],
+        'ops-executor',
+      ),
+    ).toThrow('illegal_execution_binding:replay_not_verified');
+    // §33 separation, strict form: executor among approvers.
+    expect(() =>
+      assertExecutionBinding(frozen, preview, [approval()], 'founder-finance'),
+    ).toThrow('illegal_execution_binding:executor_cannot_approve');
+  });
+
+  it('no execution can calculate independently: the binding names ONE frozen snapshot for all three stages', () => {
+    const frozen = frozenFixture();
+    const preview = buildExecutionPreview(frozen, {
+      asOf: '2026-07-22T08:00:00.000Z',
+    });
+    const a = approval();
+    // One hash, three carriers — Preview ↓ Approval ↓ Execute.
+    expect(preview.calculationHash).toBe(
+      calculationHash(frozen.calculationSnapshot),
+    );
+    expect(a.calculationHash).toBe(preview.calculationHash);
+    // And the statement execution will issue carries the same token.
+    expect(preview.statementDraft.calculationHash).toBe(
+      preview.calculationHash,
+    );
   });
 });
