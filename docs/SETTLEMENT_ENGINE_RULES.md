@@ -220,6 +220,51 @@ never touches MerchantPayable, MerchantReceivable, settlement items,
 or reserves. Document format v3 (fee legal freeze in the hashed
 document); version 1 append-only as everywhere.
 
+## Refund-integrity note — the three boundaries (Track C corrective)
+
+**Boundary 1 — document ≠ cash.** A credit note is a legal DOCUMENT;
+a refund is a CASH event. No cash posting exists without external
+evidence: bank/PSP reference, value date (`refundedAt`), the
+bank-confirmed amount, the executor's identity, and the evidence
+triple `(invoiceType, invoiceId, evidenceRef)` as the §18.1 replay
+identity. Pre-payment credits (`invoice_reduced`) are the only
+evidence-free lane and they move NO cash — they reduce the unpaid
+receivable.
+
+**Boundary 2 — payment status ≠ balance closure.** `paymentStatus`
+(unpaid / partially_paid / paid) answers "did cash arrive?";
+`balanceStatus` (open / partially_credited / closed_by_payment /
+closed_by_credit) answers "is anything still owed?". A fully-credited
+zero-receipt invoice closes `closed_by_credit` with status `issued`
+and `paidAt` NULL — it is never "paid". Coverage, recognition, and
+receipts compute against the EFFECTIVE total (total − fee credits);
+aging (the DSO/collection surface) ages only effective open balances,
+so credit-only closures never appear in collection metrics. Reading
+note for auditors: when a credit lands AFTER a partial payment and
+extinguishes the remaining balance, the invoice flips paid with
+`paidAt` = the LAST receipt's value date — the payment that
+ultimately covered it — which can predate the credit that completed
+coverage.
+
+**Boundary 3 — refund maker–checker.** Cash leaves only through
+request → INDEPENDENT approval → evidenced execution
+(`RefundRequest`: requested → approved → executed, or cancelled).
+The approval binds an immutable canonical snapshot (invoice + legal
+number, amount, VAT, reason, recipient, method → `snapshotHash`,
+canonical-JSON/sha256); execution re-verifies the hash and refuses
+drift (`refund_snapshot_tampered`) and any confirmed-amount mismatch.
+Identity law: requester ≠ approver (`refund_self_approval_rejected`),
+final approver ≠ executor (`refund_approver_cannot_execute`); the
+requester MAY execute (preparer-execution, the §33.2 shape). Evidence
+already bound to another request refuses
+(`refund_evidence_already_used`); a crash between posting and binding
+rolls forward on retry without double-posting. The single-actor
+`POST finance/refunds` route is REMOVED; `recordRefund` is an
+internal engine primitive reachable only via `executeRefund`.
+Thresholds: RESERVED — the §32 authorization matrix carries no refund
+row; adding refund thresholds is a Settlement Constitution amendment,
+not a code change.
+
 ## Amending these rules
 
 A change to any rule (or its pins) must name the rule, cite the

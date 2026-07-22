@@ -64,6 +64,7 @@ import {
   creditNoteHash,
   type CreditNoteFacts,
 } from './settlement-credit-note';
+import { canonicalJson, hashCanonical } from './settlement-statement';
 import { assertItemTransition, type ItemState } from './settlement-states';
 import { APPROVAL_POLICY } from './settlement-approval-policy';
 
@@ -1219,6 +1220,444 @@ export class SettlementRefundsService {
       );
     }
     return { refund: outcome.refund!, replayed: false as const };
+  }
+
+  // ── REFUND MAKER–CHECKER (founder boundary 3) ─────────────────────
+  // request → INDEPENDENT approval → evidenced execution. The
+  // approval binds to an IMMUTABLE snapshot (invoice, amount, VAT,
+  // reason, recipient, method → snapshotHash); the final approver can
+  // never execute; the requester may (preparer-execution, the §33.2
+  // shape). Thresholds: RESERVED — the §32 matrix carries no refund
+  // row; adding one is a constitutional amendment (recorded).
+
+  private refundSnapshotHash(row: {
+    invoiceType: string;
+    invoiceId: string;
+    invoiceNumber: string | null;
+    amount: number;
+    vatComponent: number;
+    reason: string;
+    reasonCode: string | null;
+    recipientType: string;
+    recipientOrgId: string;
+    method: string;
+  }): string {
+    return hashCanonical(canonicalJson(row));
+  }
+
+  async requestRefund(
+    actorUserId: string,
+    input: {
+      invoiceType: 'merchant_invoice' | 'corporate_invoice';
+      invoiceId: string;
+      amount: number;
+      reason: string;
+      reasonCode?: string;
+    },
+  ) {
+    this.assertGatesOpen();
+    if (
+      input.invoiceType !== 'merchant_invoice' &&
+      input.invoiceType !== 'corporate_invoice'
+    ) {
+      throw new BadRequestException('refund_invoice_type_unknown');
+    }
+    if (typeof input.invoiceId !== 'string' || !input.invoiceId.trim()) {
+      throw new BadRequestException('refund_invoice_id_required');
+    }
+    const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+    if (!reason) throw new BadRequestException('refund_reason_required');
+    const fee = input.invoiceType === 'corporate_invoice';
+    const reasonCode = input.reasonCode?.trim() || null;
+    if (fee && !FEE_REFUND_REASON_CODES.has(reasonCode ?? '')) {
+      throw new BadRequestException('fee_refund_reason_code_required');
+    }
+    if (typeof input.amount !== 'number' || !Number.isFinite(input.amount)) {
+      throw new BadRequestException('refund_amount_must_be_positive');
+    }
+    const amountMinor = toMinor(input.amount, 'SAR');
+    if (amountMinor <= 0) {
+      throw new BadRequestException('refund_amount_must_be_positive');
+    }
+    const amount = fromMinor(amountMinor, 'SAR');
+    // The immutable snapshot quotes the FROZEN invoice.
+    const invoice = fee
+      ? await this.prisma.corporateInvoice.findUnique({
+          where: { id: input.invoiceId },
+        })
+      : await this.prisma.merchantInvoice.findUnique({
+          where: { id: input.invoiceId },
+        });
+    if (!invoice) throw new NotFoundException('invoice_not_found');
+    const totalMinor = toMinor(moneyToNumber(invoice.totalAmount), 'SAR');
+    const vatMinor = toMinor(
+      moneyToNumber(
+        ((invoice as { vatAmount?: Parameters<typeof moneyToNumber>[0] })
+          .vatAmount ?? 0),
+      ),
+      'SAR',
+    );
+    // Advisory frozen-proportion VAT snapshot (execution re-derives
+    // authoritatively and refuses on drift).
+    const vatComponent = fromMinor(
+      totalMinor === 0
+        ? 0
+        : Math.min(
+            Math.floor(
+              (amountMinor * vatMinor + Math.floor(totalMinor / 2)) /
+                totalMinor,
+            ),
+            vatMinor,
+          ),
+      'SAR',
+    );
+    const invoiceNumber = fee
+      ? ((invoice as { invoiceNumber: string }).invoiceNumber ?? null)
+      : ((invoice as { merchantInvoiceNumber: string | null })
+          .merchantInvoiceNumber ?? null);
+    const snapshot = {
+      invoiceType: input.invoiceType,
+      invoiceId: invoice.id,
+      invoiceNumber,
+      amount,
+      vatComponent,
+      reason,
+      reasonCode,
+      recipientType: 'company',
+      recipientOrgId: invoice.orgId,
+      method: 'manual_bank_transfer',
+    };
+    const request = await this.prisma.refundRequest.create({
+      data: {
+        invoiceType: input.invoiceType,
+        invoiceId: invoice.id,
+        orgId: invoice.orgId,
+        storeId: fee
+          ? null
+          : ((invoice as { storeId: string }).storeId ?? null),
+        currency: 'SAR',
+        amount,
+        vatComponent,
+        reason,
+        reasonCode,
+        recipientType: 'company',
+        method: 'manual_bank_transfer',
+        snapshotHash: this.refundSnapshotHash(snapshot),
+        state: 'requested',
+        requestedBy: actorUserId,
+        requestedAt: this.clock.now(),
+      },
+    });
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'finance.refund.requested',
+      targetType: 'organization',
+      targetId: invoice.orgId,
+      metadata: {
+        requestId: request.id,
+        invoiceType: input.invoiceType,
+        invoiceId: invoice.id,
+        amount,
+        vatComponent,
+        reasonCode,
+        snapshotHash: request.snapshotHash,
+      },
+    });
+    return request;
+  }
+
+  async approveRefund(actorUserId: string, requestId: string) {
+    const request = await this.loadRequest(requestId);
+    if (request.state !== 'requested') {
+      throw new ConflictException(`refund_request_not_requested:${request.state}`);
+    }
+    if (request.requestedBy === actorUserId) {
+      // Boundary 3: INDEPENDENT approval — never the requester.
+      throw new ConflictException('refund_self_approval_rejected');
+    }
+    await this.verifySnapshot(request);
+    const moved = await this.prisma.refundRequest.updateMany({
+      where: { id: requestId, state: 'requested' },
+      data: {
+        state: 'approved',
+        approvedBy: actorUserId,
+        approvedAt: this.clock.now(),
+      },
+    });
+    if (moved.count !== 1) {
+      throw new ConflictException('refund_request_contended');
+    }
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'finance.refund.approved',
+      targetType: 'organization',
+      targetId: request.orgId,
+      metadata: {
+        requestId,
+        snapshotHash: request.snapshotHash,
+        requestedBy: request.requestedBy,
+      },
+    });
+    return this.loadRequest(requestId);
+  }
+
+  async executeRefund(
+    actorUserId: string,
+    requestId: string,
+    input: { evidenceRef: string; refundedAt: string; confirmedAmount: number },
+  ) {
+    const request = await this.loadRequest(requestId);
+    // 'executing' is the crash-recovery lane: a prior attempt latched
+    // the row and died. Only the SAME executor may resume it.
+    if (request.state !== 'approved' && request.state !== 'executing') {
+      throw new ConflictException(
+        `refund_request_not_approved:${request.state}`,
+      );
+    }
+    if (request.approvedBy === actorUserId) {
+      // Boundary 3: the final approver never executes (§33.2 shape).
+      throw new ConflictException('refund_approver_cannot_execute');
+    }
+    if (request.state === 'executing' && request.executedBy !== actorUserId) {
+      throw new ConflictException('refund_request_contended');
+    }
+    await this.verifySnapshot(request);
+    const amountMinor = toMinor(moneyToNumber(request.amount), 'SAR');
+    if (
+      typeof input.confirmedAmount !== 'number' ||
+      toMinor(input.confirmedAmount, 'SAR') !== amountMinor
+    ) {
+      // The bank-confirmed amount must equal the APPROVED snapshot.
+      throw new ConflictException('refund_confirmed_amount_mismatch');
+    }
+    // CLAIM FIRST (adversarial finding 2): the row is latched
+    // 'executing' BEFORE any cash moves, so a cancel (or a second
+    // executor) can never race the posting — the loser is refused
+    // here, while no money has moved yet. The latch stamps the
+    // executor so only they may resume after a crash.
+    const latched = await this.prisma.refundRequest.updateMany({
+      where: {
+        id: requestId,
+        state: request.state,
+        ...(request.state === 'executing'
+          ? { executedBy: actorUserId }
+          : {}),
+      },
+      data: { state: 'executing', executedBy: actorUserId },
+    });
+    if (latched.count !== 1) {
+      throw new ConflictException('refund_request_contended');
+    }
+    let result: Awaited<ReturnType<SettlementRefundsService['recordRefund']>>;
+    try {
+      // The evidenced execution primitive (all caps, VAT
+      // re-derivation, postings, documents) — executor identity
+      // carries through.
+      result = await this.recordRefund(actorUserId, {
+        invoiceType: request.invoiceType as
+          | 'merchant_invoice'
+          | 'corporate_invoice',
+        invoiceId: request.invoiceId,
+        amount: moneyToNumber(request.amount),
+        reason: request.reason,
+        reasonCode: request.reasonCode ?? undefined,
+        evidenceRef: input.evidenceRef,
+        refundedAt: input.refundedAt,
+      });
+      if (result.replayed) {
+        // The evidence triple already paid out once. If ANOTHER
+        // request owns that refund, this is the same bank transfer
+        // being claimed twice — refuse. If no request owns it (crash
+        // between posting and binding, or a pre-workflow row), roll
+        // forward and bind — but only when the replayed amount
+        // matches THIS approval.
+        const owner = await this.prisma.refundRequest.findUnique({
+          where: { refundId: result.refund.id },
+        });
+        if (owner && owner.id !== requestId) {
+          throw new ConflictException('refund_evidence_already_used');
+        }
+        if (
+          toMinor(moneyToNumber(result.refund.amount), 'SAR') !== amountMinor
+        ) {
+          throw new ConflictException('refund_evidence_already_used');
+        }
+      }
+    } catch (err) {
+      // A TYPED business refusal unlatches so the approved request
+      // stays actionable. An unknown/transport error HOLDS the latch:
+      // the primitive's transaction may have committed server-side
+      // (connection dropped between commit and ack), and unlatching
+      // would reopen cancel while an orphan refund is posted. The row
+      // stays 'executing' — visible, cancel-blocked, resumable only
+      // by this executor (whose retry replays and binds).
+      const typedRefusal =
+        err instanceof ConflictException ||
+        err instanceof BadRequestException ||
+        err instanceof NotFoundException;
+      if (typedRefusal) {
+        await this.prisma.refundRequest
+          .updateMany({
+            where: { id: requestId, state: 'executing' },
+            data: { state: 'approved', executedBy: null },
+          })
+          .catch(() => undefined);
+      }
+      throw err;
+    }
+    let done: { count: number };
+    try {
+      done = await this.prisma.refundRequest.updateMany({
+        where: { id: requestId, state: 'executing' },
+        data: {
+          state: 'executed',
+          executedBy: actorUserId,
+          executedAt: this.clock.now(),
+          refundId: result.refund.id,
+        },
+      });
+    } catch (err) {
+      // refundId is @unique: a concurrent roll-forward that bound the
+      // same replayed refund first surfaces as P2002 — same verdict,
+      // clean refusal instead of a raw constraint crash.
+      if ((err as { code?: string }).code === 'P2002') {
+        await this.prisma.refundRequest
+          .updateMany({
+            where: { id: requestId, state: 'executing' },
+            data: { state: 'approved', executedBy: null },
+          })
+          .catch(() => undefined);
+        throw new ConflictException('refund_evidence_already_used');
+      }
+      throw err;
+    }
+    if (done.count !== 1 && !result.replayed) {
+      throw new ConflictException('refund_request_contended');
+    }
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'finance.refund.executed',
+      targetType: 'organization',
+      targetId: request.orgId,
+      metadata: {
+        requestId,
+        refundId: result.refund.id,
+        snapshotHash: request.snapshotHash,
+        requestedBy: request.requestedBy,
+        approvedBy: request.approvedBy,
+        executedBy: actorUserId,
+        replayed: result.replayed,
+      },
+    });
+    return { request: await this.loadRequest(requestId), ...result };
+  }
+
+  async cancelRefundRequest(actorUserId: string, requestId: string) {
+    const request = await this.loadRequest(requestId);
+    if (request.state !== 'requested' && request.state !== 'approved') {
+      throw new ConflictException(`refund_request_not_cancellable:${request.state}`);
+    }
+    const moved = await this.prisma.refundRequest.updateMany({
+      where: { id: requestId, state: request.state },
+      data: {
+        state: 'cancelled',
+        cancelledBy: actorUserId,
+        cancelledAt: this.clock.now(),
+      },
+    });
+    if (moved.count !== 1) {
+      throw new ConflictException('refund_request_contended');
+    }
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'finance.refund.cancelled',
+      targetType: 'organization',
+      targetId: request.orgId,
+      metadata: { requestId, priorState: request.state },
+    });
+    return this.loadRequest(requestId);
+  }
+
+  async listRefundRequests(state?: string) {
+    return this.prisma.refundRequest.findMany({
+      where: state ? { state } : undefined,
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+  }
+
+  private async loadRequest(requestId: string) {
+    if (typeof requestId !== 'string' || !requestId.trim()) {
+      throw new BadRequestException('refund_request_id_required');
+    }
+    const request = await this.prisma.refundRequest.findUnique({
+      where: { id: requestId },
+    });
+    if (!request) throw new NotFoundException('refund_request_not_found');
+    return request;
+  }
+
+  // Any drift between the stored fields and the stored hash — a
+  // tampered amount, reason, recipient — voids the request (the
+  // §31.2 exact-content law applied to refunds). The snapshot is
+  // reconstructed from the row + the FROZEN invoice's legal number
+  // and must reproduce the stored hash byte-for-byte.
+  private async verifySnapshot(request: {
+    invoiceType: string;
+    invoiceId: string;
+    amount: unknown;
+    vatComponent: unknown;
+    reason: string;
+    reasonCode: string | null;
+    recipientType: string;
+    orgId: string;
+    method: string;
+    snapshotHash: string;
+  }) {
+    const fee = request.invoiceType === 'corporate_invoice';
+    const invoice = fee
+      ? await this.prisma.corporateInvoice.findUnique({
+          where: { id: request.invoiceId },
+          select: { invoiceNumber: true },
+        })
+      : await this.prisma.merchantInvoice.findUnique({
+          where: { id: request.invoiceId },
+          select: { merchantInvoiceNumber: true },
+        });
+    const invoiceNumber = fee
+      ? ((invoice as { invoiceNumber: string } | null)?.invoiceNumber ?? null)
+      : ((invoice as { merchantInvoiceNumber: string | null } | null)
+          ?.merchantInvoiceNumber ?? null);
+    const fields = {
+      invoiceType: request.invoiceType,
+      invoiceId: request.invoiceId,
+      amount: moneyToNumber(request.amount as never),
+      vatComponent: moneyToNumber(request.vatComponent as never),
+      reason: request.reason,
+      reasonCode: request.reasonCode,
+      recipientType: request.recipientType,
+      recipientOrgId: request.orgId,
+      method: request.method,
+    };
+    const rebuilt = this.refundSnapshotHash({ ...fields, invoiceNumber });
+    if (rebuilt !== request.snapshotHash) {
+      // Adversarial finding 1: the merchant legal number is lawfully
+      // attachable AFTER issuance (null → value = document
+      // COMPLETION, immutable once set). Accept iff the stored hash
+      // was built over a null number and a number has merely arrived
+      // since; value → different-value stays tampered.
+      const completedFromNull =
+        invoiceNumber !== null &&
+        this.refundSnapshotHash({ ...fields, invoiceNumber: null }) ===
+          request.snapshotHash;
+      if (!completedFromNull) {
+        throw new ConflictException('refund_snapshot_tampered');
+      }
+    }
   }
 
   // The ONE QN mint site (tripwire-pinned): both legs mint here.

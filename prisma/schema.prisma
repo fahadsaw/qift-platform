@@ -2212,6 +2212,11 @@ model CorporateInvoice {
   // approval; the 'paid' transition (offline settlement) + its ledger
   // allocation land in PR 5.
   status String @default("issued")
+  // BALANCE CLOSURE vs PAYMENT (founder refund-integrity boundary 2):
+  // open | partially_credited | closed_by_payment | closed_by_credit.
+  // A fully-credited invoice closes its BALANCE without ever being
+  // PAID — `status` flips to 'paid' only for closed_by_payment.
+  balanceStatus String @default("open")
 
   currency          String  @default("SAR")
   recipientCount    Int
@@ -2929,6 +2934,50 @@ model SettlementExecutionPreview {
 }
 
 // ── SETTLE-3a (Track C PR 5): refunds — SC §8, FC Ch. 4.5 ───────────
+
+// RefundRequest — the refund MAKER–CHECKER workflow (founder
+// refund-integrity boundary 3): request → INDEPENDENT approval →
+// evidenced execution. The approval binds to an IMMUTABLE snapshot
+// (invoice, amount, VAT, reason, recipient, method → snapshotHash);
+// fields never change after creation — only the state advances
+// through guarded transitions. Thresholds: RESERVED — the §32 matrix
+// has no refund row; adding one is a constitutional amendment; until
+// then every refund is single-independent-approval (the L2 shape).
+model RefundRequest {
+  id            String    @id @default(cuid())
+  invoiceType   String
+  invoiceId     String
+  orgId         String
+  storeId       String?
+  currency      String    @default("SAR")
+  amount        Decimal   @db.Decimal(12, 2)
+  // VAT snapshot at request (frozen-proportion; execution re-derives
+  // authoritatively and refuses on drift).
+  vatComponent  Decimal   @db.Decimal(12, 2)
+  reason        String
+  reasonCode    String?
+  recipientType String    @default("company")
+  method        String    @default("manual_bank_transfer")
+  snapshotHash  String
+  // requested | approved | executing (execution latch — cash may move
+  // only while latched; cancel-blocked; resumable by the latching
+  // executor only) | executed | cancelled
+  state         String    @default("requested")
+  requestedBy   String
+  requestedAt   DateTime
+  approvedBy    String?
+  approvedAt    DateTime?
+  executedBy    String?
+  executedAt    DateTime?
+  cancelledBy   String?
+  cancelledAt   DateTime?
+  // The SettlementRefund occurrence this request executed into.
+  refundId      String?   @unique
+  createdAt     DateTime  @default(now())
+
+  @@index([invoiceType, invoiceId])
+  @@index([state])
+}
 
 // SettlementRefund — the §8 refund occurrence (goods leg at pilot;
 // the fee leg arrives with SETTLE-3b). IMMUTABLE: a wrong refund is
