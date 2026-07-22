@@ -154,11 +154,16 @@ function mkEngine(items: Row[]) {
     settlementItem: {
       findMany: jest.fn().mockImplementation(({ where }: never) => {
         const w = where as { state?: string; batchId?: string };
+        // Reads return SNAPSHOT COPIES (DB reality): a later mutation
+        // of the store must NOT retroactively change what a caller
+        // already read — the amount-pin race pin depends on this.
         return Promise.resolve(
-          items.filter(
-            (i) =>
-              (w.state ? i.state === w.state : true) &&
-              (w.batchId ? i.batchId === w.batchId : true),
+          items
+            .map((i) => ({ ...i }))
+            .filter(
+              (i) =>
+                (w.state ? i.state === w.state : true) &&
+                (w.batchId ? i.batchId === w.batchId : true),
           ),
         );
       }),
@@ -169,6 +174,7 @@ function mkEngine(items: Row[]) {
           id: { in: string[] } | string;
           state?: string;
           batchId?: string | null;
+          amount?: unknown;
         };
         const ids = typeof w.id === 'string' ? [w.id] : w.id.in;
         let count = 0;
@@ -176,6 +182,7 @@ function mkEngine(items: Row[]) {
           if (!ids.includes(i.id as string)) continue;
           if (w.state !== undefined && i.state !== w.state) continue;
           if (w.batchId !== undefined && i.batchId !== w.batchId) continue;
+          if (w.amount !== undefined && i.amount !== w.amount) continue;
           Object.assign(i, data as Row);
           count++;
         }
@@ -243,6 +250,24 @@ const eligibleItem = (id: string, amount: number): Row => ({
 });
 
 describe('SettlementEngineService (Track C PR 1)', () => {
+  it('AMOUNT PIN (SETTLE-3a finding 1): a refund shrinking an item between read and bind rolls the WHOLE assembly back', async () => {
+    const { prisma, engine, items } = mkEngine([eligibleItem('i1', 5750)]);
+    // Simulate the race: the shrink lands after the engine's read but
+    // before its bind — hook the batch create (which runs first inside
+    // the tx) to shrink the item, exactly the §18.1 window.
+    const origCreate = prisma.settlementBatch.create.getMockImplementation()!;
+    prisma.settlementBatch.create.mockImplementationOnce((args: never) => {
+      items[0].amount = 4600; // 1,150 refunded concurrently
+      return origCreate(args);
+    });
+    await expect(engine.assembleBatch('fin-1', 's-1')).rejects.toThrow(
+      'settlement_items_contended',
+    );
+    // The item was never bound — no stale 5,750 froze anywhere.
+    expect(items[0].state).toBe('eligible');
+    expect(items[0].batchId).toBeNull();
+  });
+
   it('§30: simulation runs the SAME calculator with ZERO side effects and NO QS', async () => {
     const { prisma, audit, ledger, engine } = mkEngine([
       eligibleItem('i1', 5750),

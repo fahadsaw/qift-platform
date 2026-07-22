@@ -2922,6 +2922,88 @@ model SettlementExecutionPreview {
   @@index([settlementId, previewedAt])
 }
 
+// ── SETTLE-3a (Track C PR 5): refunds — SC §8, FC Ch. 4.5 ───────────
+
+// SettlementRefund — the §8 refund occurrence (goods leg at pilot;
+// the fee leg arrives with SETTLE-3b). IMMUTABLE: a wrong refund is
+// corrected by compensating entries, never edited. Idempotency
+// (§18.1): the same outbound movement (invoice + evidence reference)
+// collides with the original.
+model SettlementRefund {
+  id                    String   @id @default(cuid()) // = refundId anchor
+  invoiceType           String // 'merchant_invoice' (goods) — fee leg later
+  invoiceId             String
+  storeId               String
+  orgId                 String
+  campaignId            String
+  currency              String   @default("SAR")
+  // Gross refunded (incl. the VAT component — tax rides the line,
+  // §8.3, reversed at the ORIGINAL frozen proportions).
+  amount                Decimal  @db.Decimal(12, 2)
+  vatComponent          Decimal  @db.Decimal(12, 2)
+  reason                String
+  // Evidence of the outbound movement (bank reference — §13.2).
+  evidenceRef           String
+  refundedAt            DateTime // business fact (value date)
+  recordedBy            String
+  // How settlement absorbed it (§8.4): 'item_reduced' (pre-settlement)
+  // | 'receivable_accrued' (post-settlement / §2 Reversed flow).
+  settlementInteraction String
+  createdAt             DateTime @default(now())
+
+  @@unique([invoiceType, invoiceId, evidenceRef])
+  @@index([invoiceType, invoiceId])
+  @@index([storeId])
+}
+
+// CreditNote — FC Ch. 4.5: the ONLY way an issued document's economic
+// effect is reduced. Two-leg by the agent split; the goods credit note
+// is the MERCHANT'S document — its legal number is SUPPLIED when the
+// merchant issues one (never manufactured, RC Ch. 9); this row is the
+// platform record referencing the original invoice. Immutable.
+model CreditNote {
+  id                       String   @id @default(cuid())
+  refundId                 String   @unique // one credit note per refund at pilot
+  noteType                 String // 'merchant_goods' (fee leg = SETTLE-3b)
+  invoiceType              String
+  invoiceId                String
+  merchantInvoiceNumber    String? // quoted from the original invoice
+  merchantCreditNoteNumber String? // merchant-supplied legal number, if issued
+  storeId                  String
+  orgId                    String
+  campaignId               String
+  currency                 String   @default("SAR")
+  amount                   Decimal  @db.Decimal(12, 2)
+  vatComponent             Decimal  @db.Decimal(12, 2)
+  reason                   String
+  issuedAt                 DateTime
+  issuedBy                 String
+  createdAt                DateTime @default(now())
+
+  @@index([invoiceType, invoiceId])
+}
+
+// SettlementReceivable — money the MERCHANT owes Qift after a
+// post-settlement clawback (§2 Reversed; §8.4). Recovered by offset
+// against future payables (§7.4 order — recovery lines land with
+// SETTLE-3b's assembly integration; reserves draw after offset).
+model SettlementReceivable {
+  id                       String    @id @default(cuid())
+  storeId                  String
+  currency                 String    @default("SAR")
+  amount                   Decimal   @db.Decimal(12, 2)
+  occurrenceType           String // 'refund'
+  occurrenceId             String // refundId
+  state                    String    @default("open") // open | bound | recovered
+  accruedAt                DateTime
+  recoveredAt              DateTime?
+  recoveredBySettlementId  String?
+  createdAt                DateTime  @default(now())
+
+  @@unique([occurrenceType, occurrenceId])
+  @@index([storeId, state])
+}
+
 // The executed bank movement (§13.2 manual rail). ONE remittance per
 // batch at pilot (full-net; partial remittances are a future statement
 // enumeration). Idempotency anchor for merchant.remittance.paid.

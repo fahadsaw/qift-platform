@@ -33,6 +33,10 @@ import {
   SettlementExecutionService,
   type ExecuteInput,
 } from '../settlement/settlement-execution.service';
+import {
+  SettlementRefundsService,
+  type RecordRefundInput,
+} from '../settlement/settlement-refunds.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -55,6 +59,7 @@ export class AdminController {
     private readonly eligibility: SettlementEligibilityService,
     private readonly settlementEngine: SettlementEngineService,
     private readonly settlementExecution: SettlementExecutionService,
+    private readonly settlementRefunds: SettlementRefundsService,
   ) {}
 
   // ── Self ─────────────────────────────────────────────────────────
@@ -539,6 +544,29 @@ export class AdminController {
   @RequireOpsPermission('finance.receipts')
   replaySettlement(@Param('id') id: string, @Req() req: AuthedRequest) {
     return this.settlementExecution.replay(req.user.userId, id);
+  }
+
+  // ── SETTLE-3a (Track C PR 5) — §8 refunds. Delegating only. ──────
+
+  @Post('finance/refunds')
+  @RequireOpsPermission('finance.refunds')
+  recordRefund(@Body() body: RecordRefundInput, @Req() req: AuthedRequest) {
+    return this.settlementRefunds.recordRefund(req.user.userId, body);
+  }
+
+  @Get('finance/refunds')
+  @RequireOpsPermission('finance.refunds')
+  listRefunds(
+    @Query('invoiceType') invoiceType: string,
+    @Query('invoiceId') invoiceId: string,
+  ) {
+    return this.settlementRefunds.listRefunds(invoiceType, invoiceId);
+  }
+
+  @Get('finance/receivables')
+  @RequireOpsPermission('finance.refunds')
+  openReceivables(@Query('storeId') storeId?: string) {
+    return this.settlementRefunds.openReceivables(storeId);
   }
 
   @Get('finance/reconciliation')

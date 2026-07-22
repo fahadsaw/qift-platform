@@ -21,6 +21,8 @@ here is a review error.
 | `QIFT_REVENUE` | Qift revenue recognized (fee net of VAT; VAT posted at issuance per FC 7.6) | Qift | `qift.revenue.recognized:{invoiceId}` under the recorded recognition-policy version | C-PR2 |
 | `MERCHANT_REMITTANCE` | Payable extinguishment (safeguarding → merchant bank) | Merchant (leaving) | `merchant.remittance.paid:{remittanceId}` | C-PR3 |
 | `SETTLEMENT_COMPLETED` | Lifecycle marker (zero-amount) | — | `settlement.completed:{settlementId}` | C-PR3 |
+| `REFUND_GOODS` | Goods refund (safeguarding → company; pass-through leaving) — pre-settlement reduces the payable position, post-settlement pairs with a receivable | Merchant (returned) | `refund.paid:{refundId}` | C-PR5 |
+| `MERCHANT_RECEIVABLE` | Post-settlement clawback — merchant owes Qift (asset form, §2 Reversed; recovered by §7.4 offset) | Merchant owes | `merchant.receivable.accrued:{refundId}` | C-PR5 |
 
-Reserved next (enter here before first use): receivable
-accrual/recovery, reserve held/released, refund/chargeback families.
+Reserved next (enter here before first use): receivable recovery,
+reserve held/released, fee-leg refunds, chargeback family.

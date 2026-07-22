@@ -47,10 +47,18 @@ export const FINANCIAL_EVENTS = {
   SETTLEMENT_COMPLETED: 'settlement.completed',
   SETTLEMENT_SUPERSEDED: 'settlement.superseded',
 
-  // ── Refunds / disputes (reserved — refunds phase) ────────────────
+  // ── Refunds (SETTLE-3a — refund.paid now LIVE) ───────────────────
+  // The MONEY fact, anchored on refundId. requested/approved remain
+  // reserved for the future self-serve flow where they are distinct
+  // occurrences — at pilot the decision trail lives in AuditLog +
+  // the immutable SettlementRefund row (posting them with amounts
+  // would double-count refunds in every position sum).
   REFUND_REQUESTED: 'refund.requested',
   REFUND_APPROVED: 'refund.approved',
   REFUND_PAID: 'refund.paid',
+  // Post-settlement clawback (§2 Reversed): the merchant owes Qift —
+  // anchored on refundId; recovery events land with SETTLE-3b.
+  MERCHANT_RECEIVABLE_ACCRUED: 'merchant.receivable.accrued',
   CHARGEBACK_CREATED: 'chargeback.created',
 } as const;
 

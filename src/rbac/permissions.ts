@@ -121,6 +121,9 @@ export const FINANCE_PERMISSIONS = [
   // executor ∉ approvers on server-verified identity.
   'finance.settlement_approve',
   'finance.settlement_execute',
+  // SETTLE-3a (Track C PR 5): record §8 refunds (credit note + goods
+  // posting + settlement interaction), list refunds/receivables.
+  'finance.refunds',
   'finance.reject_payout',
   'finance.read_payout_overview',
 

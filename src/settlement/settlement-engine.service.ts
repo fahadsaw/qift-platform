@@ -188,20 +188,30 @@ export class SettlementEngineService {
               assembledBy: actorUserId,
             },
           });
-          // CONCURRENCY GUARD (§18.1): bind ONLY items still eligible
-          // and unbound — a racing assembly that claimed any of them
-          // makes the count fall short, and this whole transaction
-          // (batch row included) rolls back. Money cannot be claimed
-          // twice.
-          const bound = await tx.settlementItem.updateMany({
-            where: {
-              id: { in: items.map((i) => i.id) },
-              state: 'eligible',
-              batchId: null,
-            },
-            data: { state: 'ready' satisfies ItemState, batchId: created.id },
-          });
-          if (bound.count !== items.length) {
+          // CONCURRENCY GUARD (§18.1) + AMOUNT PIN (SETTLE-3a review
+          // finding 1): bind each item ONLY if still eligible, unbound
+          // AND carrying the EXACT amount the composition froze — a
+          // refund shrinking the item between the read and this bind
+          // makes the count fall short and the whole assembly (batch
+          // row, QS, marker) rolls back. Money cannot be claimed
+          // twice, and a stale amount can never freeze into a batch.
+          let bound = 0;
+          for (const item of items) {
+            const res = await tx.settlementItem.updateMany({
+              where: {
+                id: item.id,
+                state: 'eligible',
+                batchId: null,
+                amount: item.amount,
+              },
+              data: {
+                state: 'ready' satisfies ItemState,
+                batchId: created.id,
+              },
+            });
+            bound += res.count;
+          }
+          if (bound !== items.length) {
             throw new ConflictException('settlement_items_contended');
           }
           // §11.1 lifecycle marker INSIDE the transaction: the batch
