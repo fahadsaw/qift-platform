@@ -96,13 +96,42 @@ export function canonicalJson(value: unknown): string {
     .join(',')}}`;
 }
 
+// STATEMENT HARDENING (req. 1+2): the canonical JSON string is THE
+// source of truth, and every hash is computed from those exact bytes
+// and NOTHING else — hashCanonical is the single digest primitive;
+// statementHash/calculationHash are canonicalJson ∘ hashCanonical by
+// construction. Presentation layers (print, HTML, exports) derive
+// from the canonical string and add no data — none of that machinery
+// may live in this module (pinned).
+export function hashCanonical(canonical: string): string {
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
 // The binding token of RULE 6: one hash names one frozen calculation.
 export function calculationHash(snapshot: SettlementCalculation): string {
-  return createHash('sha256').update(canonicalJson(snapshot)).digest('hex');
+  return hashCanonical(canonicalJson(snapshot));
 }
 
 export function statementHash(statement: SettlementStatement): string {
-  return createHash('sha256').update(canonicalJson(statement)).digest('hex');
+  return hashCanonical(canonicalJson(statement));
+}
+
+// ── Digital-signature seam (HARDENING req. 3) ────────────────────────
+// A signature signs the CANONICAL DIGEST — the sha256 of the canonical
+// JSON bytes — never the payload object, a rendering, or a re-
+// serialization. Signers (Qift seal today-shaped, regulator seals
+// later) attach as append-only envelope records; verification is:
+//   verify(signature, signableDigest(statement), publicKey(keyId)).
+export type SignatureEnvelope = {
+  algorithm: string; // e.g. 'ed25519', 'rsa-pss-sha256'
+  keyId: string; // Ch. 14-recorded signing-key identity
+  signature: string; // base64
+  signedBy: string;
+  signedAt: string; // ISO — recorded fact
+};
+
+export function signableDigest(statement: SettlementStatement): string {
+  return statementHash(statement);
 }
 
 export function generateSettlementStatement(

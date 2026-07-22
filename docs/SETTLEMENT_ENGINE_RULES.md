@@ -84,6 +84,35 @@ immutable.
   recomputation); purity import pin (exactly `crypto` + the calculator
   *type*); every date is a supplied input.
 
+### Rule 4 addendum — Statement Hardening (2026-07-22, before SETTLE-3)
+
+Founder-mandated hardening, all pinned:
+
+1. **Canonical JSON is the source of truth.** Every issued statement
+   stores its canonical JSON string (`canonicalJson` column) alongside
+   the payload; every presentation layer — **PDF included — is
+   presentation only**: it derives from the canonical string and adds
+   no data. No print/render machinery may live in the settlement
+   module (source-pinned).
+2. **The hash derives from the canonical bytes only.**
+   `hashCanonical(canonical)` is the single digest primitive;
+   `statementHash ≡ sha256(canonicalJson(statement))` by construction.
+3. **Digital signatures are supported structurally.** Signatures sign
+   the canonical digest (`signableDigest ≡ statementHash`), never a
+   payload object or rendering; envelopes accumulate append-only in
+   `SettlementStatementSignature` (algorithm, Ch. 14-recorded keyId,
+   signer, signedAt). No signer ships yet — the seam does.
+4. **Replay is versioned.** `REPLAY_ENGINE_VERSION`
+   (settlement-execution-binding.ts) names the verification semantics;
+   every §34 run persists an append-only `SettlementReplayRecord`
+   carrying it, and the replay response exposes it.
+5. **Integrity before rendering.** Statement retrieval and replay
+   verify `sha256(storedCanonical) = storedHash` AND
+   `canonicalJson(payload) = storedCanonical` FIRST — a tampered
+   record refuses retrieval (`statement_integrity_violation`) and
+   replay surfaces `statementIntegrityVerified: false`, rendering only
+   the regenerated-from-frozen statement as trustworthy.
+
 ## Rule 5 — Execution Preview before Execute, on the one calculator
 
 An **Execution Preview must exist before Execute**, produced by
