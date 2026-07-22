@@ -123,6 +123,12 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
     opsPermission: 'finance.refunds',
   },
   {
+    // Refund-integrity — maker–checker request queue (read model).
+    method: 'listRefundRequests',
+    path: 'finance/refunds/requests',
+    opsPermission: 'finance.refunds',
+  },
+  {
     // SETTLE-3a — open receivables (§2 Reversed → §7.4 offset queue).
     method: 'openReceivables',
     path: 'finance/receivables',
@@ -673,9 +679,33 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         opsPermission: 'finance.settlement_execute',
       },
       {
-        // SETTLE-3a — §8 refund recording (money leaves safeguarding).
-        method: 'recordRefund',
-        path: 'finance/refunds',
+        // Refund-integrity — maker: files the request + immutable
+        // snapshot. No money moves here.
+        method: 'requestRefund',
+        path: 'finance/refunds/requests',
+        httpMethod: 'POST',
+        opsPermission: 'finance.refunds',
+      },
+      {
+        // Refund-integrity — checker: independent approval (never the
+        // requester; enforced in-service above this permission).
+        method: 'approveRefund',
+        path: 'finance/refunds/requests/:id/approve',
+        httpMethod: 'POST',
+        opsPermission: 'finance.refunds',
+      },
+      {
+        // Refund-integrity — executor: evidenced execution (never the
+        // final approver). §8 money leaves safeguarding HERE only.
+        method: 'executeRefund',
+        path: 'finance/refunds/requests/:id/execute',
+        httpMethod: 'POST',
+        opsPermission: 'finance.refunds',
+      },
+      {
+        // Refund-integrity — cancel an un-executed request.
+        method: 'cancelRefundRequest',
+        path: 'finance/refunds/requests/:id/cancel',
         httpMethod: 'POST',
         opsPermission: 'finance.refunds',
       },

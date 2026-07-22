@@ -377,50 +377,101 @@ export class SettlementReceiptsService {
     );
     const creditsMinor = await this.feeCreditsMinor(invoiceType, invoiceId);
     const totalMinor = toMinor(invoice.totalAmount, 'SAR') - creditsMinor;
-    // Covered when receipts reach the EFFECTIVE total — or when credit
-    // notes extinguished the invoice entirely (review finding 2: a
-    // fully-credited invoice closes economically with zero receipts).
-    const covered =
-      (receipts.length > 0 && paidMinor >= totalMinor) ||
-      (totalMinor <= 0 && creditsMinor > 0);
+    // BOUNDARY 2 (founder refund-integrity): payment and balance are
+    // SEPARATE facts. closed_by_payment = receipts reached the
+    // effective total (status flips 'paid'); closed_by_credit =
+    // credit notes extinguished the balance with the paid amount
+    // staying exactly what was received — the invoice is NEVER
+    // classified 'paid' by credits.
+    const coveredByPayment = receipts.length > 0 && paidMinor >= totalMinor;
+    const coveredByCredit =
+      !coveredByPayment && totalMinor <= 0 && creditsMinor > 0;
+    const covered = coveredByPayment;
+    const paymentStatus =
+      paidMinor <= 0
+        ? 'unpaid'
+        : coveredByPayment
+          ? 'paid'
+          : 'partially_paid';
+    const balanceStatus = coveredByPayment
+      ? 'closed_by_payment'
+      : coveredByCredit
+        ? 'closed_by_credit'
+        : creditsMinor > 0
+          ? 'partially_credited'
+          : 'open';
     const result = {
       invoiceType,
       invoiceId,
       totalAmount: fromMinor(totalMinor, 'SAR'),
+      creditedAmount: fromMinor(creditsMinor, 'SAR'),
       receiptCount: receipts.length,
       amountReceived: fromMinor(paidMinor, 'SAR'),
       balance: fromMinor(totalMinor - paidMinor, 'SAR'),
       covered,
+      paymentStatus,
+      balanceStatus,
       status: invoice.status,
     };
-    if (!covered || invoice.status === 'paid') {
+    // Balance-status bookkeeping is corporate-only (credits exist only
+    // there) and never blocks the money paths.
+    if (invoiceType === 'corporate_invoice' && balanceStatus !== 'open') {
+      if (coveredByCredit) {
+        // Guarded write-once-ish: only an ISSUED (never-paid) invoice
+        // can close by credit; paidAt stays NULL — nothing was paid.
+        const closed = await this.prisma.corporateInvoice.updateMany({
+          where: { id: invoiceId, status: 'issued', balanceStatus: { not: 'closed_by_credit' } },
+          data: { balanceStatus: 'closed_by_credit' },
+        });
+        if (closed.count === 1) {
+          await this.audit.record({
+            actorUserId,
+            actorType: 'user',
+            action: 'finance.invoice.closed_by_credit',
+            targetType: 'organization',
+            targetId: invoice.orgId,
+            metadata: {
+              invoiceId,
+              invoiceNumber: invoice.invoiceNumber,
+              creditedAmount: fromMinor(creditsMinor, 'SAR'),
+              amountReceived: fromMinor(paidMinor, 'SAR'), // stays as-is
+            },
+          });
+        }
+        result.status = invoice.status; // NOT paid
+        return result;
+      }
+      if (balanceStatus === 'partially_credited') {
+        await this.prisma.corporateInvoice.updateMany({
+          where: { id: invoiceId, balanceStatus: 'open' },
+          data: { balanceStatus: 'partially_credited' },
+        });
+      }
+    }
+    if (!coveredByPayment || invoice.status === 'paid') {
       // Nothing to flip; still make sure a paid invoice's derived
       // artifacts exist (heals a crash between flip and artifacts).
       if (invoice.status === 'paid') {
         await this.ensureCoverageArtifacts(actorUserId, invoiceType, invoice);
+        // Heal (adversarial finding 4): invoices paid BEFORE the
+        // balanceStatus column existed defaulted to 'open' — stamp
+        // closed_by_payment retroactively, guarded so it runs once.
+        if (invoiceType === 'corporate_invoice') {
+          await this.prisma.corporateInvoice.updateMany({
+            where: { id: invoiceId, status: 'paid', balanceStatus: 'open' },
+            data: { balanceStatus: 'closed_by_payment' },
+          });
+        }
         result.status = 'paid';
+        result.balanceStatus = 'closed_by_payment';
       }
       return result;
     }
     // paidAt = the COMPLETING receipt's value date — a business fact
-    // from evidence, never a machine clock (§34-friendly). A fully-
-    // credited invoice (zero receipts) closes on the LAST credit's
-    // value date instead.
-    const paidAt =
-      receipts.length > 0
-        ? receipts[receipts.length - 1].receivedAt
-        : (
-            await this.prisma.settlementRefund.findMany({
-              where: {
-                invoiceType: 'corporate_invoice',
-                invoiceId,
-                settlementInteraction: 'invoice_reduced',
-              },
-              orderBy: [{ refundedAt: 'desc' }, { id: 'desc' }],
-              take: 1,
-              select: { refundedAt: true },
-            })
-          )[0].refundedAt;
+    // from evidence, never a machine clock. Reached only via
+    // coveredByPayment, so a receipt always exists (boundary 2:
+    // credit-only closure NEVER sets paidAt).
+    const paidAt = receipts[receipts.length - 1].receivedAt;
     const flipped =
       invoiceType === 'merchant_invoice'
         ? await this.prisma.merchantInvoice.updateMany({
@@ -429,7 +480,11 @@ export class SettlementReceiptsService {
           })
         : await this.prisma.corporateInvoice.updateMany({
             where: { id: invoiceId, status: 'issued' },
-            data: { status: 'paid', paidAt },
+            data: {
+              status: 'paid',
+              paidAt,
+              balanceStatus: 'closed_by_payment',
+            },
           });
     if (flipped.count === 1) {
       await this.audit.record({

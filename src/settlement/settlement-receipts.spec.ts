@@ -564,38 +564,73 @@ describe('SettlementReceiptsService (SETTLE-1)', () => {
     expect(rev.amount).toBe(100);
   });
 
-  it('SETTLE-3c-1 finding 2: a FULLY-credited invoice closes with zero receipts, on the last credit value date, recognizing nothing', async () => {
-    const { service, prisma, ledgerRows, corp } = harness({
+  it('BOUNDARY 2: a FULLY-credited invoice closes its BALANCE — but is NEVER classified paid (zero receipts, paidAt null, nothing recognized)', async () => {
+    const { service, prisma, ledgerRows, corp, auditRows } = harness({
       corporate: [corporateInvoice()],
     });
-    (prisma.settlementRefund.findMany as jest.Mock).mockImplementation(
-      ({ select }: never) =>
-        Promise.resolve(
-          (select as Row).refundedAt
-            ? [{ refundedAt: new Date('2026-07-20T18:00:00.000Z') }]
-            : [
-                {
-                  amount: 172.5,
-                  vatComponent: 22.5,
-                  settlementInteraction: 'invoice_reduced',
-                },
-              ],
-        ),
-    );
+    (prisma.settlementRefund.findMany as jest.Mock).mockResolvedValue([
+      {
+        amount: 172.5,
+        vatComponent: 22.5,
+        settlementInteraction: 'invoice_reduced',
+      },
+    ]);
     const res = await service.deriveAndApplyCoverage(
       'fin-1',
       'corporate_invoice',
       'cinv-1',
     );
-    expect(res.covered).toBe(true);
-    expect(corp.get('cinv-1')!.status).toBe('paid');
-    expect((corp.get('cinv-1')!.paidAt as Date).toISOString()).toBe(
-      '2026-07-20T18:00:00.000Z',
-    );
-    // Effective fee net = 150 − 150 = 0 → nothing recognized.
+    // Balance closed BY CREDIT; payment never happened.
+    expect(res.covered).toBe(false); // covered === covered-by-PAYMENT
+    expect(res.balanceStatus).toBe('closed_by_credit');
+    expect(res.paymentStatus).toBe('unpaid');
+    expect(res.balance).toBe(0);
+    const inv = corp.get('cinv-1')!;
+    expect(inv.status).toBe('issued'); // NOT paid
+    expect(inv.balanceStatus).toBe('closed_by_credit');
+    expect(inv.paidAt).toBeUndefined(); // never set
+    // Effective fee net = 0 → nothing recognized; and the closure is
+    // audited as a CREDIT closure, not a payment.
     expect(
       ledgerRows.find((r) => r.eventType === 'qift.revenue.recognized'),
     ).toBeUndefined();
+    expect(
+      auditRows.find((a) => a.action === 'finance.invoice.closed_by_credit'),
+    ).toBeTruthy();
+    expect(
+      auditRows.find((a) => a.action === 'finance.invoice.paid'),
+    ).toBeUndefined();
+  });
+
+  it('BOUNDARY 2: partially paid + partially credited — paymentStatus and balanceStatus stay separate facts', async () => {
+    const { service, prisma, corp } = harness({
+      corporate: [corporateInvoice()],
+    });
+    (prisma.settlementRefund.findMany as jest.Mock).mockResolvedValue([
+      {
+        amount: 57.5,
+        vatComponent: 7.5,
+        settlementInteraction: 'invoice_reduced',
+      },
+    ]);
+    await service.recordReceipt('fin-1', {
+      invoiceType: 'corporate_invoice',
+      invoiceId: 'cinv-1',
+      amount: 50,
+      bankReference: 'TT-PP-1',
+      receivedAt: '2026-07-20T15:00:00.000Z',
+    });
+    const res = await service.deriveAndApplyCoverage(
+      'fin-1',
+      'corporate_invoice',
+      'cinv-1',
+    );
+    expect(res.paymentStatus).toBe('partially_paid'); // 50 of 115 effective
+    expect(res.balanceStatus).toBe('partially_credited');
+    expect(res.balance).toBe(65);
+    expect(corp.get('cinv-1')!.status).toBe('issued');
+    // Aging (the collection surface) keeps chasing ONLY the effective
+    // balance — credit-only closure never inflates DSO inputs.
   });
 
   it('receivables aging: open balances bucketed off the injected clock, covered invoices excluded', async () => {
@@ -633,5 +668,76 @@ describe('SettlementReceiptsService (SETTLE-1)', () => {
       daysOverdue: 0,
       bucket: 'current',
     });
+  });
+
+  it('BOUNDARY 2: aging (the DSO/collection surface) EXCLUDES a credit-closed invoice — nothing left to collect, nothing to age', async () => {
+    const { service, prisma } = harness({
+      corporate: [corporateInvoice()],
+    });
+    // Fully credited pre-payment: effective total 0, zero receipts.
+    (prisma.settlementRefund.findMany as jest.Mock).mockResolvedValue([
+      {
+        amount: 172.5,
+        vatComponent: 22.5,
+        settlementInteraction: 'invoice_reduced',
+      },
+    ]);
+    await service.deriveAndApplyCoverage(
+      'fin-1',
+      'corporate_invoice',
+      'cinv-1',
+    );
+    const aging = await service.receivablesAging();
+    expect(
+      aging.items.find((i) => i.invoiceId === 'cinv-1'),
+    ).toBeUndefined();
+  });
+
+  it('BOUNDARY 2: a receipt arriving AFTER credit closure refuses — a closed balance can never become "paid"', async () => {
+    const { service, prisma } = harness({
+      corporate: [corporateInvoice()],
+    });
+    (prisma.settlementRefund.findMany as jest.Mock).mockResolvedValue([
+      {
+        amount: 172.5,
+        vatComponent: 22.5,
+        settlementInteraction: 'invoice_reduced',
+      },
+    ]);
+    await service.deriveAndApplyCoverage(
+      'fin-1',
+      'corporate_invoice',
+      'cinv-1',
+    );
+    // The balance guard is EFFECTIVE-total based: effective 0 → any
+    // receipt is over-collection and refuses.
+    await expect(
+      service.recordReceipt('fin-1', {
+        invoiceType: 'corporate_invoice',
+        invoiceId: 'cinv-1',
+        amount: 10,
+        bankReference: 'TT-STRAY-1',
+        receivedAt: '2026-07-20T15:00:00.000Z',
+      }),
+    ).rejects.toThrow('receipt_exceeds_invoice_balance');
+  });
+
+  it('BOUNDARY 2: a receipt-completed corporate invoice is paid AND balance-closed BY PAYMENT', async () => {
+    const { service, corp } = harness({
+      corporate: [corporateInvoice()],
+    });
+    const res = await service.recordReceipt('fin-1', {
+      invoiceType: 'corporate_invoice',
+      invoiceId: 'cinv-1',
+      amount: 172.5,
+      bankReference: 'TT-FULL-1',
+      receivedAt: '2026-07-20T14:30:00.000Z',
+    });
+    expect(res.coverage!.covered).toBe(true);
+    expect(res.coverage!.paymentStatus).toBe('paid');
+    expect(res.coverage!.balanceStatus).toBe('closed_by_payment');
+    const inv = corp.get('cinv-1')!;
+    expect(inv.status).toBe('paid');
+    expect(inv.balanceStatus).toBe('closed_by_payment');
   });
 });

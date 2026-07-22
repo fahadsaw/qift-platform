@@ -33,10 +33,7 @@ import {
   SettlementExecutionService,
   type ExecuteInput,
 } from '../settlement/settlement-execution.service';
-import {
-  SettlementRefundsService,
-  type RecordRefundInput,
-} from '../settlement/settlement-refunds.service';
+import { SettlementRefundsService } from '../settlement/settlement-refunds.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -547,11 +544,54 @@ export class AdminController {
   }
 
   // ── SETTLE-3a (Track C PR 5) — §8 refunds. Delegating only. ──────
+  // Refund-integrity PR: the single-actor POST finance/refunds route
+  // is REMOVED — every cash refund now travels request → independent
+  // approval → evidenced execution (boundary 3). recordRefund remains
+  // an internal engine primitive reached only via executeRefund.
 
-  @Post('finance/refunds')
+  @Post('finance/refunds/requests')
   @RequireOpsPermission('finance.refunds')
-  recordRefund(@Body() body: RecordRefundInput, @Req() req: AuthedRequest) {
-    return this.settlementRefunds.recordRefund(req.user.userId, body);
+  requestRefund(
+    @Body()
+    body: {
+      invoiceType: 'merchant_invoice' | 'corporate_invoice';
+      invoiceId: string;
+      amount: number;
+      reason: string;
+      reasonCode?: string;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementRefunds.requestRefund(req.user.userId, body);
+  }
+
+  @Get('finance/refunds/requests')
+  @RequireOpsPermission('finance.refunds')
+  listRefundRequests(@Query('state') state?: string) {
+    return this.settlementRefunds.listRefundRequests(state);
+  }
+
+  @Post('finance/refunds/requests/:id/approve')
+  @RequireOpsPermission('finance.refunds')
+  approveRefund(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.settlementRefunds.approveRefund(req.user.userId, id);
+  }
+
+  @Post('finance/refunds/requests/:id/execute')
+  @RequireOpsPermission('finance.refunds')
+  executeRefund(
+    @Param('id') id: string,
+    @Body()
+    body: { evidenceRef: string; refundedAt: string; confirmedAmount: number },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementRefunds.executeRefund(req.user.userId, id, body);
+  }
+
+  @Post('finance/refunds/requests/:id/cancel')
+  @RequireOpsPermission('finance.refunds')
+  cancelRefundRequest(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.settlementRefunds.cancelRefundRequest(req.user.userId, id);
   }
 
   @Get('finance/refunds')
