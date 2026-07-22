@@ -2978,6 +2978,29 @@ model CreditNote {
   invoiceId                String
   merchantInvoiceNumber    String? // quoted from the original invoice
   merchantCreditNoteNumber String? // merchant-supplied legal number, if issued
+  // ── Legal-document identity (founder integrity check, C-PR8) ────
+  // The AGENT split, explicit: who legally issues this document.
+  // 'MERCHANT' (goods credit note) | 'QIFT' (service-fee credit note,
+  // future — Qift's OWN sequential series, never the merchant's).
+  issuerType               String   @default("MERCHANT")
+  // Where the legal number came from (the MerchantInvoice pattern):
+  // 'MERCHANT' | 'ACCOUNTING_CONNECTOR' | 'QIFT_ON_BEHALF' (requires
+  // authorization evidence) | 'QIFT' (Qift's own fee-leg series).
+  issuanceSource           String   @default("MERCHANT")
+  // Contractual authorization evidence — MANDATORY when Qift writes a
+  // merchant legal number on the merchant's behalf; never else.
+  onBehalfAuthorizationRef String?
+  // Future ZATCA e-invoicing UUID — reserved, nullable until the
+  // FATOORA connector phase.
+  creditNoteUuid           String?
+  // Generalized original-document number (goods leg: the merchant's
+  // invoice number; fee leg: the QC). The typed columns above remain
+  // the leg-specific record.
+  originalInvoiceNumber    String?
+  // Current document version (head pointer). Every version's bytes
+  // live append-only in CreditNoteVersion — the head is a cache of
+  // the LATEST, never the only copy.
+  currentVersion           Int      @default(1)
   storeId                  String
   orgId                    String
   campaignId               String
@@ -2999,6 +3022,30 @@ model CreditNote {
   createdAt                DateTime @default(now())
 
   @@index([invoiceType, invoiceId])
+}
+
+// CreditNoteVersion — APPEND-ONLY document version history (founder
+// integrity check, C-PR8). A later fact (statement attachment, a
+// merchant supplying their legal number) NEVER mutates an issued
+// version: it appends the next version's canonical bytes + hash here
+// and advances the head's cache. Every historical version remains
+// byte-reproducible from its recorded facts, forever.
+model CreditNoteVersion {
+  id                    String   @id @default(cuid())
+  creditNoteId          String
+  versionNumber         Int
+  // What changed, by name: 'issued' | 'statement_attached' |
+  // 'legal_number_attached' (future) — the closed vocabulary grows
+  // only by PR.
+  changeReason          String
+  canonicalJson         String
+  documentHash          String
+  statementSettlementId String?
+  createdBy             String
+  createdAt             DateTime @default(now())
+
+  @@unique([creditNoteId, versionNumber])
+  @@index([creditNoteId])
 }
 
 // SettlementReceivable — money the MERCHANT owes Qift after a

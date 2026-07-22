@@ -652,6 +652,11 @@ export class SettlementExecutionService {
         invoiceId: note.invoiceId,
         merchantInvoiceNumber: note.merchantInvoiceNumber,
         merchantCreditNoteNumber: note.merchantCreditNoteNumber,
+        issuerType: note.issuerType,
+        issuanceSource: note.issuanceSource,
+        onBehalfAuthorizationRef: note.onBehalfAuthorizationRef,
+        creditNoteUuid: note.creditNoteUuid,
+        originalInvoiceNumber: note.originalInvoiceNumber,
         storeId: note.storeId,
         orgId: note.orgId,
         campaignId: note.campaignId,
@@ -664,15 +669,31 @@ export class SettlementExecutionService {
         statementSettlementId: frozen.settlementId,
       };
       const canonical = creditNoteCanonical(facts);
+      const documentHash = creditNoteHash(facts);
+      // APPEND-ONLY (C-PR8): the issued version's bytes are NEVER
+      // rewritten — the next version appends to CreditNoteVersion and
+      // the head row advances its CURRENT cache + version pointer.
       const attached = await this.prisma.creditNote.updateMany({
         where: { refundId: alloc.occurrenceId, statementSettlementId: null },
         data: {
           statementSettlementId: frozen.settlementId,
           canonicalJson: canonical,
-          documentHash: creditNoteHash(facts),
+          documentHash,
+          currentVersion: note.currentVersion + 1,
         },
       });
       if (attached.count === 1) {
+        await this.prisma.creditNoteVersion.create({
+          data: {
+            creditNoteId: note.id,
+            versionNumber: note.currentVersion + 1,
+            changeReason: 'statement_attached',
+            canonicalJson: canonical,
+            documentHash,
+            statementSettlementId: frozen.settlementId,
+            createdBy: actorUserId,
+          },
+        });
         await this.audit.record({
           actorUserId,
           actorType: 'user',
