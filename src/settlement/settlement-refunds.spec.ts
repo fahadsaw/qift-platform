@@ -47,6 +47,7 @@ function world(opts?: {
     batchId: null,
   };
   const refunds: Row[] = [];
+  const noteVersions: Row[] = [];
   const creditNotes: Row[] = [];
   const receivables: Row[] = [];
   const ledgerRows: Row[] = [];
@@ -87,6 +88,20 @@ function world(opts?: {
         refunds.push(row);
         return Promise.resolve(row);
       }),
+    },
+    creditNoteVersion: {
+      create: jest.fn().mockImplementation(({ data }: never) => {
+        const row = { id: `cnv-${++seq}`, ...(data as Row) };
+        noteVersions.push(row);
+        return Promise.resolve(row);
+      }),
+      findMany: jest.fn().mockImplementation(({ where }: never) =>
+        Promise.resolve(
+          noteVersions.filter(
+            (v) => v.creditNoteId === (where as Row).creditNoteId,
+          ),
+        ),
+      ),
     },
     creditNote: {
       create: jest.fn().mockImplementation(({ data }: never) => {
@@ -432,7 +447,7 @@ describe('SettlementRefundsService (SETTLE-3a, §8)', () => {
       identical: true,
       canonicalIdentical: true,
       hashIdentical: true,
-      documentVersion: 'v1',
+      documentVersion: 'v2',
     });
     expect(replay.creditNoteReference).toBe(note.referenceNumber);
     expect(

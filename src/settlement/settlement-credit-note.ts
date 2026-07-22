@@ -19,13 +19,19 @@ import {
 } from './settlement-statement';
 
 export type CreditNoteFacts = {
-  referenceNumber: string; // QN — allocated at issuance, immutable
+  referenceNumber: string; // QN — operational ONLY, never the legal number
   refundId: string;
-  noteType: string; // 'merchant_goods' (fee leg = SETTLE-3b)
+  noteType: string; // 'merchant_goods' (fee leg future)
   invoiceType: string;
   invoiceId: string;
   merchantInvoiceNumber: string | null; // quoted — never manufactured
   merchantCreditNoteNumber: string | null; // supplied — never manufactured
+  // Legal-document identity (C-PR8): the agent split, explicit.
+  issuerType: string; // 'MERCHANT' | 'QIFT'
+  issuanceSource: string; // MERCHANT | ACCOUNTING_CONNECTOR | QIFT_ON_BEHALF | QIFT
+  onBehalfAuthorizationRef: string | null;
+  creditNoteUuid: string | null; // future ZATCA
+  originalInvoiceNumber: string | null; // generalized original-document number
   storeId: string;
   orgId: string;
   campaignId: string;
@@ -43,7 +49,10 @@ export type CreditNoteFacts = {
 };
 
 export type CreditNoteDocument = {
-  documentVersion: 'v1';
+  // FORMAT version (bumped v1→v2 when the legal-identity fields
+  // entered the hashed document — C-PR8; no v1 documents exist
+  // anywhere: the Ch. 17.4 gates were never attested).
+  documentVersion: 'v2';
   referenceNumber: string;
   refundId: string;
   noteType: string;
@@ -51,7 +60,12 @@ export type CreditNoteDocument = {
     invoiceType: string;
     invoiceId: string;
     merchantInvoiceNumber: string | null;
+    originalInvoiceNumber: string | null;
   };
+  issuerType: string;
+  issuanceSource: string;
+  onBehalfAuthorizationRef: string | null;
+  creditNoteUuid: string | null;
   merchantCreditNoteNumber: string | null;
   storeId: string;
   orgId: string;
@@ -69,7 +83,7 @@ export function buildCreditNoteDocument(
   facts: CreditNoteFacts,
 ): CreditNoteDocument {
   return {
-    documentVersion: 'v1',
+    documentVersion: 'v2',
     referenceNumber: facts.referenceNumber,
     refundId: facts.refundId,
     noteType: facts.noteType,
@@ -77,7 +91,12 @@ export function buildCreditNoteDocument(
       invoiceType: facts.invoiceType,
       invoiceId: facts.invoiceId,
       merchantInvoiceNumber: facts.merchantInvoiceNumber,
+      originalInvoiceNumber: facts.originalInvoiceNumber,
     },
+    issuerType: facts.issuerType,
+    issuanceSource: facts.issuanceSource,
+    onBehalfAuthorizationRef: facts.onBehalfAuthorizationRef,
+    creditNoteUuid: facts.creditNoteUuid,
     merchantCreditNoteNumber: facts.merchantCreditNoteNumber,
     storeId: facts.storeId,
     orgId: facts.orgId,

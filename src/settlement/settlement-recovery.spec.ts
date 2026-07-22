@@ -63,6 +63,11 @@ function world(opts?: { receivables?: Row[] }) {
     invoiceId: 'minv-1',
     merchantInvoiceNumber: 'DAT-2026-0042',
     merchantCreditNoteNumber: null,
+    issuerType: 'MERCHANT',
+    issuanceSource: 'MERCHANT',
+    onBehalfAuthorizationRef: null,
+    creditNoteUuid: null,
+    originalInvoiceNumber: 'DAT-2026-0042',
     storeId: 's-1',
     orgId: 'org-1',
     campaignId: 'camp-1',
@@ -74,6 +79,7 @@ function world(opts?: { receivables?: Row[] }) {
     issuedBy: 'fin-1',
     statementSettlementId: null,
   };
+  const noteVersions: Row[] = [];
   const creditNotes: Row[] = [
     {
       id: 'cn-1',
@@ -81,8 +87,19 @@ function world(opts?: { receivables?: Row[] }) {
       issuedAt: new Date(noteFacts.issuedAt),
       canonicalJson: creditNoteCanonical(noteFacts),
       documentHash: creditNoteHash(noteFacts),
+      currentVersion: 1,
     },
   ];
+  noteVersions.push({
+    id: 'cnv-1',
+    creditNoteId: 'cn-1',
+    versionNumber: 1,
+    changeReason: 'issued',
+    canonicalJson: creditNoteCanonical(noteFacts),
+    documentHash: creditNoteHash(noteFacts),
+    statementSettlementId: null,
+    createdBy: 'fin-1',
+  });
   const batches = new Map<string, Row>();
   const approvals: Row[] = [];
   const previews: Row[] = [];
@@ -283,17 +300,32 @@ function world(opts?: { receivables?: Row[] }) {
     settlementStatementSignature: {
       findMany: jest.fn().mockResolvedValue([]),
     },
+    creditNoteVersion: {
+      create: jest.fn().mockImplementation(({ data }: never) => {
+        const row = { id: `cnv-${++seq}`, ...(data as Row) };
+        noteVersions.push(row);
+        return Promise.resolve(row);
+      }),
+      findMany: jest.fn().mockImplementation(({ where }: never) =>
+        Promise.resolve(
+          noteVersions.filter(
+            (v) => v.creditNoteId === (where as Row).creditNoteId,
+          ),
+        ),
+      ),
+    },
     creditNote: {
       findUnique: jest.fn().mockImplementation(({ where }: never) => {
         const w = where as { refundId?: string; referenceNumber?: string };
-        return Promise.resolve(
-          creditNotes.find(
-            (c) =>
-              (w.refundId !== undefined && c.refundId === w.refundId) ||
-              (w.referenceNumber !== undefined &&
-                c.referenceNumber === w.referenceNumber),
-          ) ?? null,
+        const found = creditNotes.find(
+          (c) =>
+            (w.refundId !== undefined && c.refundId === w.refundId) ||
+            (w.referenceNumber !== undefined &&
+              c.referenceNumber === w.referenceNumber),
         );
+        // SNAPSHOT COPY (DB reality): later mutations must not
+        // retroactively change what a caller already read.
+        return Promise.resolve(found ? { ...found } : null);
       }),
       updateMany: jest.fn().mockImplementation(({ where, data }: never) => {
         const w = where as Row;
@@ -354,6 +386,7 @@ function world(opts?: { receivables?: Row[] }) {
     items,
     receivables,
     creditNotes,
+    noteVersions,
     batches,
     remittances,
     statements,
@@ -692,6 +725,11 @@ describe('SETTLE-3b — §7.4 receivable recovery', () => {
       invoiceId: note.invoiceId as string,
       merchantInvoiceNumber: note.merchantInvoiceNumber as string,
       merchantCreditNoteNumber: note.merchantCreditNoteNumber as string | null,
+      issuerType: note.issuerType as string,
+      issuanceSource: note.issuanceSource as string,
+      onBehalfAuthorizationRef: note.onBehalfAuthorizationRef as string | null,
+      creditNoteUuid: note.creditNoteUuid as string | null,
+      originalInvoiceNumber: note.originalInvoiceNumber as string | null,
       storeId: note.storeId as string,
       orgId: note.orgId as string,
       campaignId: note.campaignId as string,
@@ -710,6 +748,27 @@ describe('SETTLE-3b — §7.4 receivable recovery', () => {
         (a) => a.action === 'settlement.credit_note.statement_attached',
       ),
     ).toBeTruthy();
+
+    // ── PROOF 5 (founder legal check): attachment NEVER rewrote the
+    // issued version — v1's bytes are preserved append-only; v2 is a
+    // NEW version row; the head advanced its pointer.
+    expect(note.currentVersion).toBe(2);
+    expect(w.noteVersions).toHaveLength(2);
+    const v1 = w.noteVersions[0];
+    const factsV1 = { ...factsNow, statementSettlementId: null };
+    expect(v1).toMatchObject({ versionNumber: 1, changeReason: 'issued' });
+    expect(v1.canonicalJson).toBe(creditNoteCanonical(factsV1)); // untouched
+    expect(v1.documentHash).toBe(creditNoteHash(factsV1));
+    const v2 = w.noteVersions[1];
+    expect(v2).toMatchObject({
+      versionNumber: 2,
+      changeReason: 'statement_attached',
+      statementSettlementId: batch.id,
+    });
+    // ── PROOF 6: EVERY historical version reproduces byte-for-byte
+    // from its recorded facts — v1 (pre-attachment) and v2 (attached).
+    expect(v2.canonicalJson).toBe(creditNoteCanonical(factsNow));
+    expect(v2.documentHash).toBe(creditNoteHash(factsNow));
 
     // ── §34: the settled batch replays identically WITH the frozen
     // allocation, years later.

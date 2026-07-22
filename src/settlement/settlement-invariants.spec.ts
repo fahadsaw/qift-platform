@@ -37,6 +37,11 @@ const facts = (over: Partial<CreditNoteFacts> = {}): CreditNoteFacts => ({
   invoiceId: 'minv-1',
   merchantInvoiceNumber: 'DAT-2026-0042',
   merchantCreditNoteNumber: null,
+  issuerType: 'MERCHANT',
+  issuanceSource: 'MERCHANT',
+  onBehalfAuthorizationRef: null,
+  creditNoteUuid: null,
+  originalInvoiceNumber: 'DAT-2026-0042',
   storeId: 's-daralteeb',
   orgId: 'org-nahdi',
   campaignId: 'camp-eid',
@@ -81,12 +86,17 @@ describe('INVARIANT 1 — the credit note is a first-class financial document', 
       invoiceType: 'merchant_invoice',
       invoiceId: 'minv-1',
       merchantInvoiceNumber: 'DAT-2026-0042', // quoted — never manufactured
+      originalInvoiceNumber: 'DAT-2026-0042', // generalized original-doc number
     });
     // Statement relationship: null until the enumerating statement
     // exists (SETTLE-3b writes it once) — and the null is PART of the
     // hashed document, so late attachment is a new document version.
     expect(doc.statementSettlementId).toBeNull();
-    expect(doc.documentVersion).toBe('v1');
+    // Format v2 = the legal-identity fields entered the hashed
+    // document (C-PR8); the agent split is explicit in every document.
+    expect(doc.documentVersion).toBe('v2');
+    expect(doc.issuerType).toBe('MERCHANT');
+    expect(doc.issuanceSource).toBe('MERCHANT');
   });
 
   it('purity: the credit-note law module imports ONLY the statement serialization primitives', () => {

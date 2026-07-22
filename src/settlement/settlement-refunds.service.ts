@@ -74,7 +74,19 @@ export type RecordRefundInput = {
   evidenceRef: string; // bank reference of the outbound movement
   refundedAt: string; // ISO value date — business fact
   merchantCreditNoteNumber?: string; // SUPPLIED, never manufactured
+  // How the merchant legal number was sourced (C-PR8 legal identity):
+  // 'MERCHANT' (default when supplied) | 'ACCOUNTING_CONNECTOR' |
+  // 'QIFT_ON_BEHALF' (REQUIRES onBehalfAuthorizationRef). 'QIFT' is
+  // the fee-leg series and is REFUSED on merchant-goods notes.
+  issuanceSource?: string;
+  onBehalfAuthorizationRef?: string;
 };
+
+const MERCHANT_NUMBER_SOURCES: ReadonlySet<string> = new Set([
+  'MERCHANT',
+  'ACCOUNTING_CONNECTOR',
+  'QIFT_ON_BEHALF',
+]);
 
 @Injectable()
 export class SettlementRefundsService {
@@ -290,6 +302,34 @@ export class SettlementRefundsService {
             // mint site), canonical JSON stored as the source of
             // truth, hash from those bytes only. The merchant's legal
             // number is supplied, never manufactured.
+            // C-PR8 legal-identity law (agent model): the goods
+            // credit note is the MERCHANT'S legal document. Its
+            // number arrives from the merchant, their connector, or
+            // Qift acting ON BEHALF under contractual authorization
+            // evidence — never from Qift's own series, never
+            // manufactured.
+            const issuanceSource = input.issuanceSource ?? 'MERCHANT';
+            if (issuanceSource === 'QIFT') {
+              throw new BadRequestException(
+                'credit_note_series_separation:merchant_goods_never_qift_series',
+              );
+            }
+            if (!MERCHANT_NUMBER_SOURCES.has(issuanceSource)) {
+              throw new BadRequestException('credit_note_source_unknown');
+            }
+            const onBehalfRef = input.onBehalfAuthorizationRef?.trim() || null;
+            if (issuanceSource === 'QIFT_ON_BEHALF') {
+              if (!input.merchantCreditNoteNumber?.trim()) {
+                throw new BadRequestException(
+                  'on_behalf_requires_legal_number',
+                );
+              }
+              if (!onBehalfRef) {
+                throw new BadRequestException(
+                  'on_behalf_requires_authorization_evidence',
+                );
+              }
+            }
             const referenceNumber = await allocateReference(
               'QN',
               async (candidate) =>
@@ -310,6 +350,11 @@ export class SettlementRefundsService {
               merchantInvoiceNumber: invoice.merchantInvoiceNumber,
               merchantCreditNoteNumber:
                 input.merchantCreditNoteNumber?.trim() || null,
+              issuerType: 'MERCHANT',
+              issuanceSource,
+              onBehalfAuthorizationRef: onBehalfRef,
+              creditNoteUuid: null,
+              originalInvoiceNumber: invoice.merchantInvoiceNumber,
               storeId: invoice.storeId,
               orgId: invoice.orgId,
               campaignId: invoice.campaignId,
@@ -322,7 +367,8 @@ export class SettlementRefundsService {
               statementSettlementId: null,
             };
             const canonical = creditNoteCanonical(facts);
-            await tx.creditNote.create({
+            const documentHash = creditNoteHash(facts);
+            const note = await tx.creditNote.create({
               data: {
                 referenceNumber,
                 refundId: refund.id,
@@ -332,6 +378,12 @@ export class SettlementRefundsService {
                 merchantInvoiceNumber: invoice.merchantInvoiceNumber,
                 merchantCreditNoteNumber:
                   input.merchantCreditNoteNumber?.trim() || null,
+                issuerType: 'MERCHANT',
+                issuanceSource,
+                onBehalfAuthorizationRef: onBehalfRef,
+                creditNoteUuid: null,
+                originalInvoiceNumber: invoice.merchantInvoiceNumber,
+                currentVersion: 1,
                 storeId: invoice.storeId,
                 orgId: invoice.orgId,
                 campaignId: invoice.campaignId,
@@ -342,7 +394,20 @@ export class SettlementRefundsService {
                 issuedAt: issuedAtIso,
                 issuedBy: actorUserId,
                 canonicalJson: canonical,
-                documentHash: creditNoteHash(facts),
+                documentHash,
+              },
+            });
+            // APPEND-ONLY version history (C-PR8): version 1 = the
+            // issued document, preserved byte-for-byte forever.
+            await tx.creditNoteVersion.create({
+              data: {
+                creditNoteId: note.id,
+                versionNumber: 1,
+                changeReason: 'issued',
+                canonicalJson: canonical,
+                documentHash,
+                statementSettlementId: null,
+                createdBy: actorUserId,
               },
             });
             // The MONEY fact (§8.4): goods refund leaves safeguarding.
@@ -568,6 +633,11 @@ export class SettlementRefundsService {
       invoiceId: note.invoiceId,
       merchantInvoiceNumber: note.merchantInvoiceNumber,
       merchantCreditNoteNumber: note.merchantCreditNoteNumber,
+      issuerType: note.issuerType,
+      issuanceSource: note.issuanceSource,
+      onBehalfAuthorizationRef: note.onBehalfAuthorizationRef,
+      creditNoteUuid: note.creditNoteUuid,
+      originalInvoiceNumber: note.originalInvoiceNumber,
       storeId: note.storeId,
       orgId: note.orgId,
       campaignId: note.campaignId,
@@ -593,13 +663,13 @@ export class SettlementRefundsService {
       metadata: {
         creditNoteReference: note.referenceNumber,
         refundId,
-        documentVersion: 'v1',
+        documentVersion: 'v2',
         identical,
       },
     });
     return {
       creditNoteReference: note.referenceNumber,
-      documentVersion: 'v1' as const,
+      documentVersion: 'v2' as const,
       identical,
       canonicalIdentical,
       hashIdentical,

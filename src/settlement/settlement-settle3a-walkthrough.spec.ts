@@ -74,7 +74,8 @@ describe('Track C PR 5 — end-to-end financial walkthrough (S01 continuation: p
       batchId: 'stl-qs-a',
     };
     const refunds: Row[] = [];
-    const creditNotes: Row[] = [];
+      const noteVersions: Row[] = [];
+  const creditNotes: Row[] = [];
     const receivables: Row[] = [];
     const auditRows: Row[] = [];
     const batchQsA: Row = {
@@ -97,6 +98,20 @@ describe('Track C PR 5 — end-to-end financial walkthrough (S01 continuation: p
           refunds.push(row);
           return Promise.resolve(row);
         }),
+      },
+      creditNoteVersion: {
+        create: jest.fn().mockImplementation(({ data }: never) => {
+          const row = { id: `cnv-${++seq}`, ...(data as Row) };
+          noteVersions.push(row);
+          return Promise.resolve(row);
+        }),
+        findMany: jest.fn().mockImplementation(({ where }: never) =>
+          Promise.resolve(
+            noteVersions.filter(
+              (v) => v.creditNoteId === (where as Row).creditNoteId,
+            ),
+          ),
+        ),
       },
       creditNote: {
         create: jest.fn().mockImplementation(({ data }: never) => {
