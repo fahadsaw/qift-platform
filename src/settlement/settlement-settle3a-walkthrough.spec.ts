@@ -119,6 +119,13 @@ describe('Track C PR 5 — end-to-end financial walkthrough (S01 continuation: p
           const row = {
             id: `cn-${++seq}`,
             statementSettlementId: null,
+            qiftCreditNoteNumber: null,
+            netComponent: null,
+            reasonCode: null,
+            taxRuleVersion: null,
+            buyerSnapshot: null,
+            issuerSnapshot: null,
+            creditNoteUuid: null,
             ...(data as Row),
           };
           creditNotes.push(row);
@@ -176,6 +183,7 @@ describe('Track C PR 5 — end-to-end financial walkthrough (S01 continuation: p
       audit as unknown as AuditService,
       ledger as unknown as FinancialLedgerService,
       { now: () => new Date('2026-07-22T12:00:00.000Z') },
+      { deriveAndApplyCoverage: jest.fn().mockResolvedValue({}) } as never,
     );
 
     // ── STAGE 1: Ledger BEFORE ──────────────────────────────────────

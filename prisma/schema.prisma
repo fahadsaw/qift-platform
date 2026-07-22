@@ -2937,9 +2937,9 @@ model SettlementExecutionPreview {
 // collides with the original.
 model SettlementRefund {
   id                    String   @id @default(cuid()) // = refundId anchor
-  invoiceType           String // 'merchant_invoice' (goods) — fee leg later
+  invoiceType           String // 'merchant_invoice' | 'corporate_invoice' (fee)
   invoiceId             String
-  storeId               String
+  storeId               String? // null on the Qift fee leg (no store party)
   orgId                 String
   campaignId            String
   currency              String   @default("SAR")
@@ -2973,11 +2973,15 @@ model CreditNote {
   // credit note, allocated at issuance, immutable forever.
   referenceNumber          String   @unique
   refundId                 String   @unique // one credit note per refund at pilot
-  noteType                 String // 'merchant_goods' (fee leg = SETTLE-3b)
+  noteType                 String // 'merchant_goods' | 'qift_service_fee'
   invoiceType              String
   invoiceId                String
   merchantInvoiceNumber    String? // quoted from the original invoice
   merchantCreditNoteNumber String? // merchant-supplied legal number, if issued
+  // Qift's OWN sequential credit-note legal number (RC v4.0: QD
+  // series, NumberSequence-allocated) — fee-leg notes ONLY; the
+  // series can never mix with the merchant's (pinned).
+  qiftCreditNoteNumber     String?  @unique
   // ── Legal-document identity (founder integrity check, C-PR8) ────
   // The AGENT split, explicit: who legally issues this document.
   // 'MERCHANT' (goods credit note) | 'QIFT' (service-fee credit note,
@@ -3001,13 +3005,25 @@ model CreditNote {
   // live append-only in CreditNoteVersion — the head is a cache of
   // the LATEST, never the only copy.
   currentVersion           Int      @default(1)
-  storeId                  String
+  storeId                  String? // null on the Qift fee leg
   orgId                    String
   campaignId               String
   currency                 String   @default("SAR")
   amount                   Decimal  @db.Decimal(12, 2)
   vatComponent             Decimal  @db.Decimal(12, 2)
+  // Refunded fee NET of VAT (fee leg; = amount − vatComponent,
+  // stored explicitly so the legal document never derives).
+  netComponent             Decimal? @db.Decimal(12, 2)
+  // Closed refund reason vocabulary (C-PR9) + free-text reason.
+  reasonCode               String?
   reason                   String
+  // Frozen tax-rule version quoted from the ORIGINAL invoice's tax
+  // snapshot — never today's engine.
+  taxRuleVersion           String?
+  // Party snapshots FROZEN from the original invoice (fee leg:
+  // buyer = the org; issuer = Qift's legal identity).
+  buyerSnapshot            Json?
+  issuerSnapshot           Json?
   issuedAt                 DateTime
   issuedBy                 String
   // FIRST-CLASS DOCUMENT law (RC v3.0): the canonical JSON string is

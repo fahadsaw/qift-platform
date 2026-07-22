@@ -143,6 +143,9 @@ describe('Track C PR 2 — end-to-end financial walkthrough (S01, receipts → e
           );
         }),
       },
+      settlementRefund: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       corporateInvoice: {
         findUnique: jest.fn().mockResolvedValue(corpInvoice),
         updateMany: jest.fn().mockImplementation(({ where, data }: never) => {

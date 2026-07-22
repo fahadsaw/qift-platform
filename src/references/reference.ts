@@ -59,6 +59,12 @@ export const REFERENCE_PREFIXES = {
   // audit + invoice/statement relationships). Allocation lives in the
   // settlement refunds service — nothing else may mint a QN.
   QN: { kind: 'random', object: 'credit_note' },
+  // Qift credit-note LEGAL series — ACTIVE as of Reference
+  // Constitution v4.0: SEQUENTIAL (QD-YYYY-NNNNN, NumberSequence-
+  // allocated, gap-free), Qift's OWN service-fee credit notes only
+  // (agent model — a merchant's credit-note number is theirs to
+  // issue, never QD). QN remains the operational reference.
+  QD: { kind: 'sequential', object: 'qift_credit_note' },
 } as const satisfies Record<string, { kind: ReferenceKind; object: string }>;
 
 export type ReferencePrefix = keyof typeof REFERENCE_PREFIXES;

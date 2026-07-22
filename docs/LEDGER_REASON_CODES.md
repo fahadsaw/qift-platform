@@ -24,6 +24,10 @@ here is a review error.
 | `REFUND_GOODS` | Goods refund (safeguarding → company; pass-through leaving) — pre-settlement reduces the payable position, post-settlement pairs with a receivable | Merchant (returned) | `refund.paid:{refundId}` | C-PR5 |
 | `MERCHANT_RECEIVABLE` | Post-settlement clawback — merchant owes Qift (asset form, §2 Reversed; recovered by §7.4 offset) | Merchant owes | `merchant.receivable.accrued:{refundId}` | C-PR5 |
 | `MERCHANT_RECEIVABLE` (recovery) | §7.4 offset recovery — the receivable asset shrinks; the §13.3(a) safeguarding→operating draw rides this posting | Merchant repaid Qift | `merchant.receivable.recovered:{receivableId}:{settlementId}` (per-batch anchor — partial recoveries never collide) | C-PR7 |
+| `REFUND_FEE` | Qift service-fee refund — cash OUT of OPERATING (Qift's own money; agent model: never merchant funds) | Qift (returned to company) | `refund.paid:{refundId}` (fee leg) | C-PR9 |
+| `QIFT_REVENUE` (reversal) | Compensating revenue reversal for a fee refund — the coverage-time recognition stands; the reversal is its own row | Qift | `qift.revenue.recognized:{invoiceId}:reversal:{refundId}` | C-PR9 |
+| `QIFT_VAT` | Fee-leg VAT reversal at the ORIGINAL frozen proportion (documents remain the VAT source of truth per FC 7.6; this row makes the reversal ledger-visible) | Qift | `refund.approved:{refundId}:vat` | C-PR9 |
+| `CORPORATE_RECEIVABLE` (reduction) | Pre-payment fee credit note — the org owes less; compensates the issuance posting | Company owes less | `refund.approved:{refundId}` | C-PR9 |
 
 Note (C-PR7): `REFUND_GOODS` account basis is interaction-dependent —
 pre-settlement refunds return client money from SAFEGUARDING;
