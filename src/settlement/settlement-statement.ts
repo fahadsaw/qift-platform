@@ -46,6 +46,17 @@ export type FrozenBatchRecord = {
   windowType: string;
   composition: readonly FrozenCompositionEntry[];
   calculationSnapshot: SettlementCalculation;
+  // §7.4 (SETTLE-3b): the per-receivable offsets behind the §4
+  // receivableRecovery line — frozen at assembly; §34 replay
+  // recomputes the calculator WITH these adjustments. Null/absent for
+  // batches assembled before recovery existed.
+  recoveryAllocation?: ReadonlyArray<{
+    receivableId: string;
+    occurrenceId: string;
+    amount: number;
+    amountRecoveredAtPlan: number;
+    balanceAfter: number;
+  }> | null;
 };
 
 export type RemittanceEvidence = {

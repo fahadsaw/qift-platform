@@ -190,6 +190,19 @@ Founder-mandated, recorded in `QIFT_REFERENCE_CONSTITUTION_v3.0.md`
    carry no receivable fields (extend the pin symmetrically when it
    lands).
 
+## SETTLE-3b note — §7.4 recovery is part of the §34 record
+
+The batch's `recoveryAllocation` (per-receivable offsets behind the §4
+`receivableRecovery` line) is FROZEN at assembly and is a **calculation
+input**: §34 replay and the Rule 5 preview recompute the one calculator
+WITH it, never from live receivable rows. Staging is guarded
+(state + unstaged + exact `amountRecovered` at plan — the amount-pin
+discipline extended to receivables); supersession releases stages;
+consumption happens inside `markSettled`'s atomicity with
+per-`(receivableId, settlementId)` recovery postings; the enumerating
+statement triggers the RC v3.0 credit-note statement attachment (a new
+document version, write-once, audited).
+
 ## Amending these rules
 
 A change to any rule (or its pins) must name the rule, cite the

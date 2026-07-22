@@ -45,8 +45,9 @@ import {
   ledgerIdempotencyKey,
 } from '../financial/financial-events';
 import { allocateReference } from '../references/reference';
-import { moneyToNumber } from '../fees/money';
+import { fromMinor, moneyToNumber, toMinor } from '../fees/money';
 import {
+  asCurrencyCode,
   calculateSettlement,
   type SettlementCalculation,
   type SettlementItemInput,
@@ -58,6 +59,10 @@ import {
   type ItemState,
 } from './settlement-states';
 import { SETTLEMENT_CLOCK, type SettlementClock } from './settlement-clock';
+import {
+  assertReceivableTransition,
+  type ReceivableState,
+} from './settlement-receivable-states';
 
 // SC §2 Superseded row: items return per cause. Closed set — a new
 // cause is a constitutional read, not a convenience.
@@ -105,7 +110,14 @@ export class SettlementEngineService {
         calculation: null,
       };
     }
-    const calculation = calculateSettlement(items.map(toCalculatorInput));
+    const recovery = await this.planRecovery(
+      storeId,
+      currency.toUpperCase(),
+      items.map(toCalculatorInput),
+    );
+    const calculation = calculateSettlement(items.map(toCalculatorInput), {
+      receivableRecovery: recovery.total,
+    });
     // §30.2: a COUNTS-ONLY audit line (who, what scope, when) is the
     // ONLY permitted trace — no computed results in the record.
     await this.audit.record({
@@ -127,6 +139,7 @@ export class SettlementEngineService {
       currency: calculation.currency,
       itemCount: items.length,
       calculation,
+      recoveryAllocation: recovery.allocation,
     };
   }
 
@@ -136,7 +149,26 @@ export class SettlementEngineService {
     if (items.length === 0) {
       throw new BadRequestException('settlement_nothing_eligible');
     }
-    const calculation = calculateSettlement(items.map(toCalculatorInput));
+    // §7.4 offset: open receivable balances reduce this batch's net
+    // via the §4 receivableRecovery line — computed by the ONE
+    // calculator, frozen per-receivable, staged under guard below.
+    const recovery = await this.planRecovery(
+      storeId,
+      currency.toUpperCase(),
+      items.map(toCalculatorInput),
+    );
+    const calculation = calculateSettlement(items.map(toCalculatorInput), {
+      receivableRecovery: recovery.total,
+    });
+    if (calculation.netAmount <= 0) {
+      // §26 blesses zero-net batches WITH statements — but the
+      // statement-only close lane has not shipped. Until it does,
+      // minting an approvable-yet-unexecutable batch (staged
+      // receivables, bound items, no lawful exit but supersession)
+      // would wedge the store's pipeline (review finding 1). Simulate
+      // still shows the honest zero-net picture; assembly refuses.
+      throw new BadRequestException('settlement_zero_net_deferred');
+    }
 
     // §34: freeze composition + calculation AT assembly. These JSON
     // snapshots are the replay inputs — never rewritten afterward.
@@ -183,6 +215,9 @@ export class SettlementEngineService {
               netAmount: calculation.netAmount,
               composition,
               calculationSnapshot: calculation,
+              // §7.4: the per-receivable offsets behind the recovery
+              // line — frozen at assembly, replayed by §34.
+              recoveryAllocation: recovery.allocation,
               // The PROPOSER (§31.1) — create-time frozen fact; the
               // §33 separation checks bind to it.
               assembledBy: actorUserId,
@@ -213,6 +248,25 @@ export class SettlementEngineService {
           }
           if (bound !== items.length) {
             throw new ConflictException('settlement_items_contended');
+          }
+          // STAGE the recovered receivables under guard: still in a
+          // recoverable state, unstaged, and carrying the exact
+          // recovered-so-far the allocation was computed against — a
+          // racing recovery/refund makes the count fall short and the
+          // whole assembly rolls back (the amount-pin discipline).
+          for (const alloc of recovery.allocation) {
+            const staged = await tx.settlementReceivable.updateMany({
+              where: {
+                id: alloc.receivableId,
+                state: { in: ['open', 'partially_recovered'] },
+                stagedBySettlementId: null,
+                amountRecovered: alloc.amountRecoveredAtPlan,
+              },
+              data: { stagedBySettlementId: created.id },
+            });
+            if (staged.count !== 1) {
+              throw new ConflictException('settlement_receivables_contended');
+            }
           }
           // §11.1 lifecycle marker INSIDE the transaction: the batch
           // and its started event commit atomically (deterministic
@@ -425,6 +479,13 @@ export class SettlementEngineService {
           throw new ConflictException('settlement_items_contended');
         }
       }
+      // §7.4: release any staged receivables — they return to the
+      // recovery queue for the successor batch (no retroactive
+      // surgery; the allocation was frozen and dies with this batch).
+      await tx.settlementReceivable.updateMany({
+        where: { stagedBySettlementId: batchId },
+        data: { stagedBySettlementId: null },
+      });
       // §11.1/§18.2: the superseded marker commits ATOMICALLY with the
       // disposition — it is the frozen record that tells the sweep
       // "lawfully abandoned", never "crashed mid-run".
@@ -532,6 +593,85 @@ export class SettlementEngineService {
           executedBy: evidence.executedBy,
         },
       });
+      // §7.4 recovery CONSUMES at execution — atomically with the
+      // settle: each staged receivable advances through the lifecycle
+      // law and posts merchant.receivable.recovered (the §13.3(a)
+      // safeguarding→operating draw), keyed per (receivable, batch)
+      // so partial recoveries across batches never collide.
+      const allocation = (batch.recoveryAllocation ?? []) as Array<{
+        receivableId: string;
+        occurrenceId: string;
+        amount: number;
+        amountRecoveredAtPlan: number;
+        balanceAfter: number;
+      }>;
+      for (const alloc of allocation) {
+        const nextState: ReceivableState =
+          alloc.balanceAfter <= 0 ? 'recovered' : 'partially_recovered';
+        const row = await tx.settlementReceivable.findUnique({
+          where: { id: alloc.receivableId },
+          select: { state: true },
+        });
+        if (!row) throw new ConflictException('settlement_receivables_contended');
+        // A same-state partial roll-forward is not a transition (the
+        // lifecycle law has no self-loops by design — review finding
+        // 2): assert only when the state actually changes.
+        if (row.state !== nextState) {
+          assertReceivableTransition(row.state as ReceivableState, nextState);
+        }
+        const consumed = await tx.settlementReceivable.updateMany({
+          where: {
+            id: alloc.receivableId,
+            stagedBySettlementId: batch.id,
+            state: row.state,
+            // The amount-pin discipline (review finding 4): the row
+            // must still carry the recovered-so-far the plan froze —
+            // any future writer that moved it rolls this settle back.
+            amountRecovered: alloc.amountRecoveredAtPlan,
+          },
+          data: {
+            state: nextState,
+            amountRecovered: alloc.amountRecoveredAtPlan + alloc.amount,
+            stagedBySettlementId: null,
+            ...(nextState === 'recovered'
+              ? {
+                  recoveredAt: evidence.executedAt,
+                  recoveredBySettlementId: batch.id,
+                }
+              : {}),
+          },
+        });
+        if (consumed.count !== 1) {
+          throw new ConflictException('settlement_receivables_contended');
+        }
+        await this.ledger.record(
+          {
+            eventType: FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
+            reasonCode: 'MERCHANT_RECEIVABLE',
+            actorType: 'user',
+            actorId: actorUserId,
+            amount: alloc.amount,
+            currency: batch.currency,
+            direction: 'debit', // the receivable asset shrinks
+            counterpartyType: 'merchant',
+            storeId: batch.storeId,
+            idempotencyKey: ledgerIdempotencyKey(
+              FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
+              `${alloc.receivableId}:${batch.id}`,
+            ),
+            metadata: {
+              settlementReference: batch.settlementReference,
+              receivableId: alloc.receivableId,
+              refundId: alloc.occurrenceId,
+              // §13.3(a): the recovery draw moves safeguarding →
+              // operating against this posting.
+              accountFrom: 'safeguarding',
+              accountTo: 'operating',
+            },
+          },
+          tx,
+        );
+      }
       await this.ledger.record(
         {
           eventType: FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
@@ -599,6 +739,7 @@ export class SettlementEngineService {
         }>,
         calculationSnapshot:
           batch.calculationSnapshot as unknown as SettlementCalculation,
+        recoveryAllocation: (batch.recoveryAllocation ?? null) as never,
       },
     };
   }
@@ -638,6 +779,58 @@ export class SettlementEngineService {
   }
 
   // ── helpers ───────────────────────────────────────────────────────
+
+  // §7.4 offset planning — deterministic (oldest first, id tiebreak),
+  // capped at the batch gross (offset means offset: recovery never
+  // drives the net negative). Pure read; staging happens under guard
+  // inside the assembly transaction. The SAME plan feeds simulate and
+  // assemble (§30.3 one-calculator discipline extends to adjustments).
+  private async planRecovery(
+    storeId: string,
+    currency: string,
+    items: readonly SettlementItemInput[],
+  ) {
+    const open = await this.prisma.settlementReceivable.findMany({
+      where: {
+        storeId,
+        currency,
+        state: { in: ['open', 'partially_recovered'] },
+        stagedBySettlementId: null,
+      },
+      orderBy: [{ accruedAt: 'asc' }, { id: 'asc' }],
+    });
+    const code = asCurrencyCode(currency);
+    let budgetMinor = items.reduce(
+      (t, i) => t + toMinor(i.amount, code),
+      0,
+    );
+    const allocation: Array<{
+      receivableId: string;
+      occurrenceId: string;
+      amount: number;
+      amountRecoveredAtPlan: number;
+      balanceAfter: number;
+    }> = [];
+    let totalMinor = 0;
+    for (const r of open) {
+      if (budgetMinor <= 0) break;
+      const recoveredMinor = toMinor(moneyToNumber(r.amountRecovered), code);
+      const balanceMinor =
+        toMinor(moneyToNumber(r.amount), code) - recoveredMinor;
+      if (balanceMinor <= 0) continue;
+      const take = Math.min(balanceMinor, budgetMinor);
+      allocation.push({
+        receivableId: r.id,
+        occurrenceId: r.occurrenceId,
+        amount: fromMinor(take, code),
+        amountRecoveredAtPlan: fromMinor(recoveredMinor, code),
+        balanceAfter: fromMinor(balanceMinor - take, code),
+      });
+      totalMinor += take;
+      budgetMinor -= take;
+    }
+    return { allocation, total: fromMinor(totalMinor, code) };
+  }
 
   // SC §15.1 / RC 14.4: resolve each occurrence's canonical references
   // AT assembly and freeze them into the composition. The merchant's

@@ -23,6 +23,12 @@ here is a review error.
 | `SETTLEMENT_COMPLETED` | Lifecycle marker (zero-amount) | — | `settlement.completed:{settlementId}` | C-PR3 |
 | `REFUND_GOODS` | Goods refund (safeguarding → company; pass-through leaving) — pre-settlement reduces the payable position, post-settlement pairs with a receivable | Merchant (returned) | `refund.paid:{refundId}` | C-PR5 |
 | `MERCHANT_RECEIVABLE` | Post-settlement clawback — merchant owes Qift (asset form, §2 Reversed; recovered by §7.4 offset) | Merchant owes | `merchant.receivable.accrued:{refundId}` | C-PR5 |
+| `MERCHANT_RECEIVABLE` (recovery) | §7.4 offset recovery — the receivable asset shrinks; the §13.3(a) safeguarding→operating draw rides this posting | Merchant repaid Qift | `merchant.receivable.recovered:{receivableId}:{settlementId}` (per-batch anchor — partial recoveries never collide) | C-PR7 |
 
-Reserved next (enter here before first use): receivable recovery,
-reserve held/released, fee-leg refunds, chargeback family.
+Note (C-PR7): `REFUND_GOODS` account basis is interaction-dependent —
+pre-settlement refunds return client money from SAFEGUARDING;
+post-settlement refunds are FRONTED from OPERATING pending §7.4
+recovery (metadata `account` records which).
+
+Reserved next (enter here before first use): reserve held/released,
+fee-leg refunds, chargeback family.

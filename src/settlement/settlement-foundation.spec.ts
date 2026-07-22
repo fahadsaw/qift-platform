@@ -199,6 +199,11 @@ function mkEngine(items: Row[]) {
     giftCampaign: { findMany: jest.fn().mockResolvedValue([]) },
     // Anti-double-pay check in supersede — no remittances in PR-1 world.
     settlementRemittance: { findUnique: jest.fn().mockResolvedValue(null) },
+    settlementReceivable: {
+      findMany: jest.fn().mockResolvedValue([]),
+      findUnique: jest.fn().mockResolvedValue(null),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
     settlementBatch: {
       findUnique: jest.fn().mockImplementation(({ where }: never) => {
         const w = where as { id?: string; settlementReference?: string };

@@ -190,7 +190,10 @@ describe('Track C PR 5 — end-to-end financial walkthrough (S01 continuation: p
     expect(res.replayed).toBe(false);
     const paid = ledgerRows.find((e) => e.eventType === 'refund.paid')!;
     expect(paid).toMatchObject({ amount: 1150, direction: 'debit' });
-    expect((paid.metadata as Row).account).toBe('safeguarding');
+    // §13.3: post-settlement, the goods money already left to the
+    // merchant — Qift FRONTS the refund from OPERATING, and the §7.4
+    // recovery draw (SETTLE-3b) repays operating from safeguarding.
+    expect((paid.metadata as Row).account).toBe('operating');
     const accrued = ledgerRows.find(
       (e) => e.eventType === 'merchant.receivable.accrued',
     )!;

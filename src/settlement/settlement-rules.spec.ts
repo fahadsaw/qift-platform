@@ -219,6 +219,12 @@ describe('RULE 2 — no direct system time in the Settlement Engine', () => {
           findMany: jest.fn().mockResolvedValue(rows),
           updateMany: jest.fn(),
         },
+      settlementReceivable: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+
         settlementBatch: {
           findUnique: jest.fn().mockResolvedValue(null),
           create: jest.fn(),
@@ -333,6 +339,7 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
       'markFailed',
       'markSettled', // SETTLE-2: ready→settled + completed marker
       'occurrenceReferences', // §15.1 reference denormalization at assembly
+      'planRecovery', // §7.4 offset planning (SETTLE-3b)
       'retry',
       'simulate',
       'supersede',
@@ -362,6 +369,11 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
       merchantInvoice: { findMany: jest.fn().mockResolvedValue([]) },
       giftCampaign: { findMany: jest.fn().mockResolvedValue([]) },
       settlementRemittance: { findUnique: jest.fn().mockResolvedValue(null) },
+      settlementReceivable: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
       settlementItem: {
         findMany: jest.fn().mockImplementation(({ where }: never) => {
           const w = where as { batchId?: string; state?: string };

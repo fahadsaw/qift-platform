@@ -68,6 +68,11 @@ import {
   type SettlementStatement,
 } from './settlement-statement';
 import {
+  creditNoteCanonical,
+  creditNoteHash,
+  type CreditNoteFacts,
+} from './settlement-credit-note';
+import {
   assertExecutionBinding,
   buildExecutionPreview,
   REPLAY_ENGINE_VERSION,
@@ -570,6 +575,12 @@ export class SettlementExecutionService {
       },
     });
     const statementRecord = await this.ensureStatement(frozen, remittance);
+    // RC v3.0: the enumerating statement now exists — attach it to
+    // every credit note whose receivable this batch recovered.
+    // Write-once (guarded on null), regenerating the canonical bytes
+    // and hash as a NEW DOCUMENT VERSION (the null was part of the
+    // hashed document), audited — never a silent rewrite.
+    await this.attachStatementToCreditNotes(actorUserId, frozen);
     // §33.4 evidence chain — the heal lane audits too (a crashed
     // execution's completion must appear in the trail).
     await this.audit.record({
@@ -621,6 +632,62 @@ export class SettlementExecutionService {
       // A DIFFERENT movement against the same batch is a §18.3
       // incident, never silently merged.
       throw new ConflictException('remittance_conflict');
+    }
+  }
+
+  private async attachStatementToCreditNotes(
+    actorUserId: string,
+    frozen: FrozenBatchRecord,
+  ) {
+    for (const alloc of frozen.recoveryAllocation ?? []) {
+      const note = await this.prisma.creditNote.findUnique({
+        where: { refundId: alloc.occurrenceId },
+      });
+      if (!note || note.statementSettlementId !== null) continue; // write-once
+      const facts: CreditNoteFacts = {
+        referenceNumber: note.referenceNumber,
+        refundId: note.refundId,
+        noteType: note.noteType,
+        invoiceType: note.invoiceType,
+        invoiceId: note.invoiceId,
+        merchantInvoiceNumber: note.merchantInvoiceNumber,
+        merchantCreditNoteNumber: note.merchantCreditNoteNumber,
+        storeId: note.storeId,
+        orgId: note.orgId,
+        campaignId: note.campaignId,
+        currency: note.currency,
+        amount: moneyToNumber(note.amount),
+        vatComponent: moneyToNumber(note.vatComponent),
+        reason: note.reason,
+        issuedAt: note.issuedAt.toISOString(),
+        issuedBy: note.issuedBy,
+        statementSettlementId: frozen.settlementId,
+      };
+      const canonical = creditNoteCanonical(facts);
+      const attached = await this.prisma.creditNote.updateMany({
+        where: { refundId: alloc.occurrenceId, statementSettlementId: null },
+        data: {
+          statementSettlementId: frozen.settlementId,
+          canonicalJson: canonical,
+          documentHash: creditNoteHash(facts),
+        },
+      });
+      if (attached.count === 1) {
+        await this.audit.record({
+          actorUserId,
+          actorType: 'user',
+          action: 'settlement.credit_note.statement_attached',
+          targetType: 'store',
+          targetId: frozen.storeId,
+          metadata: {
+            creditNoteReference: note.referenceNumber,
+            refundId: note.refundId,
+            settlementId: frozen.settlementId,
+            settlementReference: frozen.settlementReference,
+            documentVersion: 'v1',
+          },
+        });
+      }
     }
   }
 
