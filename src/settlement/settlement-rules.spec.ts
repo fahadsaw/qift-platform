@@ -138,6 +138,10 @@ describe('RULE 2 — no direct system time in the Settlement Engine', () => {
     'settlement-execution-binding.ts',
     // §31–§32 policy: structure canon, values versioned policy — pure.
     'settlement-approval-policy.ts',
+    // RC v3.0 invariants: credit-note document law + receivable
+    // lifecycle law — pure.
+    'settlement-credit-note.ts',
+    'settlement-receivable-states.ts',
   ];
   const GOVERNED_SERVICES = [
     'settlement-receipts.service.ts',

@@ -100,9 +100,25 @@ describe('Track C PR 5 — end-to-end financial walkthrough (S01 continuation: p
       },
       creditNote: {
         create: jest.fn().mockImplementation(({ data }: never) => {
-          const row = { id: `cn-${++seq}`, ...(data as Row) };
+          // Model Prisma's nullable-column default.
+          const row = {
+            id: `cn-${++seq}`,
+            statementSettlementId: null,
+            ...(data as Row),
+          };
           creditNotes.push(row);
           return Promise.resolve(row);
+        }),
+        findUnique: jest.fn().mockImplementation(({ where }: never) => {
+          const w = where as { referenceNumber?: string; refundId?: string };
+          return Promise.resolve(
+            creditNotes.find(
+              (c) =>
+                (w.referenceNumber !== undefined &&
+                  c.referenceNumber === w.referenceNumber) ||
+                (w.refundId !== undefined && c.refundId === w.refundId),
+            ) ?? null,
+          );
         }),
       },
       settlementItem: {
@@ -209,9 +225,18 @@ describe('Track C PR 5 — end-to-end financial walkthrough (S01 continuation: p
 
     // ── STAGE 6: Audit records ──────────────────────────────────────
     expect(auditRows.map((a) => a.action)).toEqual([
+      'finance.credit_note.issued',
       'finance.refund.recorded',
     ]);
-    expect(auditRows[0].metadata).toMatchObject({
+    // RC v3.0: the credit note is FIRST-CLASS — QN + canonical + hash.
+    expect(creditNotes[0].referenceNumber).toMatch(
+      /^QN-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/,
+    );
+    expect(typeof creditNotes[0].canonicalJson).toBe('string');
+    expect(typeof creditNotes[0].documentHash).toBe('string');
+    expect(
+      auditRows.find((a) => a.action === 'finance.refund.recorded')!.metadata,
+    ).toMatchObject({
       refundId: refunds[0].id,
       amount: 1150,
       vatComponent: 150,

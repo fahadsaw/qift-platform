@@ -47,6 +47,7 @@ describe('reference grammar', () => {
         'QC',
         'QF',
         'QG',
+        'QN',
         'QP',
         'QS',
       ]);
@@ -56,6 +57,16 @@ describe('reference grammar', () => {
       expect(REFERENCE_PREFIXES.QF.kind).toBe('random');
       expect(REFERENCE_PREFIXES.QC.kind).toBe('sequential');
       expect(REFERENCE_PREFIXES.QS.kind).toBe('random'); // ACTIVE per RC v2.0
+      expect(REFERENCE_PREFIXES.QN.kind).toBe('random'); // ACTIVE per RC v3.0
+    });
+
+    it('QN is ACTIVE (RC v3.0): random credit-note reference generates', () => {
+      // Allocation discipline (one QN per credit note, minted only at
+      // issuance in the refunds service) is pinned in the settlement
+      // rules spec; here the grammar itself.
+      const ref = generateReference('QN');
+      expect(ref).toMatch(/^QN-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/);
+      expect(normalizeReference('qn-abcd-efgh')).toBe('QN-ABCD-EFGH');
     });
 
     it('refuses to randomly generate the sequential invoice prefix (QC)', () => {

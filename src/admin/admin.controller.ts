@@ -569,6 +569,15 @@ export class AdminController {
     return this.settlementRefunds.openReceivables(storeId);
   }
 
+  @Get('finance/credit-notes/:refundId/replay')
+  @RequireOpsPermission('finance.refunds')
+  replayCreditNote(
+    @Param('refundId') refundId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementRefunds.replayCreditNote(req.user.userId, refundId);
+  }
+
   @Get('finance/reconciliation')
   @RequireOpsPermission('finance.reconcile')
   reconciliationReport(@Req() req: AuthedRequest) {
