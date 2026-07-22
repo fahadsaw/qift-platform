@@ -42,6 +42,12 @@ const facts = (over: Partial<CreditNoteFacts> = {}): CreditNoteFacts => ({
   onBehalfAuthorizationRef: null,
   creditNoteUuid: null,
   originalInvoiceNumber: 'DAT-2026-0042',
+  qiftCreditNoteNumber: null,
+  netComponent: null,
+  reasonCode: null,
+  taxRuleVersion: null,
+  buyerSnapshot: null,
+  issuerSnapshot: null,
   storeId: 's-daralteeb',
   orgId: 'org-nahdi',
   campaignId: 'camp-eid',
@@ -94,7 +100,7 @@ describe('INVARIANT 1 — the credit note is a first-class financial document', 
     expect(doc.statementSettlementId).toBeNull();
     // Format v2 = the legal-identity fields entered the hashed
     // document (C-PR8); the agent split is explicit in every document.
-    expect(doc.documentVersion).toBe('v2');
+    expect(doc.documentVersion).toBe('v3');
     expect(doc.issuerType).toBe('MERCHANT');
     expect(doc.issuanceSource).toBe('MERCHANT');
   });

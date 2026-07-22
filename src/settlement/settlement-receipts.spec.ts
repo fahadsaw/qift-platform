@@ -77,6 +77,9 @@ function harness(opts?: {
         );
       }),
     },
+    settlementRefund: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
     corporateInvoice: {
       findUnique: jest
         .fn()
@@ -533,6 +536,66 @@ describe('SettlementReceiptsService (SETTLE-1)', () => {
     await service.deriveAndApplyCoverage('fin-1', 'merchant_invoice', 'minv-1');
     expect(ledgerRows.length).toBe(before);
     expect(items).toHaveLength(1);
+  });
+
+  it('SETTLE-3c-1 finding 1: a PRE-payment credit reduces both the coverage threshold AND the recognized revenue', async () => {
+    const { service, prisma, ledgerRows, corp } = harness({
+      corporate: [corporateInvoice()],
+    });
+    // A 57.50 credit note (net 50, VAT 7.50) was recorded pre-payment.
+    (prisma.settlementRefund.findMany as jest.Mock).mockResolvedValue([
+      { amount: 57.5, vatComponent: 7.5, settlementInteraction: 'invoice_reduced' },
+    ]);
+    // The org pays the EFFECTIVE balance: 172.50 − 57.50 = 115.00.
+    const res = await service.recordReceipt('fin-1', {
+      invoiceType: 'corporate_invoice',
+      invoiceId: 'cinv-1',
+      amount: 115,
+      bankReference: 'TT-CR-1',
+      receivedAt: '2026-07-20T15:00:00.000Z',
+    });
+    expect(res.coverage!.covered).toBe(true);
+    expect(corp.get('cinv-1')!.status).toBe('paid');
+    // Revenue recognized at the CREDITED net: 150 − 50 = 100. Never
+    // the full original fee.
+    const rev = ledgerRows.find(
+      (r) => r.eventType === 'qift.revenue.recognized',
+    )!;
+    expect(rev.amount).toBe(100);
+  });
+
+  it('SETTLE-3c-1 finding 2: a FULLY-credited invoice closes with zero receipts, on the last credit value date, recognizing nothing', async () => {
+    const { service, prisma, ledgerRows, corp } = harness({
+      corporate: [corporateInvoice()],
+    });
+    (prisma.settlementRefund.findMany as jest.Mock).mockImplementation(
+      ({ select }: never) =>
+        Promise.resolve(
+          (select as Row).refundedAt
+            ? [{ refundedAt: new Date('2026-07-20T18:00:00.000Z') }]
+            : [
+                {
+                  amount: 172.5,
+                  vatComponent: 22.5,
+                  settlementInteraction: 'invoice_reduced',
+                },
+              ],
+        ),
+    );
+    const res = await service.deriveAndApplyCoverage(
+      'fin-1',
+      'corporate_invoice',
+      'cinv-1',
+    );
+    expect(res.covered).toBe(true);
+    expect(corp.get('cinv-1')!.status).toBe('paid');
+    expect((corp.get('cinv-1')!.paidAt as Date).toISOString()).toBe(
+      '2026-07-20T18:00:00.000Z',
+    );
+    // Effective fee net = 150 − 150 = 0 → nothing recognized.
+    expect(
+      ledgerRows.find((r) => r.eventType === 'qift.revenue.recognized'),
+    ).toBeUndefined();
   });
 
   it('receivables aging: open balances bucketed off the injected clock, covered invoices excluded', async () => {

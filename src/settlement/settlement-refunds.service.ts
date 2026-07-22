@@ -53,8 +53,12 @@ import {
   ledgerIdempotencyKey,
 } from '../financial/financial-events';
 import { moneyToNumber, toMinor, fromMinor } from '../fees/money';
-import { allocateReference } from '../references/reference';
+import {
+  allocateReference,
+  formatSequentialReference,
+} from '../references/reference';
 import { SETTLEMENT_CLOCK, type SettlementClock } from './settlement-clock';
+import { SettlementReceiptsService } from './settlement-receipts.service';
 import {
   creditNoteCanonical,
   creditNoteHash,
@@ -80,7 +84,18 @@ export type RecordRefundInput = {
   // the fee-leg series and is REFUSED on merchant-goods notes.
   issuanceSource?: string;
   onBehalfAuthorizationRef?: string;
+  // Fee leg (C-PR9): closed refund reason vocabulary, REQUIRED there.
+  reasonCode?: string;
 };
+
+// Closed fee-refund reason vocabulary (C-PR9) — grows only by PR.
+const FEE_REFUND_REASON_CODES: ReadonlySet<string> = new Set([
+  'service_not_rendered',
+  'billing_error',
+  'campaign_cancelled',
+  'goodwill',
+  'other',
+]);
 
 const MERCHANT_NUMBER_SOURCES: ReadonlySet<string> = new Set([
   'MERCHANT',
@@ -95,16 +110,17 @@ export class SettlementRefundsService {
     private audit: AuditService,
     private ledger: FinancialLedgerService,
     @Inject(SETTLEMENT_CLOCK) private clock: SettlementClock,
+    // SETTLE-3c-1 (review finding 2): a pre-payment credit can
+    // complete coverage — the refunds path re-derives it.
+    private receipts: SettlementReceiptsService,
   ) {}
 
   async recordRefund(actorUserId: string, input: RecordRefundInput) {
     this.assertGatesOpen();
     if (input.invoiceType === 'corporate_invoice') {
-      // §8.1: the fee leg is Qift's OWN money — a different account,
-      // a different credit note, a different posting group. It lands
-      // with SETTLE-3b; misallocating it into the goods path would
-      // spend merchant money on Qift's refund.
-      throw new BadRequestException('fee_refund_not_implemented');
+      // §8.1: the fee leg is Qift's OWN money — its own legal series
+      // (QD), its own postings, its own account. SETTLE-3c-1.
+      return this.recordFeeRefund(actorUserId, input);
     }
     if (input.invoiceType !== 'merchant_invoice') {
       throw new BadRequestException('refund_invoice_type_unknown');
@@ -222,15 +238,20 @@ export class SettlementRefundsService {
               (t, r) => t + toMinor(moneyToNumber(r.vatComponent), 'SAR'),
               0,
             );
-            const vatComponentMinor = Math.min(
-              totalMinor === 0
-                ? 0
-                : Math.floor(
-                    (amountMinor * vatMinor + Math.floor(totalMinor / 2)) /
-                      totalMinor,
-                  ),
-              Math.max(0, vatMinor - priorVatMinor),
-            );
+            // Completing refund absorbs the VAT remainder (finding 4).
+            const vatComponentMinor =
+              refundedMinor + amountMinor === totalMinor
+                ? Math.min(amountMinor, Math.max(0, vatMinor - priorVatMinor))
+                : Math.min(
+                    totalMinor === 0
+                      ? 0
+                      : Math.floor(
+                          (amountMinor * vatMinor +
+                            Math.floor(totalMinor / 2)) /
+                            totalMinor,
+                        ),
+                    Math.max(0, vatMinor - priorVatMinor),
+                  );
             const vatComponent = fromMinor(vatComponentMinor, 'SAR');
 
             // §8.4 settlement interaction, decided on the item's state.
@@ -330,16 +351,7 @@ export class SettlementRefundsService {
                 );
               }
             }
-            const referenceNumber = await allocateReference(
-              'QN',
-              async (candidate) =>
-                Boolean(
-                  await tx.creditNote.findUnique({
-                    where: { referenceNumber: candidate },
-                    select: { id: true },
-                  }),
-                ),
-            );
+            const referenceNumber = await this.mintQn(tx);
             const issuedAtIso = this.clock.now();
             const facts: CreditNoteFacts = {
               referenceNumber,
@@ -355,6 +367,12 @@ export class SettlementRefundsService {
               onBehalfAuthorizationRef: onBehalfRef,
               creditNoteUuid: null,
               originalInvoiceNumber: invoice.merchantInvoiceNumber,
+              qiftCreditNoteNumber: null, // goods leg NEVER carries QD
+              netComponent: null,
+              reasonCode: null,
+              taxRuleVersion: null,
+              buyerSnapshot: null,
+              issuerSnapshot: null,
               storeId: invoice.storeId,
               orgId: invoice.orgId,
               campaignId: invoice.campaignId,
@@ -596,7 +614,10 @@ export class SettlementRefundsService {
 
   // Read models: refunds per invoice; open receivables per store.
   async listRefunds(invoiceType: string, invoiceId: string) {
-    if (invoiceType !== 'merchant_invoice') {
+    if (
+      invoiceType !== 'merchant_invoice' &&
+      invoiceType !== 'corporate_invoice'
+    ) {
       throw new BadRequestException('refund_invoice_type_unknown');
     }
     if (typeof invoiceId !== 'string' || !invoiceId.trim()) {
@@ -638,6 +659,12 @@ export class SettlementRefundsService {
       onBehalfAuthorizationRef: note.onBehalfAuthorizationRef,
       creditNoteUuid: note.creditNoteUuid,
       originalInvoiceNumber: note.originalInvoiceNumber,
+      qiftCreditNoteNumber: note.qiftCreditNoteNumber,
+      netComponent: note.netComponent === null ? null : moneyToNumber(note.netComponent),
+      reasonCode: note.reasonCode,
+      taxRuleVersion: note.taxRuleVersion,
+      buyerSnapshot: note.buyerSnapshot ?? null,
+      issuerSnapshot: note.issuerSnapshot ?? null,
       storeId: note.storeId,
       orgId: note.orgId,
       campaignId: note.campaignId,
@@ -658,18 +685,19 @@ export class SettlementRefundsService {
       actorUserId,
       actorType: 'user',
       action: 'settlement.credit_note.replayed',
-      targetType: 'store',
-      targetId: note.storeId,
+      // Fee-leg notes have no store party — target the organization.
+      targetType: note.storeId ? 'store' : 'organization',
+      targetId: note.storeId ?? note.orgId,
       metadata: {
         creditNoteReference: note.referenceNumber,
         refundId,
-        documentVersion: 'v2',
+        documentVersion: 'v3',
         identical,
       },
     });
     return {
       creditNoteReference: note.referenceNumber,
-      documentVersion: 'v2' as const,
+      documentVersion: 'v3' as const,
       identical,
       canonicalIdentical,
       hashIdentical,
@@ -684,6 +712,532 @@ export class SettlementRefundsService {
       orderBy: [{ accruedAt: 'asc' }, { id: 'asc' }],
     });
     return { asOf: this.clock.now().toISOString(), receivables: rows };
+  }
+
+  // ── SETTLE-3c-1: the Qift service-fee leg ─────────────────────────
+  // Qift is the LEGAL ISSUER (agent model): its OWN sequential QD
+  // series (RC v4.0), its own postings, its own account. The FROZEN
+  // Qift invoice is the only source of truth — nothing here consults
+  // the live FeeEngine, TaxEngine, campaign, org, or store.
+  //
+  //   invoice 'issued'  → PRE-PAYMENT credit: reduces the unpaid
+  //     receivable (refund.approved postings; no cash moves).
+  //   invoice 'paid'    → POST-PAYMENT refund: cash returns from
+  //     OPERATING (refund.paid) + compensating revenue reversal +
+  //     VAT reversal at the frozen proportion.
+  //
+  // Agent-model law (pinned): NEVER touches MerchantPayable,
+  // MerchantReceivable, reserves, or any merchant/store money.
+  private async recordFeeRefund(actorUserId: string, input: RecordRefundInput) {
+    if (typeof input.invoiceId !== 'string' || !input.invoiceId.trim()) {
+      throw new BadRequestException('refund_invoice_id_required');
+    }
+    const evidenceRef =
+      typeof input.evidenceRef === 'string' ? input.evidenceRef.trim() : '';
+    if (!evidenceRef) {
+      throw new BadRequestException('refund_evidence_required');
+    }
+    const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+    if (!reason) {
+      throw new BadRequestException('refund_reason_required');
+    }
+    const reasonCode = input.reasonCode?.trim() ?? '';
+    if (!FEE_REFUND_REASON_CODES.has(reasonCode)) {
+      throw new BadRequestException('fee_refund_reason_code_required');
+    }
+    if (input.merchantCreditNoteNumber || input.onBehalfAuthorizationRef) {
+      // Series separation, both directions: a Qift document never
+      // carries a merchant legal number.
+      throw new BadRequestException(
+        'credit_note_series_separation:fee_leg_never_merchant_series',
+      );
+    }
+    const refundedAt = new Date(input.refundedAt);
+    if (Number.isNaN(refundedAt.getTime())) {
+      throw new BadRequestException('refund_refunded_at_invalid');
+    }
+    const nowMs = this.clock.now().getTime();
+    if (
+      nowMs - refundedAt.getTime() >
+        APPROVAL_POLICY.executedAtMaxAgeHours * HOUR_MS ||
+      refundedAt.getTime() - nowMs >
+        APPROVAL_POLICY.executedAtMaxSkewHours * HOUR_MS
+    ) {
+      throw new BadRequestException('refund_refunded_at_out_of_window');
+    }
+    if (typeof input.amount !== 'number' || !Number.isFinite(input.amount)) {
+      throw new BadRequestException('refund_amount_must_be_positive');
+    }
+    const amountMinor = toMinor(input.amount, 'SAR');
+    if (amountMinor <= 0) {
+      throw new BadRequestException('refund_amount_must_be_positive');
+    }
+    const amount = fromMinor(amountMinor, 'SAR');
+
+    let outcome;
+    try {
+      outcome = await this.withSerializableRetry(() =>
+        this.prisma.$transaction(
+          async (tx) => {
+            const invoice = await tx.corporateInvoice.findUnique({
+            where: { id: input.invoiceId },
+          });
+          if (!invoice) throw new NotFoundException('invoice_not_found');
+          if (invoice.currency !== 'SAR') {
+            throw new BadRequestException('refund_currency_unsupported');
+          }
+          // §18.1 replay FIRST — identity, never balance.
+          const existing = await tx.settlementRefund.findUnique({
+            where: {
+              invoiceType_invoiceId_evidenceRef: {
+                invoiceType: 'corporate_invoice',
+                invoiceId: invoice.id,
+                evidenceRef,
+              },
+            },
+          });
+          if (existing) {
+            return { existing, refund: null, note: null };
+          }
+          if (invoice.status !== 'issued' && invoice.status !== 'paid') {
+            throw new BadRequestException(
+              `refund_requires_active_invoice:${invoice.status}`,
+            );
+          }
+          const totalMinor = toMinor(moneyToNumber(invoice.totalAmount), 'SAR');
+          const vatMinor = toMinor(
+            moneyToNumber(invoice.vatAmount ?? 0),
+            'SAR',
+          );
+          const receipts = await tx.paymentReceipt.findMany({
+            where: {
+              invoiceType: 'corporate_invoice',
+              invoiceId: invoice.id,
+            },
+            select: { amount: true },
+          });
+          const receivedMinor = receipts.reduce(
+            (t, r) => t + toMinor(moneyToNumber(r.amount), 'SAR'),
+            0,
+          );
+          const priorRefunds = await tx.settlementRefund.findMany({
+            where: {
+              invoiceType: 'corporate_invoice',
+              invoiceId: invoice.id,
+            },
+            select: {
+              amount: true,
+              vatComponent: true,
+              settlementInteraction: true,
+            },
+          });
+          const priorMinor = priorRefunds.reduce(
+            (t, r) => t + toMinor(moneyToNumber(r.amount), 'SAR'),
+            0,
+          );
+          // CASH priors only (re-review N1): pre-payment credits moved
+          // no cash — counting them against the cash cap would refuse
+          // the lawful full unwind (credit + pay + cash refund).
+          const priorCashMinor = priorRefunds
+            .filter((r) => r.settlementInteraction === 'revenue_reversed')
+            .reduce((t, r) => t + toMinor(moneyToNumber(r.amount), 'SAR'), 0);
+          // CUMULATIVE CAP: Σ fee refunds never exceeds the original
+          // Qift invoice amounts — and each path caps to ITS money.
+          if (priorMinor + amountMinor > totalMinor) {
+            throw new ConflictException('refund_exceeds_invoice');
+          }
+          const paid = invoice.status === 'paid';
+          if (paid) {
+            // POST-PAYMENT: CASH returned can never exceed collected.
+            if (priorCashMinor + amountMinor > receivedMinor) {
+              throw new ConflictException('refund_exceeds_collected');
+            }
+          } else {
+            // PRE-PAYMENT: credit reduces only the UNPAID portion.
+            if (priorMinor + amountMinor > totalMinor - receivedMinor) {
+              throw new ConflictException('refund_exceeds_unpaid_balance');
+            }
+          }
+          // §8.3: VAT at the ORIGINAL frozen proportion (half-up,
+          // capped at the remaining frozen VAT).
+          const priorVatMinor = priorRefunds.reduce(
+            (t, r) => t + toMinor(moneyToNumber(r.vatComponent), 'SAR'),
+            0,
+          );
+          // The COMPLETING refund absorbs the VAT remainder (review
+          // finding 4): per-part half-up can undershoot by a halala —
+          // full reversal must reverse the frozen VAT exactly.
+          const vatComponentMinor =
+            priorMinor + amountMinor === totalMinor
+              ? Math.min(amountMinor, Math.max(0, vatMinor - priorVatMinor))
+              : Math.min(
+                  totalMinor === 0
+                    ? 0
+                    : Math.floor(
+                        (amountMinor * vatMinor + Math.floor(totalMinor / 2)) /
+                          totalMinor,
+                      ),
+                  Math.max(0, vatMinor - priorVatMinor),
+                );
+          const vatComponent = fromMinor(vatComponentMinor, 'SAR');
+          const netComponent = fromMinor(amountMinor - vatComponentMinor, 'SAR');
+          const interaction = paid ? 'revenue_reversed' : 'invoice_reduced';
+
+          const refund = await tx.settlementRefund.create({
+            data: {
+              invoiceType: 'corporate_invoice',
+              invoiceId: invoice.id,
+              storeId: null,
+              orgId: invoice.orgId,
+              campaignId: invoice.campaignId,
+              currency: 'SAR',
+              amount,
+              vatComponent,
+              reason,
+              evidenceRef,
+              refundedAt,
+              recordedBy: actorUserId,
+              settlementInteraction: interaction,
+            },
+          });
+          // QD — Qift's OWN sequential legal series (RC v4.0), the QC
+          // allocation discipline: transactional, gap-free.
+          const seriesYear = this.clock.now().getUTCFullYear();
+          const seriesKey = `QD-${seriesYear}`;
+          const allocated = await tx.$queryRaw<{ lastValue: number }[]>`
+            INSERT INTO "NumberSequence" ("seriesKey", "lastValue", "updatedAt")
+            VALUES (${seriesKey}, 1, now())
+            ON CONFLICT ("seriesKey")
+            DO UPDATE SET "lastValue" = "NumberSequence"."lastValue" + 1,
+                          "updatedAt" = now()
+            RETURNING "lastValue"`;
+          const qiftCreditNoteNumber = formatSequentialReference(
+            'QD',
+            seriesYear,
+            allocated[0].lastValue,
+          );
+          const referenceNumber = await this.mintQn(tx);
+          const taxSnapshot = (invoice.taxSnapshot ?? null) as {
+            ruleVersion?: string;
+          } | null;
+          const facts: CreditNoteFacts = {
+            referenceNumber,
+            refundId: refund.id,
+            noteType: 'qift_service_fee',
+            invoiceType: 'corporate_invoice',
+            invoiceId: invoice.id,
+            merchantInvoiceNumber: null,
+            merchantCreditNoteNumber: null,
+            issuerType: 'QIFT',
+            issuanceSource: 'QIFT',
+            onBehalfAuthorizationRef: null,
+            creditNoteUuid: null,
+            originalInvoiceNumber: invoice.invoiceNumber,
+            qiftCreditNoteNumber,
+            netComponent,
+            reasonCode,
+            taxRuleVersion: taxSnapshot?.ruleVersion ?? null,
+            buyerSnapshot: invoice.buyerSnapshot ?? null,
+            issuerSnapshot: invoice.sellerSnapshot ?? null,
+            storeId: null,
+            orgId: invoice.orgId,
+            campaignId: invoice.campaignId,
+            currency: 'SAR',
+            amount,
+            vatComponent,
+            reason,
+            issuedAt: this.clock.now().toISOString(),
+            issuedBy: actorUserId,
+            statementSettlementId: null,
+          };
+          const canonical = creditNoteCanonical(facts);
+          const documentHash = creditNoteHash(facts);
+          const note = await tx.creditNote.create({
+            data: {
+              referenceNumber,
+              refundId: refund.id,
+              noteType: 'qift_service_fee',
+              invoiceType: 'corporate_invoice',
+              invoiceId: invoice.id,
+              merchantInvoiceNumber: null,
+              merchantCreditNoteNumber: null,
+              qiftCreditNoteNumber,
+              issuerType: 'QIFT',
+              issuanceSource: 'QIFT',
+              onBehalfAuthorizationRef: null,
+              creditNoteUuid: null,
+              originalInvoiceNumber: invoice.invoiceNumber,
+              netComponent,
+              reasonCode,
+              taxRuleVersion: taxSnapshot?.ruleVersion ?? null,
+              buyerSnapshot: invoice.buyerSnapshot ?? undefined,
+              issuerSnapshot: invoice.sellerSnapshot ?? undefined,
+              currentVersion: 1,
+              storeId: null,
+              orgId: invoice.orgId,
+              campaignId: invoice.campaignId,
+              currency: 'SAR',
+              amount,
+              vatComponent,
+              reason,
+              issuedAt: new Date(facts.issuedAt),
+              issuedBy: actorUserId,
+              canonicalJson: canonical,
+              documentHash,
+            },
+          });
+          await tx.creditNoteVersion.create({
+            data: {
+              creditNoteId: note.id,
+              versionNumber: 1,
+              changeReason: 'issued',
+              canonicalJson: canonical,
+              documentHash,
+              statementSettlementId: null,
+              createdBy: actorUserId,
+            },
+          });
+
+          // ── Ledger (deterministic occurrence keys; compensating
+          //    entries only — nothing merchant-facing, ever) ────────
+          if (paid) {
+            // Cash out of OPERATING (Qift's own money).
+            await this.ledger.record(
+              {
+                eventType: FINANCIAL_EVENTS.REFUND_PAID,
+                reasonCode: 'REFUND_FEE',
+                actorType: 'user',
+                actorId: actorUserId,
+                amount,
+                currency: 'SAR',
+                direction: 'debit',
+                counterpartyType: 'company',
+                campaignId: invoice.campaignId,
+                orgId: invoice.orgId,
+                idempotencyKey: ledgerIdempotencyKey(
+                  FINANCIAL_EVENTS.REFUND_PAID,
+                  refund.id,
+                ),
+                metadata: {
+                  invoiceId: invoice.id,
+                  invoiceNumber: invoice.invoiceNumber,
+                  creditNoteReference: referenceNumber,
+                  qiftCreditNoteNumber,
+                  evidenceRef,
+                  account: 'operating',
+                  reasonCode,
+                },
+              },
+              tx,
+            );
+            // Compensating REVENUE reversal (net component) against
+            // the coverage-time recognition — prior rows untouched.
+            if (amountMinor - vatComponentMinor > 0) {
+              await this.ledger.record(
+                {
+                  eventType: FINANCIAL_EVENTS.QIFT_REVENUE_RECOGNIZED,
+                  reasonCode: 'QIFT_REVENUE',
+                  actorType: 'user',
+                  actorId: actorUserId,
+                  amount: netComponent,
+                  currency: 'SAR',
+                  direction: 'debit', // reversal of the recognized credit
+                  counterpartyType: 'company',
+                  campaignId: invoice.campaignId,
+                  orgId: invoice.orgId,
+                  idempotencyKey: ledgerIdempotencyKey(
+                    FINANCIAL_EVENTS.QIFT_REVENUE_RECOGNIZED,
+                    `${invoice.id}:reversal:${refund.id}`,
+                  ),
+                  metadata: {
+                    compensates: ledgerIdempotencyKey(
+                      FINANCIAL_EVENTS.QIFT_REVENUE_RECOGNIZED,
+                      invoice.id,
+                    ),
+                    refundId: refund.id,
+                    creditNoteReference: referenceNumber,
+                    qiftCreditNoteNumber,
+                  },
+                },
+                tx,
+              );
+            }
+          } else {
+            // PRE-PAYMENT: the receivable shrinks (no cash).
+            await this.ledger.record(
+              {
+                eventType: FINANCIAL_EVENTS.REFUND_APPROVED,
+                reasonCode: 'CORPORATE_RECEIVABLE',
+                actorType: 'user',
+                actorId: actorUserId,
+                amount,
+                currency: 'SAR',
+                direction: 'debit', // Qift is owed LESS
+                counterpartyType: 'company',
+                campaignId: invoice.campaignId,
+                orgId: invoice.orgId,
+                idempotencyKey: ledgerIdempotencyKey(
+                  FINANCIAL_EVENTS.REFUND_APPROVED,
+                  refund.id,
+                ),
+                metadata: {
+                  invoiceId: invoice.id,
+                  invoiceNumber: invoice.invoiceNumber,
+                  creditNoteReference: referenceNumber,
+                  qiftCreditNoteNumber,
+                  evidenceRef,
+                  reasonCode,
+                  compensates: ledgerIdempotencyKey(
+                    FINANCIAL_EVENTS.CORPORATE_INVOICE_ISSUED,
+                    invoice.id,
+                  ),
+                },
+              },
+              tx,
+            );
+          }
+          // VAT reversal at the frozen proportion — the DOCUMENT is
+          // the VAT source of truth (FC 7.6); this row makes the
+          // reversal ledger-visible, keyed on the refund occurrence.
+          if (vatComponentMinor > 0) {
+            await this.ledger.record(
+              {
+                eventType: FINANCIAL_EVENTS.REFUND_APPROVED,
+                reasonCode: 'QIFT_VAT',
+                actorType: 'user',
+                actorId: actorUserId,
+                amount: vatComponent,
+                currency: 'SAR',
+                direction: 'debit',
+                counterpartyType: 'company',
+                campaignId: invoice.campaignId,
+                orgId: invoice.orgId,
+                idempotencyKey: ledgerIdempotencyKey(
+                  FINANCIAL_EVENTS.REFUND_APPROVED,
+                  `${refund.id}:vat`,
+                ),
+                metadata: {
+                  refundId: refund.id,
+                  creditNoteReference: referenceNumber,
+                  qiftCreditNoteNumber,
+                  taxRuleVersion: taxSnapshot?.ruleVersion ?? null,
+                },
+              },
+              tx,
+            );
+          }
+          return { existing: null, refund, note };
+          },
+          { isolationLevel: 'Serializable' },
+        ),
+      );
+    } catch (e) {
+      if ((e as { code?: string })?.code === 'P2002') {
+        // Concurrent identical submissions (§18.1): resolve by
+        // identity via the evidence unique — the receipts pattern.
+        const existing = await this.prisma.settlementRefund.findUnique({
+          where: {
+            invoiceType_invoiceId_evidenceRef: {
+              invoiceType: 'corporate_invoice',
+              invoiceId: input.invoiceId,
+              evidenceRef,
+            },
+          },
+        });
+        if (existing) {
+          outcome = { existing, refund: null, note: null };
+        } else {
+          throw e;
+        }
+      } else {
+        throw e;
+      }
+    }
+    if (outcome.existing) {
+      if (
+        toMinor(moneyToNumber(outcome.existing.amount), 'SAR') !==
+          amountMinor ||
+        outcome.existing.refundedAt.getTime() !== refundedAt.getTime()
+      ) {
+        throw new ConflictException('refund_evidence_conflict');
+      }
+      if (outcome.existing.settlementInteraction === 'invoice_reduced') {
+        // §18.2 heal (re-review N2): a crash between the credit's
+        // commit and the derive leaves coverage stale — the natural
+        // retry (same evidence) finishes the chain, the receipts
+        // pattern.
+        await this.receipts.deriveAndApplyCoverage(
+          actorUserId,
+          'corporate_invoice',
+          outcome.existing.invoiceId,
+        );
+      }
+      return { refund: outcome.existing, replayed: true as const };
+    }
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'finance.credit_note.issued',
+      targetType: 'organization',
+      targetId: outcome.refund!.orgId,
+      metadata: {
+        creditNoteReference: outcome.note!.referenceNumber,
+        qiftCreditNoteNumber: outcome.note!.qiftCreditNoteNumber,
+        issuerType: 'QIFT',
+        refundId: outcome.refund!.id,
+        invoiceId: outcome.refund!.invoiceId,
+        amount,
+        vatComponent: moneyToNumber(outcome.refund!.vatComponent),
+      },
+    });
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'finance.refund.recorded',
+      targetType: 'organization',
+      targetId: outcome.refund!.orgId,
+      metadata: {
+        refundId: outcome.refund!.id,
+        invoiceType: 'corporate_invoice',
+        invoiceId: outcome.refund!.invoiceId,
+        amount,
+        vatComponent: moneyToNumber(outcome.refund!.vatComponent),
+        currency: 'SAR',
+        reason,
+        reasonCode,
+        evidenceRef,
+        settlementInteraction: outcome.refund!.settlementInteraction,
+      },
+    });
+    if (outcome.refund!.settlementInteraction === 'invoice_reduced') {
+      // The credit may have completed coverage (effective total met or
+      // extinguished) — derive it now, idempotently (finding 2).
+      await this.receipts.deriveAndApplyCoverage(
+        actorUserId,
+        'corporate_invoice',
+        outcome.refund!.invoiceId,
+      );
+    }
+    return { refund: outcome.refund!, replayed: false as const };
+  }
+
+  // The ONE QN mint site (tripwire-pinned): both legs mint here.
+  private async mintQn(tx: {
+    creditNote: {
+      findUnique: (args: {
+        where: { referenceNumber: string };
+        select: { id: boolean };
+      }) => Promise<{ id: string } | null>;
+    };
+  }) {
+    return allocateReference('QN', async (candidate) =>
+      Boolean(
+        await tx.creditNote.findUnique({
+          where: { referenceNumber: candidate },
+          select: { id: true },
+        }),
+      ),
+    );
   }
 
   private async withSerializableRetry<T>(fn: () => Promise<T>): Promise<T> {

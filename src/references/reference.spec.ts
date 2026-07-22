@@ -45,6 +45,7 @@ describe('reference grammar', () => {
       expect(Object.keys(REFERENCE_PREFIXES).sort()).toEqual([
         'QB',
         'QC',
+        'QD',
         'QF',
         'QG',
         'QN',
@@ -58,6 +59,7 @@ describe('reference grammar', () => {
       expect(REFERENCE_PREFIXES.QC.kind).toBe('sequential');
       expect(REFERENCE_PREFIXES.QS.kind).toBe('random'); // ACTIVE per RC v2.0
       expect(REFERENCE_PREFIXES.QN.kind).toBe('random'); // ACTIVE per RC v3.0
+      expect(REFERENCE_PREFIXES.QD.kind).toBe('sequential'); // ACTIVE per RC v4.0
     });
 
     it('QN is ACTIVE (RC v3.0): random credit-note reference generates', () => {
@@ -71,6 +73,12 @@ describe('reference grammar', () => {
 
     it('refuses to randomly generate the sequential invoice prefix (QC)', () => {
       expect(() => generateReference('QC')).toThrow(/not_random.*sequential/i);
+    });
+
+    it('QD is ACTIVE (RC v4.0): sequential Qift credit-note series formats and parses; random generation refuses', () => {
+      expect(() => generateReference('QD')).toThrow(/not_random.*sequential/i);
+      expect(formatSequentialReference('QD', 2026, 1)).toBe('QD-2026-00001');
+      expect(normalizeReference('qd 2026 00001')).toBe('QD-2026-00001');
     });
 
     it('QS is ACTIVE (RC v2.0): random settlement-batch reference generates', () => {

@@ -26,13 +26,25 @@ export type CreditNoteFacts = {
   invoiceId: string;
   merchantInvoiceNumber: string | null; // quoted — never manufactured
   merchantCreditNoteNumber: string | null; // supplied — never manufactured
+  // Qift's OWN sequential legal number (RC v4.0 QD series) — the fee
+  // leg only; never on a merchant-goods note (series separation).
+  qiftCreditNoteNumber: string | null;
   // Legal-document identity (C-PR8): the agent split, explicit.
   issuerType: string; // 'MERCHANT' | 'QIFT'
   issuanceSource: string; // MERCHANT | ACCOUNTING_CONNECTOR | QIFT_ON_BEHALF | QIFT
   onBehalfAuthorizationRef: string | null;
   creditNoteUuid: string | null; // future ZATCA
   originalInvoiceNumber: string | null; // generalized original-document number
-  storeId: string;
+  // Fee-leg legal freeze (C-PR9): the net component (amount −
+  // vatComponent, stored — the document never derives), the closed
+  // refund reasonCode, the ORIGINAL invoice's frozen tax-rule
+  // version, and the party snapshots quoted from the invoice.
+  netComponent: number | null;
+  reasonCode: string | null;
+  taxRuleVersion: string | null;
+  buyerSnapshot: unknown | null;
+  issuerSnapshot: unknown | null;
+  storeId: string | null; // null on the Qift fee leg
   orgId: string;
   campaignId: string;
   currency: string;
@@ -49,10 +61,12 @@ export type CreditNoteFacts = {
 };
 
 export type CreditNoteDocument = {
-  // FORMAT version (bumped v1→v2 when the legal-identity fields
-  // entered the hashed document — C-PR8; no v1 documents exist
+  // FORMAT version (v3 as of C-PR9: the fee-leg legal freeze —
+  // qiftCreditNoteNumber, netComponent, reasonCode, taxRuleVersion,
+  // party snapshots — entered the hashed document; v2 added the
+  // legal-identity fields. No earlier-format documents exist
   // anywhere: the Ch. 17.4 gates were never attested).
-  documentVersion: 'v2';
+  documentVersion: 'v3';
   referenceNumber: string;
   refundId: string;
   noteType: string;
@@ -67,7 +81,13 @@ export type CreditNoteDocument = {
   onBehalfAuthorizationRef: string | null;
   creditNoteUuid: string | null;
   merchantCreditNoteNumber: string | null;
-  storeId: string;
+  qiftCreditNoteNumber: string | null;
+  netComponent: number | null;
+  reasonCode: string | null;
+  taxRuleVersion: string | null;
+  buyerSnapshot: unknown | null;
+  issuerSnapshot: unknown | null;
+  storeId: string | null; // null on the Qift fee leg
   orgId: string;
   campaignId: string;
   currency: string;
@@ -83,7 +103,7 @@ export function buildCreditNoteDocument(
   facts: CreditNoteFacts,
 ): CreditNoteDocument {
   return {
-    documentVersion: 'v2',
+    documentVersion: 'v3',
     referenceNumber: facts.referenceNumber,
     refundId: facts.refundId,
     noteType: facts.noteType,
@@ -98,6 +118,12 @@ export function buildCreditNoteDocument(
     onBehalfAuthorizationRef: facts.onBehalfAuthorizationRef,
     creditNoteUuid: facts.creditNoteUuid,
     merchantCreditNoteNumber: facts.merchantCreditNoteNumber,
+    qiftCreditNoteNumber: facts.qiftCreditNoteNumber,
+    netComponent: facts.netComponent,
+    reasonCode: facts.reasonCode,
+    taxRuleVersion: facts.taxRuleVersion,
+    buyerSnapshot: facts.buyerSnapshot ?? null,
+    issuerSnapshot: facts.issuerSnapshot ?? null,
     storeId: facts.storeId,
     orgId: facts.orgId,
     campaignId: facts.campaignId,

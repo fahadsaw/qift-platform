@@ -657,6 +657,13 @@ export class SettlementExecutionService {
         onBehalfAuthorizationRef: note.onBehalfAuthorizationRef,
         creditNoteUuid: note.creditNoteUuid,
         originalInvoiceNumber: note.originalInvoiceNumber,
+        qiftCreditNoteNumber: note.qiftCreditNoteNumber,
+        netComponent:
+          note.netComponent === null ? null : moneyToNumber(note.netComponent),
+        reasonCode: note.reasonCode,
+        taxRuleVersion: note.taxRuleVersion,
+        buyerSnapshot: note.buyerSnapshot ?? null,
+        issuerSnapshot: note.issuerSnapshot ?? null,
         storeId: note.storeId,
         orgId: note.orgId,
         campaignId: note.campaignId,

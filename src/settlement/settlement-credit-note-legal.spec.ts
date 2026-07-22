@@ -83,6 +83,13 @@ function world() {
         const row = {
           id: `cn-${++seq}`,
           statementSettlementId: null,
+          qiftCreditNoteNumber: null,
+          netComponent: null,
+          reasonCode: null,
+          taxRuleVersion: null,
+          buyerSnapshot: null,
+          issuerSnapshot: null,
+          creditNoteUuid: null,
           ...(data as Row),
         };
         creditNotes.push(row);
@@ -126,6 +133,7 @@ function world() {
     audit as unknown as AuditService,
     ledger as unknown as FinancialLedgerService,
     { now: () => new Date('2026-07-23T09:00:00.000Z') },
+    { deriveAndApplyCoverage: jest.fn().mockResolvedValue({}) } as never,
   );
   return { service, creditNotes, noteVersions, auditRows };
 }
@@ -251,6 +259,13 @@ describe('credit-note legal-document integrity (founder check)', () => {
       onBehalfAuthorizationRef: note.onBehalfAuthorizationRef,
       creditNoteUuid: note.creditNoteUuid,
       originalInvoiceNumber: note.originalInvoiceNumber,
+      qiftCreditNoteNumber: note.qiftCreditNoteNumber ?? null,
+      netComponent: note.netComponent ?? null,
+      reasonCode: note.reasonCode ?? null,
+      taxRuleVersion: note.taxRuleVersion ?? null,
+      buyerSnapshot: note.buyerSnapshot ?? null,
+      issuerSnapshot: note.issuerSnapshot ?? null,
+
       storeId: note.storeId,
       orgId: note.orgId,
       campaignId: note.campaignId,
@@ -291,6 +306,13 @@ describe('credit-note legal-document integrity (founder check)', () => {
       onBehalfAuthorizationRef: note.onBehalfAuthorizationRef,
       creditNoteUuid: note.creditNoteUuid,
       originalInvoiceNumber: note.originalInvoiceNumber,
+      qiftCreditNoteNumber: note.qiftCreditNoteNumber ?? null,
+      netComponent: note.netComponent ?? null,
+      reasonCode: note.reasonCode ?? null,
+      taxRuleVersion: note.taxRuleVersion ?? null,
+      buyerSnapshot: note.buyerSnapshot ?? null,
+      issuerSnapshot: note.issuerSnapshot ?? null,
+
       storeId: note.storeId,
       orgId: note.orgId,
       campaignId: note.campaignId,

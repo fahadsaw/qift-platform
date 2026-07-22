@@ -179,7 +179,9 @@ export class SettlementReceiptsService {
               inv.id,
               tx,
             );
-            const totalMinor = toMinor(inv.totalAmount, 'SAR');
+            const totalMinor =
+              toMinor(inv.totalAmount, 'SAR') -
+              (await this.feeCreditsMinor(invoiceType, inv.id, tx));
             if (already + amountMinor > totalMinor) {
               throw new ConflictException('receipt_exceeds_invoice_balance');
             }
@@ -373,8 +375,14 @@ export class SettlementReceiptsService {
       (s, r) => s + toMinor(moneyToNumber(r.amount), 'SAR'),
       0,
     );
-    const totalMinor = toMinor(invoice.totalAmount, 'SAR');
-    const covered = receipts.length > 0 && paidMinor >= totalMinor;
+    const creditsMinor = await this.feeCreditsMinor(invoiceType, invoiceId);
+    const totalMinor = toMinor(invoice.totalAmount, 'SAR') - creditsMinor;
+    // Covered when receipts reach the EFFECTIVE total — or when credit
+    // notes extinguished the invoice entirely (review finding 2: a
+    // fully-credited invoice closes economically with zero receipts).
+    const covered =
+      (receipts.length > 0 && paidMinor >= totalMinor) ||
+      (totalMinor <= 0 && creditsMinor > 0);
     const result = {
       invoiceType,
       invoiceId,
@@ -395,8 +403,24 @@ export class SettlementReceiptsService {
       return result;
     }
     // paidAt = the COMPLETING receipt's value date — a business fact
-    // from evidence, never a machine clock (§34-friendly).
-    const paidAt = receipts[receipts.length - 1].receivedAt;
+    // from evidence, never a machine clock (§34-friendly). A fully-
+    // credited invoice (zero receipts) closes on the LAST credit's
+    // value date instead.
+    const paidAt =
+      receipts.length > 0
+        ? receipts[receipts.length - 1].receivedAt
+        : (
+            await this.prisma.settlementRefund.findMany({
+              where: {
+                invoiceType: 'corporate_invoice',
+                invoiceId,
+                settlementInteraction: 'invoice_reduced',
+              },
+              orderBy: [{ refundedAt: 'desc' }, { id: 'desc' }],
+              take: 1,
+              select: { refundedAt: true },
+            })
+          )[0].refundedAt;
     const flipped =
       invoiceType === 'merchant_invoice'
         ? await this.prisma.merchantInvoice.updateMany({
@@ -448,13 +472,15 @@ export class SettlementReceiptsService {
       (s, r) => s + toMinor(moneyToNumber(r.amount), 'SAR'),
       0,
     );
-    const totalMinor = toMinor(invoice.totalAmount, 'SAR');
+    const creditsMinor = await this.feeCreditsMinor(invoiceType, invoiceId);
+    const totalMinor = toMinor(invoice.totalAmount, 'SAR') - creditsMinor;
     return {
       invoiceType,
       invoiceId,
       invoiceNumber: invoice.invoiceNumber,
       status: invoice.status,
-      totalAmount: fromMinor(totalMinor, 'SAR'),
+      totalAmount: fromMinor(totalMinor, 'SAR'), // EFFECTIVE (credits netted)
+      creditedAmount: fromMinor(creditsMinor, 'SAR'),
       amountReceived: fromMinor(paidMinor, 'SAR'),
       balance: fromMinor(totalMinor - paidMinor, 'SAR'),
       receipts,
@@ -488,6 +514,7 @@ export class SettlementReceiptsService {
       storeId: string | null;
       dueDate: string | null;
       totalAmount: number;
+      creditedAmount: number;
       amountReceived: number;
       balance: number;
       daysOverdue: number;
@@ -495,7 +522,9 @@ export class SettlementReceiptsService {
     }> = [];
     for (const { invoiceType, i } of rows) {
       const paidMinor = await this.receiptTotalMinor(invoiceType, i.id);
-      const totalMinor = toMinor(moneyToNumber(i.totalAmount), 'SAR');
+      const creditsMinor = await this.feeCreditsMinor(invoiceType, i.id);
+      const totalMinor =
+        toMinor(moneyToNumber(i.totalAmount), 'SAR') - creditsMinor;
       const balanceMinor = totalMinor - paidMinor;
       if (balanceMinor <= 0) continue; // fully covered, flip pending — not aged
       const dueDate = (i as { dueDate: Date | null }).dueDate;
@@ -517,7 +546,8 @@ export class SettlementReceiptsService {
         campaignId: i.campaignId,
         storeId: (i as { storeId?: string }).storeId ?? null,
         dueDate: dueDate ? dueDate.toISOString() : null,
-        totalAmount: fromMinor(totalMinor, 'SAR'),
+        totalAmount: fromMinor(totalMinor, 'SAR'), // EFFECTIVE
+        creditedAmount: fromMinor(creditsMinor, 'SAR'),
         amountReceived: fromMinor(paidMinor, 'SAR'),
         balance: fromMinor(balanceMinor, 'SAR'),
         daysOverdue,
@@ -549,8 +579,32 @@ export class SettlementReceiptsService {
   ) {
     if (invoiceType === 'corporate_invoice') {
       // Revenue = the fee NET of VAT (VAT-payable posted at issuance —
-      // FC 7.6: the tax point and the recognition clock never mix).
-      const feeNet = invoice.platformFeeAmount ?? 0;
+      // FC 7.6), REDUCED by any pre-payment credit notes' net
+      // components (SETTLE-3c-1 review finding 1): a credited fee was
+      // never earned — recognizing the full original fee would
+      // permanently overstate Qift revenue.
+      const credits = await this.prisma.settlementRefund.findMany({
+        where: {
+          invoiceType: 'corporate_invoice',
+          invoiceId: invoice.id,
+          settlementInteraction: 'invoice_reduced',
+        },
+        select: { amount: true, vatComponent: true },
+      });
+      const creditedNetMinor = credits.reduce(
+        (t, r) =>
+          t +
+          toMinor(moneyToNumber(r.amount), 'SAR') -
+          toMinor(moneyToNumber(r.vatComponent), 'SAR'),
+        0,
+      );
+      const feeNet = fromMinor(
+        Math.max(
+          0,
+          toMinor(invoice.platformFeeAmount ?? 0, 'SAR') - creditedNetMinor,
+        ),
+        'SAR',
+      );
       if (feeNet > 0) {
         await this.ledger.record({
           eventType: FINANCIAL_EVENTS.QIFT_REVENUE_RECOGNIZED,
@@ -626,6 +680,30 @@ export class SettlementReceiptsService {
         throw e;
       }
     }
+  }
+
+  // Pre-payment fee CREDIT NOTES (SETTLE-3c-1) reduce what the org
+  // owes on a Qift invoice: the invoice's EFFECTIVE total = frozen
+  // total − Σ 'invoice_reduced' fee refunds. Merchant invoices are
+  // untouched (goods credits interact through settlement items).
+  private async feeCreditsMinor(
+    invoiceType: InvoiceType,
+    invoiceId: string,
+    db: Pick<PrismaService, 'settlementRefund'> = this.prisma,
+  ) {
+    if (invoiceType !== 'corporate_invoice') return 0;
+    const credits = await db.settlementRefund.findMany({
+      where: {
+        invoiceType: 'corporate_invoice',
+        invoiceId,
+        settlementInteraction: 'invoice_reduced',
+      },
+      select: { amount: true },
+    });
+    return credits.reduce(
+      (t, r) => t + toMinor(moneyToNumber(r.amount), 'SAR'),
+      0,
+    );
   }
 
   private async receiptTotalMinor(

@@ -203,6 +203,23 @@ per-`(receivableId, settlementId)` recovery postings; the enumerating
 statement triggers the RC v3.0 credit-note statement attachment (a new
 document version, write-once, audited).
 
+## SETTLE-3c-1 note — the Qift fee-leg credit note (RC v4.0)
+
+Qift is the LEGAL ISSUER of its own service-fee credit notes: the QD
+sequential series (RC v4.0, NumberSequence-allocated, gap-free) is
+Qift's alone — a fee-leg note refuses any merchant number or on-behalf
+evidence, and a goods note can never carry QD (series separation,
+pinned both directions). The FROZEN Qift invoice is the only source of
+truth (amounts, VAT proportion, tax-rule version, party snapshots —
+never the live engines). Pre-payment credits reduce the unpaid
+receivable (refund.approved compensations; the receipts service
+computes coverage against the EFFECTIVE total); post-payment refunds
+return cash from OPERATING with a compensating revenue reversal + a
+frozen-proportion VAT reversal. Agent-model law (pinned): the fee leg
+never touches MerchantPayable, MerchantReceivable, settlement items,
+or reserves. Document format v3 (fee legal freeze in the hashed
+document); version 1 append-only as everywhere.
+
 ## Amending these rules
 
 A change to any rule (or its pins) must name the rule, cite the

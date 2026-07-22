@@ -109,6 +109,13 @@ function world(opts?: {
         const row = {
           id: `cn-${++seq}`,
           statementSettlementId: null,
+          qiftCreditNoteNumber: null,
+          netComponent: null,
+          reasonCode: null,
+          taxRuleVersion: null,
+          buyerSnapshot: null,
+          issuerSnapshot: null,
+          creditNoteUuid: null,
           ...(data as Row),
         };
         creditNotes.push(row);
@@ -177,6 +184,7 @@ function world(opts?: {
     audit as unknown as AuditService,
     ledger as unknown as FinancialLedgerService,
     { now: () => new Date(NOW) },
+    { deriveAndApplyCoverage: jest.fn().mockResolvedValue({}) } as never,
   );
   return {
     service,
@@ -209,11 +217,14 @@ describe('SettlementRefundsService (SETTLE-3a, §8)', () => {
     delete process.env[GATES_ENV];
   });
 
-  it('§8.1 the fee leg REFUSES — merchant money never funds a Qift refund', async () => {
+  it('§8.1 the fee leg routes to the QIFT branch — its own vocabulary, never the goods path', async () => {
     const { service } = world();
+    // SETTLE-3c-1: the fee leg is live and demands ITS closed reason
+    // vocabulary before anything else — proof the goods path (which
+    // spends merchant money) is never entered.
     await expect(
       service.recordRefund('fin-1', INPUT({ invoiceType: 'corporate_invoice' } as never)),
-    ).rejects.toThrow('fee_refund_not_implemented');
+    ).rejects.toThrow('fee_refund_reason_code_required');
   });
 
   it('input law: gates, evidence, reason, amount, value-date window, paid invoice', async () => {
@@ -447,7 +458,7 @@ describe('SettlementRefundsService (SETTLE-3a, §8)', () => {
       identical: true,
       canonicalIdentical: true,
       hashIdentical: true,
-      documentVersion: 'v2',
+      documentVersion: 'v3',
     });
     expect(replay.creditNoteReference).toBe(note.referenceNumber);
     expect(
