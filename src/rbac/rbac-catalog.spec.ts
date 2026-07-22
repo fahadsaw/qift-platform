@@ -266,14 +266,16 @@ describe('RBAC catalog — finance role parity with apps/api/src/ops-roles/', ()
       // SETTLE-2 (Track C PR 3): §33.1 two powers.
       'finance.settlement_approve',
       'finance.settlement_execute',
+      // SETTLE-3a (Track C PR 5): §8 refunds.
+      'finance.refunds',
       'store.read_detail',
       'analytics.read',
     ]);
     expect(new Set(ROLE_PERMISSIONS.finance)).toEqual(expected);
   });
 
-  it('finance role count is 11', () => {
-    expect(ROLE_PERMISSIONS.finance.length).toBe(11);
+  it('finance role count is 12', () => {
+    expect(ROLE_PERMISSIONS.finance.length).toBe(12);
   });
 
   it('finance does NOT hold expanded Stage 10 finance rights', () => {

@@ -117,15 +117,23 @@ describe('Track C PR 3 — end-to-end financial walkthrough (S01: assembly → a
         }),
         updateMany: jest.fn().mockImplementation(({ where, data }: never) => {
           const w = where as {
-            id?: { in: string[] };
+            id?: string | { in: string[] };
             batchId?: string | null;
             state?: string;
+            amount?: unknown;
           };
           let count = 0;
           for (const i of items) {
-            if (w.id && !w.id.in.includes(i.id as string)) continue;
+            if (w.id !== undefined) {
+              const ids =
+                typeof w.id === 'string'
+                  ? [w.id]
+                  : (w.id as { in: string[] }).in;
+              if (!ids.includes(i.id as string)) continue;
+            }
             if (w.batchId !== undefined && i.batchId !== w.batchId) continue;
             if (w.state !== undefined && i.state !== w.state) continue;
+            if (w.amount !== undefined && i.amount !== w.amount) continue;
             Object.assign(i, data as Row);
             count++;
           }

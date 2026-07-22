@@ -145,6 +145,9 @@ describe('RULE 2 — no direct system time in the Settlement Engine', () => {
     // SETTLE-2 execution surface: clock-injected (TTL, issuance);
     // bank dates are supplied evidence; batch access via engine only.
     'settlement-execution.service.ts',
+    // SETTLE-3a refunds: clock-injected; refund dates are supplied
+    // evidence; touches items (guarded) but NEVER batches.
+    'settlement-refunds.service.ts',
   ];
 
   it('pure settlement sources contain zero Date.now / new Date / Math.random', () => {
@@ -299,7 +302,15 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
     //   markSettled — guarded ready→settled of the batch's OWN items
     //     (SETTLE-2), count-checked against the frozen composition.
     expect(count(engine, 'settlementItem.updateMany(')).toBe(3);
-    expect(count(engine, "state: 'eligible',\n              batchId: null,")).toBe(1);
+    // The bind guard pins state + unbound + the EXACT frozen amount
+    // (SETTLE-3a review finding 1: amounts became mutable via refunds;
+    // a racing shrink must fail the bind, never freeze stale money).
+    expect(
+      count(
+        engine,
+        "state: 'eligible',\n                batchId: null,\n                amount: item.amount,",
+      ),
+    ).toBe(1);
   });
 
   it('the engine surface is the pinned method set — no unreviewed mutator can appear', () => {
@@ -363,6 +374,7 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
             id: string | { in: string[] };
             state?: string;
             batchId?: string | null;
+            amount?: unknown;
           };
           const ids = typeof w.id === 'string' ? [w.id] : w.id.in;
           let n = 0;
@@ -370,6 +382,7 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
             if (!ids.includes(i.id as string)) continue;
             if (w.state !== undefined && i.state !== w.state) continue;
             if (w.batchId !== undefined && i.batchId !== w.batchId) continue;
+            if (w.amount !== undefined && i.amount !== w.amount) continue;
             Object.assign(i, data as Row);
             n++;
           }

@@ -24,7 +24,10 @@ describe('financial event taxonomy (FIN-4)', () => {
       SETTLEMENT_SUPERSEDED: 'settlement.superseded',
       REFUND_REQUESTED: 'refund.requested',
       REFUND_APPROVED: 'refund.approved',
+      // SETTLE-3a: refund.paid live (goods leg); receivable accrual
+      // for the §2 Reversed flow, anchored on refundId.
       REFUND_PAID: 'refund.paid',
+      MERCHANT_RECEIVABLE_ACCRUED: 'merchant.receivable.accrued',
       CHARGEBACK_CREATED: 'chargeback.created',
     });
   });

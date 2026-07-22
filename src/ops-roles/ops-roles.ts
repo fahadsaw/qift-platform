@@ -126,6 +126,8 @@ export const OPS_PERMISSIONS = [
   // approvers is enforced in-service on identity (RULE 6 gate).
   'finance.settlement_approve',
   'finance.settlement_execute',
+  // SETTLE-3a (Track C PR 5): §8 refund recording + receivable views.
+  'finance.refunds',
   // Diagnostics / debug.
   'diagnostics.read',
   'diagnostics.run_seed',
@@ -183,6 +185,7 @@ const PERMISSIONS_BY_ROLE: Record<
     'finance.receipts',
     'finance.settlement_approve',
     'finance.settlement_execute',
+    'finance.refunds',
     'store.read_detail',
     'analytics.read',
   ],
@@ -260,6 +263,7 @@ const SUPER_ADMIN_ALL: readonly OpsPermission[] = [
   'finance.receipts',
   'finance.settlement_approve',
   'finance.settlement_execute',
+  'finance.refunds',
   'diagnostics.read',
   'diagnostics.run_seed',
   'report.read',

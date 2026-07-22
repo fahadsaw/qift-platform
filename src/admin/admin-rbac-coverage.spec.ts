@@ -117,6 +117,18 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
     opsPermission: 'finance.receipts',
   },
   {
+    // SETTLE-3a — refunds + credit notes per invoice (read model).
+    method: 'listRefunds',
+    path: 'finance/refunds',
+    opsPermission: 'finance.refunds',
+  },
+  {
+    // SETTLE-3a — open receivables (§2 Reversed → §7.4 offset queue).
+    method: 'openReceivables',
+    path: 'finance/receivables',
+    opsPermission: 'finance.refunds',
+  },
+  {
     method: 'financeStoreBalances',
     path: 'finance/stores',
     opsPermission: 'finance.read_payouts',
@@ -655,6 +667,13 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         opsPermission: 'finance.settlement_execute',
       },
       {
+        // SETTLE-3a — §8 refund recording (money leaves safeguarding).
+        method: 'recordRefund',
+        path: 'finance/refunds',
+        httpMethod: 'POST',
+        opsPermission: 'finance.refunds',
+      },
+      {
         // Track B3 / PE-12 — VAT-facts maker-checker mutations. SoD
         // (maker != checker) is enforced in-service above this
         // permission per Financial Constitution Ch. 14.2.
@@ -876,6 +895,7 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
             'finance.receipts': ['finance'],
             'finance.settlement_approve': ['finance'],
             'finance.settlement_execute': ['finance'],
+            'finance.refunds': ['finance'],
             'finance.approve_payout': ['finance'],
             'diagnostics.read': [
               'operations_manager',

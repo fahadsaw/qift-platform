@@ -205,6 +205,7 @@ describe('Track C PR 2 — end-to-end financial walkthrough (S01, receipts → e
             id?: string | { in: string[] };
             state?: string;
             batchId?: string | null;
+            amount?: unknown;
           };
           const ids =
             w.id === undefined
@@ -217,6 +218,7 @@ describe('Track C PR 2 — end-to-end financial walkthrough (S01, receipts → e
             if (ids && !ids.includes(i.id as string)) continue;
             if (w.state !== undefined && i.state !== w.state) continue;
             if (w.batchId !== undefined && i.batchId !== w.batchId) continue;
+            if (w.amount !== undefined && i.amount !== w.amount) continue;
             Object.assign(i, data as Row);
             count++;
           }
