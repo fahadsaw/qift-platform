@@ -52,6 +52,13 @@ export const REFERENCE_PREFIXES = {
   // on simulations (SC §30.2). Allocation lives in the settlement
   // engine — nothing else may mint a QS.
   QS: { kind: 'random', object: 'settlement_batch' },
+  // Credit note reference — ACTIVE as of Reference Constitution v3.0
+  // (the QN-activation amendment): random operational, ONE per credit
+  // note, allocated at issuance, immutable forever. The credit note is
+  // a FIRST-CLASS financial document (canonical JSON + hash + replay +
+  // audit + invoice/statement relationships). Allocation lives in the
+  // settlement refunds service — nothing else may mint a QN.
+  QN: { kind: 'random', object: 'credit_note' },
 } as const satisfies Record<string, { kind: ReferenceKind; object: string }>;
 
 export type ReferencePrefix = keyof typeof REFERENCE_PREFIXES;

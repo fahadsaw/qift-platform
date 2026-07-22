@@ -157,6 +157,39 @@ thereafter.
   halala sensitivity); preview/approval/statement all carry the same
   token.
 
+## Financial invariants (RC v3.0 — 2026-07-22, before SETTLE-3b)
+
+Founder-mandated, recorded in `QIFT_REFERENCE_CONSTITUTION_v3.0.md`
+(the QN-activation amendment), pinned in
+`settlement-invariants.spec.ts`:
+
+1. **Credit Notes are first-class financial documents.** Every credit
+   note has: a canonical **Reference** (QN — random operational,
+   minted once at issuance, immutable); a **Canonical JSON**
+   representation (the source of truth, stored); a **Hash** derived
+   from the canonical bytes only (`creditNoteHash ≡
+   hashCanonical(creditNoteCanonical)`); **Replay** (same frozen facts
+   → byte-identical document; `replayCreditNote` verifies and audits);
+   an **Audit** trail (`finance.credit_note.issued`); its **Invoice
+   relationship** (type + id + the merchant's SUPPLIED legal number);
+   and its **Statement relationship** (`statementSettlementId`,
+   write-once when the enumerating settlement statement exists —
+   SETTLE-3b populates it; the null is part of the hashed document, so
+   attachment is a new document version, never a silent rewrite).
+2. **Merchant Receivables are lifecycle entities.** Minimum states —
+   `open / partially_recovered / recovered / written_off / disputed` —
+   with transitions only through
+   `settlement-receivable-states.ts` (recovered and written_off are
+   terminal; write-off is §32 L3 + advisor note when its surface
+   ships). `amountRecovered` tracks §7.4 offset progress.
+3. **Reserve ≠ Receivable — never merged.** A reserve is withheld
+   remittance (client money, §7.3); a receivable is money the merchant
+   owes Qift. The §7.4 recovery order (offset first, then reserve
+   draw) is an interaction, not a unification. Pinned: no reserve
+   state or field on the receivable; the future reserve model must
+   carry no receivable fields (extend the pin symmetrically when it
+   lands).
+
 ## Amending these rules
 
 A change to any rule (or its pins) must name the rule, cite the

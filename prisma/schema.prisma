@@ -2963,6 +2963,9 @@ model SettlementRefund {
 // platform record referencing the original invoice. Immutable.
 model CreditNote {
   id                       String   @id @default(cuid())
+  // Canonical credit-note reference (RC v3.0): QN-XXXX-XXXX, one per
+  // credit note, allocated at issuance, immutable forever.
+  referenceNumber          String   @unique
   refundId                 String   @unique // one credit note per refund at pilot
   noteType                 String // 'merchant_goods' (fee leg = SETTLE-3b)
   invoiceType              String
@@ -2978,6 +2981,15 @@ model CreditNote {
   reason                   String
   issuedAt                 DateTime
   issuedBy                 String
+  // FIRST-CLASS DOCUMENT law (RC v3.0): the canonical JSON string is
+  // THE source of truth; the hash derives from those bytes only;
+  // replay regenerates both identically from frozen data.
+  canonicalJson            String
+  documentHash             String
+  // Statement relationship: the settlement batch whose statement
+  // enumerates this note's recovery/reduction — write-once when the
+  // enumerating statement exists (SETTLE-3b populates it).
+  statementSettlementId    String?
   createdAt                DateTime @default(now())
 
   @@index([invoiceType, invoiceId])
@@ -2994,7 +3006,14 @@ model SettlementReceivable {
   amount                   Decimal   @db.Decimal(12, 2)
   occurrenceType           String // 'refund'
   occurrenceId             String // refundId
-  state                    String    @default("open") // open | bound | recovered
+  // LIFECYCLE LAW (RC v3.0 invariant): open | partially_recovered |
+  // recovered | written_off | disputed — transitions only through
+  // settlement-receivable-states.ts. Reserves are a SEPARATE concept
+  // (withheld remittance, client money) — NEVER merged with
+  // receivables (money the merchant owes Qift).
+  state                    String    @default("open")
+  // Recovered-so-far (§7.4 offset; SETTLE-3b writes it).
+  amountRecovered          Decimal   @default(0) @db.Decimal(12, 2)
   accruedAt                DateTime
   recoveredAt              DateTime?
   recoveredBySettlementId  String?

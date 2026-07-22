@@ -90,9 +90,25 @@ function world(opts?: {
     },
     creditNote: {
       create: jest.fn().mockImplementation(({ data }: never) => {
-        const row = { id: `cn-${++seq}`, ...(data as Row) };
+        // Model Prisma's nullable-column default.
+        const row = {
+          id: `cn-${++seq}`,
+          statementSettlementId: null,
+          ...(data as Row),
+        };
         creditNotes.push(row);
         return Promise.resolve(row);
+      }),
+      findUnique: jest.fn().mockImplementation(({ where }: never) => {
+        const w = where as { referenceNumber?: string; refundId?: string };
+        return Promise.resolve(
+          creditNotes.find(
+            (c) =>
+              (w.referenceNumber !== undefined &&
+                c.referenceNumber === w.referenceNumber) ||
+              (w.refundId !== undefined && c.refundId === w.refundId),
+          ) ?? null,
+        );
       }),
       findMany: jest.fn().mockResolvedValue([]),
     },
@@ -398,6 +414,35 @@ describe('SettlementRefundsService (SETTLE-3a, §8)', () => {
       INPUT({ amount: 99, evidenceRef: 'BANK-REF-OUT-5002' } as never),
     );
     expect(w.refunds[1].vatComponent).toBe(49.5);
+  });
+
+  it('RC v3.0: the issued credit note carries QN + canonical JSON + hash-from-canonical, and REPLAYS identically', async () => {
+    const w = world();
+    await w.service.recordRefund('fin-1', INPUT());
+    const note = w.creditNotes[0];
+    expect(note.referenceNumber).toMatch(
+      /^QN-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/,
+    );
+    expect(typeof note.canonicalJson).toBe('string');
+    expect(
+      w.auditRows.find((a) => a.action === 'finance.credit_note.issued'),
+    ).toBeTruthy();
+    const replay = await w.service.replayCreditNote('fin-1', note.refundId as string);
+    expect(replay).toMatchObject({
+      identical: true,
+      canonicalIdentical: true,
+      hashIdentical: true,
+      documentVersion: 'v1',
+    });
+    expect(replay.creditNoteReference).toBe(note.referenceNumber);
+    expect(
+      w.auditRows.find((a) => a.action === 'settlement.credit_note.replayed'),
+    ).toBeTruthy();
+    // Tampering the stored canonical SURFACES — never renders as authentic.
+    note.canonicalJson = '{"tampered":true}';
+    const bad = await w.service.replayCreditNote('fin-1', note.refundId as string);
+    expect(bad.identical).toBe(false);
+    expect(bad.canonicalIdentical).toBe(false);
   });
 
   it('read models: refunds+credit notes per invoice; open receivables per store', async () => {

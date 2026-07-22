@@ -129,6 +129,12 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
     opsPermission: 'finance.refunds',
   },
   {
+    // RC v3.0 — credit-note document replay (integrity + audit line).
+    method: 'replayCreditNote',
+    path: 'finance/credit-notes/:refundId/replay',
+    opsPermission: 'finance.refunds',
+  },
+  {
     method: 'financeStoreBalances',
     path: 'finance/stores',
     opsPermission: 'finance.read_payouts',

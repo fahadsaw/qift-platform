@@ -73,6 +73,16 @@ describe('reference immutability tripwire (source pins)', () => {
     ).toBe(0);
   });
 
+  it('QN: allocated ONLY by the refunds service at credit-note issuance — nowhere else', () => {
+    // 1 = the single allocateReference('QN', ...) call at issuance.
+    expect(
+      count('settlement/settlement-refunds.service.ts', "allocateReference("),
+    ).toBe(1);
+    expect(
+      count('settlement/settlement-refunds.service.ts', 'generateReference'),
+    ).toBe(0);
+  });
+
   it('settlementReference: written once at create; engine only READS it afterwards', () => {
     // 21 occurrences, all read-or-create-time: allocation const +
     // uniqueness-probe where + create data key (the ONLY write) +

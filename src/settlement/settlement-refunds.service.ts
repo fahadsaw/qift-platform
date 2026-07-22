@@ -53,7 +53,13 @@ import {
   ledgerIdempotencyKey,
 } from '../financial/financial-events';
 import { moneyToNumber, toMinor, fromMinor } from '../fees/money';
+import { allocateReference } from '../references/reference';
 import { SETTLEMENT_CLOCK, type SettlementClock } from './settlement-clock';
+import {
+  creditNoteCanonical,
+  creditNoteHash,
+  type CreditNoteFacts,
+} from './settlement-credit-note';
 import { assertItemTransition, type ItemState } from './settlement-states';
 import { APPROVAL_POLICY } from './settlement-approval-policy';
 
@@ -279,10 +285,46 @@ export class SettlementRefundsService {
                 settlementInteraction: interaction,
               },
             });
-            // FC Ch. 4.5: the credit-note DOCUMENT (merchant's leg;
-            // legal number supplied, never manufactured).
+            // FC Ch. 4.5 + RC v3.0: the credit-note DOCUMENT is
+            // FIRST-CLASS — QN reference minted at issuance (single
+            // mint site), canonical JSON stored as the source of
+            // truth, hash from those bytes only. The merchant's legal
+            // number is supplied, never manufactured.
+            const referenceNumber = await allocateReference(
+              'QN',
+              async (candidate) =>
+                Boolean(
+                  await tx.creditNote.findUnique({
+                    where: { referenceNumber: candidate },
+                    select: { id: true },
+                  }),
+                ),
+            );
+            const issuedAtIso = this.clock.now();
+            const facts: CreditNoteFacts = {
+              referenceNumber,
+              refundId: refund.id,
+              noteType: 'merchant_goods',
+              invoiceType: 'merchant_invoice',
+              invoiceId: invoice.id,
+              merchantInvoiceNumber: invoice.merchantInvoiceNumber,
+              merchantCreditNoteNumber:
+                input.merchantCreditNoteNumber?.trim() || null,
+              storeId: invoice.storeId,
+              orgId: invoice.orgId,
+              campaignId: invoice.campaignId,
+              currency: 'SAR',
+              amount,
+              vatComponent,
+              reason,
+              issuedAt: issuedAtIso.toISOString(),
+              issuedBy: actorUserId,
+              statementSettlementId: null,
+            };
+            const canonical = creditNoteCanonical(facts);
             await tx.creditNote.create({
               data: {
+                referenceNumber,
                 refundId: refund.id,
                 noteType: 'merchant_goods',
                 invoiceType: 'merchant_invoice',
@@ -297,8 +339,10 @@ export class SettlementRefundsService {
                 amount,
                 vatComponent,
                 reason,
-                issuedAt: this.clock.now(),
+                issuedAt: issuedAtIso,
                 issuedBy: actorUserId,
+                canonicalJson: canonical,
+                documentHash: creditNoteHash(facts),
               },
             });
             // The MONEY fact (§8.4): goods refund leaves safeguarding.
@@ -438,6 +482,24 @@ export class SettlementRefundsService {
       }
       return { refund: outcome.existing, replayed: true as const };
     }
+    const issuedNote = await this.prisma.creditNote.findUnique({
+      where: { refundId: outcome.refund!.id },
+      select: { referenceNumber: true },
+    });
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'finance.credit_note.issued',
+      targetType: 'store',
+      targetId: outcome.refund!.storeId,
+      metadata: {
+        creditNoteReference: issuedNote?.referenceNumber,
+        refundId: outcome.refund!.id,
+        invoiceId: outcome.refund!.invoiceId,
+        amount,
+        vatComponent: moneyToNumber(outcome.refund!.vatComponent),
+      },
+    });
     await this.audit.record({
       actorUserId,
       actorType: 'user',
@@ -476,6 +538,66 @@ export class SettlementRefundsService {
       orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
     });
     return { invoiceType, invoiceId, refunds, creditNotes };
+  }
+
+  // RC v3.0: replay a credit note — regenerate the document from its
+  // frozen facts through the pure builder and compare canonical bytes
+  // and hash. Integrity is verified BEFORE any rendering; a tampered
+  // row is surfaced, never rendered as authentic.
+  async replayCreditNote(actorUserId: string, refundId: string) {
+    if (typeof refundId !== 'string' || !refundId.trim()) {
+      throw new BadRequestException('refund_id_required');
+    }
+    const note = await this.prisma.creditNote.findUnique({
+      where: { refundId },
+    });
+    if (!note) throw new NotFoundException('credit_note_not_found');
+    const facts: CreditNoteFacts = {
+      referenceNumber: note.referenceNumber,
+      refundId: note.refundId,
+      noteType: note.noteType,
+      invoiceType: note.invoiceType,
+      invoiceId: note.invoiceId,
+      merchantInvoiceNumber: note.merchantInvoiceNumber,
+      merchantCreditNoteNumber: note.merchantCreditNoteNumber,
+      storeId: note.storeId,
+      orgId: note.orgId,
+      campaignId: note.campaignId,
+      currency: note.currency,
+      amount: moneyToNumber(note.amount),
+      vatComponent: moneyToNumber(note.vatComponent),
+      reason: note.reason,
+      issuedAt: note.issuedAt.toISOString(),
+      issuedBy: note.issuedBy,
+      statementSettlementId: note.statementSettlementId,
+    };
+    const regeneratedCanonical = creditNoteCanonical(facts);
+    const regeneratedHash = creditNoteHash(facts);
+    const canonicalIdentical = regeneratedCanonical === note.canonicalJson;
+    const hashIdentical = regeneratedHash === note.documentHash;
+    const identical = canonicalIdentical && hashIdentical;
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'settlement.credit_note.replayed',
+      targetType: 'store',
+      targetId: note.storeId,
+      metadata: {
+        creditNoteReference: note.referenceNumber,
+        refundId,
+        documentVersion: 'v1',
+        identical,
+      },
+    });
+    return {
+      creditNoteReference: note.referenceNumber,
+      documentVersion: 'v1' as const,
+      identical,
+      canonicalIdentical,
+      hashIdentical,
+      storedHash: note.documentHash,
+      regeneratedHash,
+    };
   }
 
   async openReceivables(storeId?: string) {
