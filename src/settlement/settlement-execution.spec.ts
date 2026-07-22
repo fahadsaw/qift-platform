@@ -10,6 +10,8 @@ import { SettlementExecutionService } from './settlement-execution.service';
 import { calculateSettlement } from './settlement-calculator';
 import {
   calculationHash as hashCalc,
+  canonicalJson,
+  hashCanonical,
   statementHash,
 } from './settlement-statement';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -69,6 +71,7 @@ function world(opts?: { net?: number; assembledBy?: string | null }) {
   const previews: Row[] = [];
   const remittances: Row[] = [];
   const statements: Row[] = [];
+  const replayRecords: Row[] = [];
   const ledgerRows: Row[] = [];
   const auditRows: Row[] = [];
   const clockState = { now: new Date(T0) };
@@ -217,6 +220,16 @@ function world(opts?: { net?: number; assembledBy?: string | null }) {
         );
       }),
     },
+    settlementReplayRecord: {
+      create: jest.fn().mockImplementation(({ data }: never) => {
+        const row = { id: `rpl-${++seq}`, ...(data as Row) };
+        replayRecords.push(row);
+        return Promise.resolve(row);
+      }),
+    },
+    settlementStatementSignature: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
     settlementStatementRecord: {
       create: jest.fn().mockImplementation(({ data }: never) => {
         const d = data as Row;
@@ -282,6 +295,7 @@ function world(opts?: { net?: number; assembledBy?: string | null }) {
     previews,
     remittances,
     statements,
+    replayRecords,
     ledgerRows,
     auditRows,
     clockState,
@@ -657,6 +671,64 @@ describe('SettlementExecutionService (SETTLE-2)', () => {
       w.engine.supersede('ops-1', 'stl-1', 'withdrawn'),
     ).rejects.toThrow('supersede_refused_remittance_exists');
     // And a lawfully SETTLED batch is terminal anyway.
+  });
+
+  it('HARDENING: the stored record carries the canonical bytes; hash = sha256(canonical); retrieval verifies integrity BEFORE rendering', async () => {
+    const w = world();
+    const p = await w.exec.preview('finance-2', 'stl-1');
+    await w.exec.approve('finance-2', 'stl-1', {
+      calculationHash: p.calculationHash,
+    });
+    await w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p.calculationHash));
+    const stored = w.statements[0];
+    // Req. 1+2: the canonical string IS the payload's canonical form,
+    // and the hash derives from those bytes only.
+    expect(stored.canonicalJson).toBe(canonicalJson(stored.payload));
+    expect(stored.statementHash).toBe(
+      hashCanonical(stored.canonicalJson as string),
+    );
+    // Retrieval exposes canonical bytes + (empty) signature envelopes.
+    const doc = await w.exec.statement('stl-1');
+    expect((doc as Row).canonicalJson).toBe(stored.canonicalJson);
+    expect((doc as Row).signatures).toEqual([]);
+    // Req. 5: tampering ANY representation refuses rendering.
+    (stored.payload as Row).netAmount = 999;
+    await expect(w.exec.statement('stl-1')).rejects.toThrow(
+      'statement_integrity_violation',
+    );
+  });
+
+  it('HARDENING: replay verifies integrity FIRST, persists the run with its engine version', async () => {
+    const w = world();
+    const p = await w.exec.preview('finance-2', 'stl-1');
+    await w.exec.approve('finance-2', 'stl-1', {
+      calculationHash: p.calculationHash,
+    });
+    await w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p.calculationHash));
+    const clean = await w.exec.replay('finance-2', 'stl-1');
+    expect(clean.replayEngineVersion).toBe('settle2-replay@v1');
+    expect(clean.statementIntegrityVerified).toBe(true);
+    expect(clean.statementIdentical).toBe(true);
+    // The run is a RECORDED act (append-only) with the version.
+    expect(w.replayRecords).toHaveLength(1);
+    expect(w.replayRecords[0]).toMatchObject({
+      replayEngineVersion: 'settle2-replay@v1',
+      statementIntegrityVerified: true,
+      statementIdentical: true,
+      ranBy: 'finance-2',
+    });
+    // Tamper the STORED canonical bytes: integrity fails BEFORE any
+    // comparison; the regenerated statement (frozen data) is still
+    // returned as the trustworthy rendering.
+    w.statements[0].canonicalJson = '{"tampered":true}';
+    const dirty = await w.exec.replay('finance-2', 'stl-1');
+    expect(dirty.statementIntegrityVerified).toBe(false);
+    expect(dirty.statementIdentical).toBe(false);
+    expect((dirty.statement as Row).netAmount).toBe(5750); // regenerated, trustworthy
+    expect(w.replayRecords).toHaveLength(2);
+    expect(w.replayRecords[1]).toMatchObject({
+      statementIntegrityVerified: false,
+    });
   });
 
   it('§34 replay harness: the stored statement regenerates identically; tampering surfaces', async () => {

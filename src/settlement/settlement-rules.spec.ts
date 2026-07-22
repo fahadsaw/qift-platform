@@ -27,6 +27,8 @@ import {
   calculationHash,
   canonicalJson,
   generateSettlementStatement,
+  hashCanonical,
+  signableDigest,
   statementHash,
   type FrozenBatchRecord,
 } from './settlement-statement';
@@ -584,6 +586,26 @@ describe('RULE 4 — the Settlement Statement is a constitutional, replay-identi
       './settlement-calculator',
       'crypto',
     ]);
+  });
+
+  it('HARDENING: the hash derives from the canonical JSON bytes ONLY, and signatures sign that digest', () => {
+    const stmt = generateSettlementStatement(frozenFixture(), {
+      issuedAt: '2026-07-22T10:00:00.000Z',
+    });
+    // One serialization, one digest: statementHash ≡ sha256(canonical).
+    expect(statementHash(stmt)).toBe(hashCanonical(canonicalJson(stmt)));
+    // The signature seam signs the SAME canonical digest — never the
+    // payload object or a rendering.
+    expect(signableDigest(stmt)).toBe(statementHash(stmt));
+  });
+
+  it('HARDENING: presentation layers add nothing — settlement production sources contain no PDF machinery', () => {
+    for (const name of walk(SETTLEMENT).filter(
+      (f) => !f.endsWith('.spec.ts'),
+    )) {
+      const text = read(name).toLowerCase();
+      expect({ name, hits: count(text, 'pdf') }).toEqual({ name, hits: 0 });
+    }
   });
 
   it('canonicalJson is key-order independent — the hash names the DATA, not the construction', () => {

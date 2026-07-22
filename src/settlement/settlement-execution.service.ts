@@ -60,7 +60,9 @@ import { SETTLEMENT_CLOCK, type SettlementClock } from './settlement-clock';
 import { asCurrencyCode } from './settlement-calculator';
 import {
   calculationHash,
+  canonicalJson,
   generateSettlementStatement,
+  hashCanonical,
   statementHash,
   type FrozenBatchRecord,
   type SettlementStatement,
@@ -68,6 +70,7 @@ import {
 import {
   assertExecutionBinding,
   buildExecutionPreview,
+  REPLAY_ENGINE_VERSION,
   type ExecutionApproval,
 } from './settlement-execution-binding';
 import {
@@ -422,22 +425,42 @@ export class SettlementExecutionService {
   }
 
   // ── Statement retrieval (the issued document, immutable) ──────────
+  // HARDENING req. 5: integrity is verified BEFORE the document
+  // renders — a tampered record never leaves this method as an
+  // authentic statement. The response carries the CANONICAL JSON (the
+  // source of truth every presentation layer derives from) and any
+  // accumulated signature envelopes.
   async statement(batchId: string) {
     const { frozen } = await this.engine.frozenRecord(batchId);
     const record = await this.prisma.settlementStatementRecord.findUnique({
       where: { settlementId: frozen.settlementId },
     });
     if (!record) throw new NotFoundException('statement_not_issued');
-    return record;
+    if (!this.statementIntegrityOk(record)) {
+      throw new ConflictException('statement_integrity_violation');
+    }
+    const signatures = await this.prisma.settlementStatementSignature.findMany({
+      where: { settlementId: frozen.settlementId },
+      orderBy: [{ signedAt: 'asc' }, { id: 'asc' }],
+    });
+    return { ...record, signatures };
   }
 
   // ── §34 replay harness — frozen data in, identical statement out ──
+  // HARDENING req. 4+5: integrity of the STORED record is verified
+  // FIRST (canonical bytes → hash, and payload ↔ canonical agreement);
+  // a tampered store is surfaced, never rendered as authentic — the
+  // regenerated statement (from frozen data) remains the trustworthy
+  // rendering either way. Every run is persisted with the replay
+  // engine version that produced the verdict.
   async replay(actorUserId: string, batchId: string) {
     const { frozen } = await this.engine.frozenRecord(batchId);
     const record = await this.prisma.settlementStatementRecord.findUnique({
       where: { settlementId: frozen.settlementId },
     });
     if (!record) throw new NotFoundException('statement_not_issued');
+    // Req. 5 — integrity BEFORE rendering.
+    const statementIntegrityVerified = this.statementIntegrityOk(record);
     const remittance = await this.prisma.settlementRemittance.findUnique({
       where: { settlementId: frozen.settlementId },
     });
@@ -458,7 +481,22 @@ export class SettlementExecutionService {
         : null,
     });
     const regeneratedHash = statementHash(regenerated);
-    const identical = regeneratedHash === record.statementHash;
+    const identical =
+      statementIntegrityVerified && regeneratedHash === record.statementHash;
+    // Req. 4 — the run is a RECORDED verification act with its engine
+    // version (append-only).
+    const replayRecord = await this.prisma.settlementReplayRecord.create({
+      data: {
+        settlementId: frozen.settlementId,
+        settlementReference: frozen.settlementReference,
+        replayEngineVersion: REPLAY_ENGINE_VERSION,
+        calculationReplayVerified: preview.replayVerified,
+        statementIntegrityVerified,
+        statementIdentical: identical,
+        ranBy: actorUserId,
+        ranAt: this.clock.now(),
+      },
+    });
     await this.audit.record({
       actorUserId,
       actorType: 'user',
@@ -468,16 +506,23 @@ export class SettlementExecutionService {
       metadata: {
         settlementId: frozen.settlementId,
         settlementReference: frozen.settlementReference,
+        replayEngineVersion: REPLAY_ENGINE_VERSION,
+        replayRecordId: replayRecord.id,
         calculationReplayVerified: preview.replayVerified,
+        statementIntegrityVerified,
         statementIdentical: identical,
       },
     });
     return {
       settlementReference: frozen.settlementReference,
+      replayEngineVersion: REPLAY_ENGINE_VERSION,
       calculationReplayVerified: preview.replayVerified,
+      statementIntegrityVerified,
       statementIdentical: identical,
       storedStatementHash: record.statementHash,
       regeneratedStatementHash: regeneratedHash,
+      // The REGENERATED statement — always derived from frozen data,
+      // trustworthy even when the stored record is not.
       statement: regenerated as SettlementStatement,
     };
   }
@@ -593,6 +638,10 @@ export class SettlementExecutionService {
         amount: moneyToNumber(remittance.amount),
       },
     });
+    // HARDENING req. 1+2: the canonical string is stored as the source
+    // of truth, and the hash is computed FROM THOSE BYTES — one
+    // serialization, one digest, stored together.
+    const canonical = canonicalJson(statement);
     try {
       return await this.prisma.settlementStatementRecord.create({
         data: {
@@ -601,7 +650,8 @@ export class SettlementExecutionService {
           storeId: frozen.storeId,
           statementVersion: statement.statementVersion,
           payload: statement as never,
-          statementHash: statementHash(statement),
+          canonicalJson: canonical,
+          statementHash: hashCanonical(canonical),
           issuedAt,
         },
       });
@@ -614,6 +664,21 @@ export class SettlementExecutionService {
       }
       throw e;
     }
+  }
+
+  // HARDENING req. 5: a stored statement is authentic only when the
+  // stored canonical bytes hash to the stored digest AND the payload
+  // re-canonicalizes to those exact bytes — any drift between the
+  // three representations is an integrity violation.
+  private statementIntegrityOk(record: {
+    payload: unknown;
+    canonicalJson: string;
+    statementHash: string;
+  }): boolean {
+    return (
+      hashCanonical(record.canonicalJson) === record.statementHash &&
+      canonicalJson(record.payload) === record.canonicalJson
+    );
   }
 
   // §32.3 anti-fragmentation: Σ OTHER remittances (same store,

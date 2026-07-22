@@ -42,6 +42,18 @@ import {
   type SettlementStatement,
 } from './settlement-statement';
 
+// STATEMENT HARDENING (req. 4): the replay harness carries a VERSION.
+// Every §34 replay run stores and exposes the engine version that
+// produced its verdict, so a verification recorded years ago stays
+// interpretable when the harness evolves. Semantics of v1:
+//   calculation — recompute the frozen composition through the ONE
+//   calculator and compare canonical bytes to the frozen snapshot;
+//   statement — verify stored integrity (canonical bytes → hash),
+//   then regenerate from frozen data + stored facts and compare
+//   hashes. A change to EITHER semantic is a new version, recorded
+//   here with its predecessor's meaning preserved in history.
+export const REPLAY_ENGINE_VERSION = 'settle2-replay@v1';
+
 export type ExecutionPreview = {
   preview: true;
   settlementId: string;

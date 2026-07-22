@@ -82,6 +82,7 @@ describe('Track C PR 3 — end-to-end financial walkthrough (S01: assembly → a
     const previewActs: Row[] = [];
     const remittances: Row[] = [];
     const statements: Row[] = [];
+    const replayRecords: Row[] = [];
     const auditRows: Row[] = [];
 
     const prisma = {
@@ -184,6 +185,16 @@ describe('Track C PR 3 — end-to-end financial walkthrough (S01: assembly → a
         findUnique: jest
           .fn()
           .mockImplementation(() => Promise.resolve(remittances[0] ?? null)),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      settlementReplayRecord: {
+        create: jest.fn().mockImplementation(({ data }: never) => {
+          const row = { id: `rpl-${++seq}`, ...(data as Row) };
+          replayRecords.push(row);
+          return Promise.resolve(row);
+        }),
+      },
+      settlementStatementSignature: {
         findMany: jest.fn().mockResolvedValue([]),
       },
       settlementStatementRecord: {

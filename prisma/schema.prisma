@@ -2953,9 +2953,55 @@ model SettlementStatementRecord {
   storeId             String
   statementVersion    String
   payload             Json
+  // STATEMENT HARDENING (Track C PR 4): the canonical JSON string —
+  // THE source of truth. The hash is computed from these exact bytes
+  // and nothing else; every presentation layer (PDF, HTML, export)
+  // derives from this string and adds no data. NOT NULL on an empty
+  // table by construction: statements cannot issue before the Ch. 17.4
+  // gate opens, and this migration ships before any attestation.
+  canonicalJson       String
   statementHash       String
   issuedAt            DateTime
   createdAt           DateTime @default(now())
 
   @@index([storeId, issuedAt])
+}
+
+// Future digital signatures over the statement (HARDENING req. 3).
+// Append-only: each signature signs the CANONICAL DIGEST
+// (statementHash — sha256 of the canonical JSON bytes), never the
+// payload object or a rendering. Multiple signers per statement
+// (Qift seal, future regulator/e-invoicing seals) accumulate as rows;
+// a signature is never edited or deleted.
+model SettlementStatementSignature {
+  id            String   @id @default(cuid())
+  settlementId  String
+  statementHash String // the digest that was signed (binds to exact bytes)
+  algorithm     String // e.g. 'ed25519', 'rsa-pss-sha256'
+  keyId         String // Ch. 14-recorded signing-key identity
+  signature     String // base64
+  signedBy      String // actor or system identity
+  signedAt      DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([settlementId])
+}
+
+// §34 replay run log (HARDENING req. 4/5): every replay is a recorded
+// verification act carrying the REPLAY ENGINE VERSION that produced
+// it, so a verdict rendered years ago remains interpretable when the
+// harness evolves. Append-only.
+model SettlementReplayRecord {
+  id                          String   @id @default(cuid())
+  settlementId                String
+  settlementReference         String
+  replayEngineVersion         String
+  calculationReplayVerified   Boolean
+  statementIntegrityVerified  Boolean
+  statementIdentical          Boolean
+  ranBy                       String
+  ranAt                       DateTime
+  createdAt                   DateTime @default(now())
+
+  @@index([settlementId, ranAt])
 }
