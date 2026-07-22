@@ -367,7 +367,15 @@ export class SettlementRefundsService {
                   invoiceId: invoice.id,
                   invoiceNumber: invoice.merchantInvoiceNumber,
                   evidenceRef,
-                  account: 'safeguarding',
+                  // §13.3: pre-settlement goods refunds return client
+                  // money from SAFEGUARDING; post-settlement the
+                  // money already left to the merchant — Qift FRONTS
+                  // the refund from OPERATING pending §7.4 recovery
+                  // (the recovery draw repays operating).
+                  account:
+                    interaction === 'receivable_accrued'
+                      ? 'operating'
+                      : 'safeguarding',
                   passThrough: true,
                   settlementInteraction: interaction,
                   vatComponent,

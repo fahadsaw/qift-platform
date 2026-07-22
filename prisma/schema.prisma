@@ -2797,6 +2797,12 @@ model SettlementBatch {
   // recorded at assembly, immutable. Approvers must differ from it;
   // nullable only for pre-SETTLE-2 rows — approval refuses null.
   assembledBy         String?
+  // §7.4 recovery allocation FROZEN at assembly (SETTLE-3b): the
+  // per-receivable offsets behind the §4 receivableRecovery line —
+  // [{receivableId, occurrenceId, amount}]. Part of the §34 replay
+  // record (replay recomputes the calculator WITH these adjustments).
+  // Create-time frozen — never rewritten.
+  recoveryAllocation  Json?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -3014,6 +3020,11 @@ model SettlementReceivable {
   state                    String    @default("open")
   // Recovered-so-far (§7.4 offset; SETTLE-3b writes it).
   amountRecovered          Decimal   @default(0) @db.Decimal(12, 2)
+  // Staged by an unexecuted batch (SETTLE-3b): guarded write at
+  // assembly (double-staging impossible), cleared on supersession,
+  // consumed at execution. NOT a lifecycle state — staging is a
+  // binding; recovery is the state change.
+  stagedBySettlementId     String?
   accruedAt                DateTime
   recoveredAt              DateTime?
   recoveredBySettlementId  String?

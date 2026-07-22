@@ -59,6 +59,10 @@ export const FINANCIAL_EVENTS = {
   // Post-settlement clawback (§2 Reversed): the merchant owes Qift —
   // anchored on refundId; recovery events land with SETTLE-3b.
   MERCHANT_RECEIVABLE_ACCRUED: 'merchant.receivable.accrued',
+  // §7.4 offset recovery (SETTLE-3b): anchored on
+  // `${receivableId}:${settlementId}` so partial recoveries across
+  // batches never collide. The §13.3(a) safeguarding→operating draw.
+  MERCHANT_RECEIVABLE_RECOVERED: 'merchant.receivable.recovered',
   CHARGEBACK_CREATED: 'chargeback.created',
 } as const;
 

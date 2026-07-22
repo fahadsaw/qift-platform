@@ -28,6 +28,7 @@ describe('financial event taxonomy (FIN-4)', () => {
       // for the §2 Reversed flow, anchored on refundId.
       REFUND_PAID: 'refund.paid',
       MERCHANT_RECEIVABLE_ACCRUED: 'merchant.receivable.accrued',
+      MERCHANT_RECEIVABLE_RECOVERED: 'merchant.receivable.recovered',
       CHARGEBACK_CREATED: 'chargeback.created',
     });
   });

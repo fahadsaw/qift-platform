@@ -104,6 +104,15 @@ export function buildExecutionPreview(
       amount: c.amount,
       currency: c.currency,
     })),
+    {
+      // §7.4/§34: the frozen allocation IS a calculation input — the
+      // replay recomputes the recovery line from it, never from live
+      // receivable rows.
+      receivableRecovery: (frozen.recoveryAllocation ?? []).reduce(
+        (t, r) => t + r.amount,
+        0,
+      ),
+    },
   );
   const replayVerified =
     canonicalJson(recomputed) === canonicalJson(frozen.calculationSnapshot);

@@ -129,6 +129,11 @@ describe('Track C PR 1 — end-to-end financial walkthrough (S01 numbers)', () =
             { id: 'camp-eid', referenceNumber: REFERENCES.campaign },
           ]),
       },
+      settlementReceivable: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
       settlementBatch: {
         findUnique: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockImplementation(({ data }: never) => {

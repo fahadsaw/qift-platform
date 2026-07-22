@@ -86,16 +86,17 @@ describe('reference immutability tripwire (source pins)', () => {
   it('settlementReference: written once at create; engine only READS it afterwards', () => {
     // 21 occurrences, all read-or-create-time: allocation const +
     // uniqueness-probe where + create data key (the ONLY write) +
-    // twenty READS — assembly marker metadata + assembly audit + the
+    // twenty-two READS — assembly marker metadata + assembly audit + the
     // batch.settlementReference reads in markFailed/retry/holdBatch/
     // supersede marker/supersede audit, and (SETTLE-2) the
     // markSettled remittance-row denormalization (key + read — a COPY
     // into the immutable remittance record, RC 14.4, never a rewrite
     // of the batch column) + completed-marker metadata + markSettled
-    // audit + the frozenRecord read seam. No update path writes it —
+    // audit + the frozenRecord read seam + (SETTLE-3b) the recovery-
+    // posting metadata (key + read). No update path writes it —
     // the write-once law (RC Ch. 8.1/10.2 replacement pin).
     expect(
       count('settlement/settlement-engine.service.ts', 'settlementReference'),
-    ).toBe(23);
+    ).toBe(25);
   });
 });

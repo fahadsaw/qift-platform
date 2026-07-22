@@ -140,6 +140,11 @@ describe('Track C PR 3 — end-to-end financial walkthrough (S01: assembly → a
           return Promise.resolve({ count });
         }),
       },
+      settlementReceivable: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
       settlementBatch: {
         findUnique: jest.fn().mockImplementation(({ where }: never) => {
           const w = where as { id?: string; settlementReference?: string };
