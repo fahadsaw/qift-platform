@@ -367,6 +367,13 @@ export class SettlementExecutionService {
       level: r.requiredLevel,
       approvedAt: r.approvedAt.toISOString(),
     }));
+    if (active.length === 0 && rows.length > 0) {
+      // Founder error contract: approvals existed but ALL lapsed the
+      // §31.3 TTL — a distinct recoverable condition (obtain fresh
+      // approval), reported as its own canonical 409. The acceptance
+      // rule is unchanged: lapsed approvals never count.
+      throw new ConflictException('settlement_approval_expired');
+    }
     assertExecutionBinding(frozen, preview, approvals, actorUserId);
 
     // §32 level at EXECUTION time (authoritative). Anti-fragmentation:
@@ -532,6 +539,12 @@ export class SettlementExecutionService {
       level: r.requiredLevel,
       approvedAt: r.approvedAt.toISOString(),
     }));
+    if (active.length === 0 && rows.length > 0) {
+      // Founder error contract: same §31.3 TTL distinction as
+      // execute() — all approvals lapsed ⇒ canonical 409, acceptance
+      // rule unchanged.
+      throw new ConflictException('settlement_approval_expired');
+    }
     // Executor ∉ approvers (final approver never closes), frozen ≡
     // preview ≡ approvals, §34 verified — the SAME gate as execute.
     assertExecutionBinding(frozen, preview, approvals, actorUserId);

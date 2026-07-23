@@ -445,11 +445,14 @@ describe('SettlementExecutionService (SETTLE-2)', () => {
     await expect(
       w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p.calculationHash)),
     ).rejects.toThrow('preview_act_required');
-    // Fresh preview, but the approval is still lapsed → refused.
+    // Fresh preview, but the approval is still lapsed → refused with
+    // the founder error contract's DISTINCT expired code (409): the
+    // acceptance rule is unchanged — lapsed approvals never count —
+    // only the refusal now names the recovery (obtain fresh approval).
     await w.exec.preview('finance-2', 'stl-1');
     await expect(
       w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p.calculationHash)),
-    ).rejects.toThrow('illegal_execution_binding:approval_required');
+    ).rejects.toThrow('settlement_approval_expired');
     // §31.5 per-round law: the SAME approver recasts the lapsed vote
     // as a NEW immutable row, and execution proceeds.
     await w.exec.approve('finance-2', 'stl-1', {
@@ -759,5 +762,68 @@ describe('SettlementExecutionService (SETTLE-2)', () => {
     await expect(w2.exec.replay('finance-2', 'stl-1')).rejects.toThrow(
       'statement_not_issued',
     );
+  });
+
+  // ── Founder error contract (finops-errors@v1): the §31.3 lapsed
+  // lane reports as its own 409, and refusals mutate NOTHING. ────────
+  it('error contract: no approvals ever → approval missing; all lapsed → settlement_approval_expired (both execute and close lanes)', async () => {
+    const w = world();
+    const p = await w.exec.preview('finance-2', 'stl-1');
+    // No approval rows at all → the binding's approval_required lane
+    // (mapped to settlement_approval_missing at the HTTP boundary).
+    await expect(
+      w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p.calculationHash)),
+    ).rejects.toThrow('illegal_execution_binding:approval_required');
+    // A vote exists but lapses the TTL → the DISTINCT expired code.
+    await w.exec.approve('finance-2', 'stl-1', {
+      calculationHash: p.calculationHash,
+    });
+    w.clockState.now = new Date('2026-07-25T09:00:01.000Z'); // 72h + 1s
+    const p2 = await w.exec.preview('finance-2', 'stl-1');
+    await expect(
+      w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p2.calculationHash)),
+    ).rejects.toThrow('settlement_approval_expired');
+
+    // Same distinction on the §26 close lane.
+    const wz = world();
+    (wz.batches.get('stl-1')!.calculationSnapshot as Row).netAmount = 0;
+    (wz.batches.get('stl-1')! as Row).netAmount = 0;
+    const pz = await wz.exec.preview('finance-2', 'stl-1');
+    await wz.exec.approve('finance-2', 'stl-1', {
+      calculationHash: pz.calculationHash,
+    });
+    wz.clockState.now = new Date('2026-07-25T09:00:01.000Z');
+    await wz.exec.preview('finance-2', 'stl-1');
+    await expect(
+      wz.exec.closeZeroNet('proposer-1', 'stl-1', {
+        previewHash: pz.calculationHash,
+      }),
+    ).rejects.toThrow('settlement_approval_expired');
+  });
+
+  it('error contract: refusals mutate nothing — no remittance, no statement, no ledger posting, batch still ready', async () => {
+    const w = world();
+    const p = await w.exec.preview('finance-2', 'stl-1');
+    const snapshot = () => ({
+      remittances: w.remittances.length,
+      statements: w.statements.length,
+      ledger: w.ledgerRows.length,
+      status: w.batches.get('stl-1')!.status,
+    });
+    const before = snapshot();
+    // One refusal from each governed class:
+    await expect(
+      w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p.calculationHash)),
+    ).rejects.toThrow('illegal_execution_binding:approval_required');
+    await expect(
+      w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT('deadbeef')),
+    ).rejects.toThrow('preview_hash_mismatch');
+    await w.exec.approve('finance-2', 'stl-1', {
+      calculationHash: p.calculationHash,
+    });
+    await expect(
+      w.exec.execute('finance-2', 'stl-1', EXEC_INPUT(p.calculationHash)),
+    ).rejects.toThrow('illegal_execution_binding:executor_cannot_approve');
+    expect(snapshot()).toEqual({ ...before, status: 'ready' });
   });
 });

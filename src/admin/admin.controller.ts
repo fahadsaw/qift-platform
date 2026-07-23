@@ -7,8 +7,10 @@ import {
   Post,
   Query,
   Req,
+  UseFilters,
   UseGuards,
 } from '@nestjs/common';
+import { FinanceOpsErrorContractFilter } from '../financial/finance-ops-error-contract.filter';
 import { AdminService } from './admin.service';
 import {
   VatFactsService,
@@ -49,6 +51,11 @@ type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 // layer one decorator at a time.
 @Controller('admin')
 @UseGuards(JwtAuthGuard, AdminGuard, OpsRoleGuard)
+// Finance Ops error contract (founder closure): known refusals carry
+// stable statuses + canonical `code`s; §33/§34 binding violations
+// surface as 409 business conflicts instead of 500s. Presentation
+// only — refusal conditions stay in the services.
+@UseFilters(FinanceOpsErrorContractFilter)
 export class AdminController {
   constructor(
     private readonly admin: AdminService,
