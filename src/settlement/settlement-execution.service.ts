@@ -66,6 +66,7 @@ import {
   statementHash,
   type FrozenBatchRecord,
   type SettlementStatement,
+  type ZeroNetClosureFacts,
 } from './settlement-statement';
 import {
   creditNoteCanonical,
@@ -190,10 +191,7 @@ export class SettlementExecutionService {
       throw new ConflictException('already_approved_by_user');
     }
     const requirement = requiredExecutionApproval(
-      toMinor(
-        frozen.calculationSnapshot.netAmount,
-        asCurrencyCode(frozen.currency),
-      ),
+      this.authorizationBasisMinor(frozen),
       await this.dayAggregateMinor(
         frozen.settlementId,
         frozen.storeId,
@@ -261,10 +259,15 @@ export class SettlementExecutionService {
     }
     const currency = asCurrencyCode(frozen.currency);
     const netMinor = toMinor(frozen.calculationSnapshot.netAmount, currency);
-    if (netMinor <= 0) {
-      // Zero-net batches issue statements without a bank movement
-      // (§4) and negative nets are the receivable flow — both are a
-      // tracked later lane, never a fabricated transfer.
+    if (netMinor === 0) {
+      // §26: a zero-net batch closes through closeZeroNet — the
+      // statement-only lane. A bank execution against it would
+      // fabricate a movement.
+      throw new BadRequestException('execution_use_zero_net_close');
+    }
+    if (netMinor < 0) {
+      // Negative nets are the receivable flow — a tracked later lane,
+      // never a fabricated transfer.
       throw new BadRequestException('execution_requires_positive_net');
     }
     if (status === 'settled') {
@@ -371,7 +374,7 @@ export class SettlementExecutionService {
       ),
     ]);
     const requirement = requiredExecutionApproval(
-      netMinor,
+      this.authorizationBasisMinor(frozen),
       Math.max(aggValueDay, aggRecordingDay),
     );
     if (approvals.length < requirement.approvalsNeeded) {
@@ -429,6 +432,151 @@ export class SettlementExecutionService {
     });
   }
 
+  // ── §26 statement-only close (Lane 2 PR 2) ────────────────────────
+  // Preview → Approval → Close on the SAME frozen calculation and the
+  // SAME RULE 6 binding gate as bank execution — no independent
+  // calculation, executor ∉ approvers — but the terminal act creates
+  // NO remittance, requests NO bank evidence, posts NO cash movement.
+  // AUTHORIZATION LEVEL (founder mandate, explained): §32.1 measures
+  // the financial magnitude of the ACTION. A zero-net close moves no
+  // cash, but it EXTINGUISHES the merchant's gross payable position
+  // against the consumed receivable recovery (§26: the statement is a
+  // real settlement act). The basis is therefore the extinguished
+  // GROSS (= the recovery consumed), never the zero cash figure — a
+  // large position can never be extinguished under a lower band than
+  // remitting it would have required. The §32.3 day aggregate
+  // includes prior zero-net closes at their extinguished magnitude
+  // (closedAt basis) alongside remittances, so fragmentation across
+  // closes cannot lower the band either.
+  async closeZeroNet(
+    actorUserId: string,
+    batchId: string,
+    input: { previewHash: string },
+  ) {
+    this.assertGatesOpen(); // Ch. 17.4: positions may not close either
+    const { frozen, status, assembledBy, closureType, closedAt } =
+      await this.engine.frozenRecord(batchId);
+    const currency = asCurrencyCode(frozen.currency);
+    const netMinor = toMinor(frozen.calculationSnapshot.netAmount, currency);
+    if (status === 'settled') {
+      if (closureType === 'zero_net_no_transfer' && closedAt) {
+        // §18.2 completion lane: the close happened — finish the
+        // statement tail idempotently, never re-litigate approvals.
+        return this.completeChainZeroNet(actorUserId, frozen, closedAt, {
+          healed: true,
+          proposer: assembledBy,
+          approvedBy: null,
+        });
+      }
+      throw new ConflictException('settlement_already_remitted');
+    }
+    if (status !== 'ready') {
+      throw new BadRequestException(`execution_requires_ready:${status}`);
+    }
+    // §26 exact-zero law: integer minor units in the batch currency's
+    // exponent; no tolerance, no float comparison. ±1 minor refuses.
+    if (netMinor !== 0) {
+      throw new ConflictException('zero_net_close_requires_exact_zero');
+    }
+
+    // RULE 6 gate — identical to bank execution.
+    const preview = buildExecutionPreview(frozen, {
+      asOf: this.clock.now().toISOString(),
+    });
+    if (input.previewHash !== preview.calculationHash) {
+      throw new ConflictException('preview_hash_mismatch');
+    }
+    const nowMs = this.clock.now().getTime();
+    const ttlMs = APPROVAL_POLICY.approvalTtlHours * HOUR_MS;
+    const previewActs = await this.prisma.settlementExecutionPreview.findMany({
+      where: {
+        settlementId: frozen.settlementId,
+        calculationHash: preview.calculationHash,
+      },
+      select: { previewedAt: true },
+    });
+    if (!previewActs.some((p) => nowMs - p.previewedAt.getTime() <= ttlMs)) {
+      throw new ConflictException('preview_act_required');
+    }
+    const rows = await this.prisma.settlementApproval.findMany({
+      where: { settlementId: frozen.settlementId },
+      orderBy: [{ approvedAt: 'asc' }, { id: 'asc' }],
+    });
+    const latestByApprover = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) latestByApprover.set(r.approvedBy, r);
+    const active = [...latestByApprover.values()].filter(
+      (r) => nowMs - r.approvedAt.getTime() <= ttlMs,
+    );
+    const approvals: ExecutionApproval[] = active.map((r) => ({
+      settlementId: r.settlementId,
+      settlementReference: r.settlementReference,
+      calculationHash: r.calculationHash,
+      approvedBy: r.approvedBy,
+      level: r.requiredLevel,
+      approvedAt: r.approvedAt.toISOString(),
+    }));
+    // Executor ∉ approvers (final approver never closes), frozen ≡
+    // preview ≡ approvals, §34 verified — the SAME gate as execute.
+    assertExecutionBinding(frozen, preview, approvals, actorUserId);
+
+    // §32 level on the EXTINGUISHED GROSS; aggregate on the recording
+    // day (there is no bank value date — nothing moved).
+    const agg = await this.dayAggregateMinor(
+      frozen.settlementId,
+      frozen.storeId,
+      frozen.currency,
+      this.clock.now(),
+      'createdAt',
+    );
+    const requirement = requiredExecutionApproval(
+      this.authorizationBasisMinor(frozen),
+      agg,
+    );
+    if (approvals.length < requirement.approvalsNeeded) {
+      throw new ConflictException('insufficient_approvals');
+    }
+    if (requirement.seniorRequired) {
+      const seniors = new Set(
+        (process.env[SENIOR_ENV] ?? '')
+          .split(',')
+          .map((v) => v.trim())
+          .filter(Boolean),
+      );
+      if (!approvals.some((x) => seniors.has(x.approvedBy))) {
+        throw new ConflictException('senior_approval_required');
+      }
+    }
+
+    // §33.3 drift check — every frozen item still ready and bound.
+    const items = await this.engine.batchItems(batchId);
+    const ready = new Map(items.map((i) => [i.id, i.state]));
+    for (const co of frozen.composition) {
+      if (ready.get(co.itemId) !== 'ready') {
+        throw new ConflictException('batch_drifted');
+      }
+    }
+
+    // The atomic §26 terminal act (engine): batch + items + recovery
+    // consumption + completed marker, NO remittance. Concurrent
+    // closers: one wins the guarded transition; the loser replays
+    // into the idempotent completion tail — ONE close, ONE statement.
+    const closedRes = await this.engine.markSettledZeroNet(
+      actorUserId,
+      batchId,
+    );
+    const stampedClosedAt = (closedRes.batch as { closedAt: Date | null })
+      .closedAt;
+    if (!stampedClosedAt) {
+      throw new ConflictException('zero_net_close_state_missing');
+    }
+    return this.completeChainZeroNet(actorUserId, frozen, stampedClosedAt, {
+      healed: false,
+      proposer: assembledBy,
+      approvedBy: approvals.map((x) => x.approvedBy),
+      requirement,
+    });
+  }
+
   // ── Statement retrieval (the issued document, immutable) ──────────
   // HARDENING req. 5: integrity is verified BEFORE the document
   // renders — a tampered record never leaves this method as an
@@ -474,6 +622,11 @@ export class SettlementExecutionService {
       asOf: record.issuedAt.toISOString(),
     });
     // ...and regenerate the statement from frozen data + STORED facts.
+    // §26 statements regenerate from the STORED closure facts (the
+    // payload's closure block) — same law as remittance evidence.
+    const storedClosure = (
+      record.payload as { closure?: ZeroNetClosureFacts & Record<string, unknown> }
+    )?.closure;
     const regenerated = generateSettlementStatement(frozen, {
       issuedAt: record.issuedAt.toISOString(),
       remittance: remittance
@@ -482,6 +635,15 @@ export class SettlementExecutionService {
             bankTransferReference: remittance.bankTransferReference,
             executedAt: remittance.executedAt.toISOString(),
             amount: moneyToNumber(remittance.amount),
+          }
+        : null,
+      closure: storedClosure
+        ? {
+            closureType: 'ZERO_NET_NO_TRANSFER',
+            closedAt: String(storedClosure.closedAt),
+            issuedUnderReplayEngine: String(
+              storedClosure.issuedUnderReplayEngine,
+            ),
           }
         : null,
     });
@@ -615,6 +777,119 @@ export class SettlementExecutionService {
       remittance,
       statement: statementRecord,
     };
+  }
+
+  // The §26 completion tail: NO merchant.remittance.paid posting —
+  // nothing moved. Statement (v2, closure block, the explicit
+  // no-transfer text) + credit-note attachment + evidence-chain
+  // audit; every step occurrence-anchored and idempotent.
+  private async completeChainZeroNet(
+    actorUserId: string,
+    frozen: FrozenBatchRecord,
+    closedAt: Date,
+    trail: {
+      healed: boolean;
+      proposer: string | null;
+      approvedBy: string[] | null;
+      requirement?: { level: number; policyVersion: string };
+    },
+  ) {
+    const statementRecord = await this.ensureStatementZeroNet(
+      frozen,
+      closedAt,
+    );
+    await this.attachStatementToCreditNotes(actorUserId, frozen);
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: trail.healed
+        ? 'settlement.zero_net_close.healed'
+        : 'settlement.batch.closed_zero_net_statement',
+      targetType: 'store',
+      targetId: frozen.storeId,
+      metadata: {
+        settlementId: frozen.settlementId,
+        settlementReference: frozen.settlementReference,
+        closureType: 'zero_net_no_transfer',
+        noTransfer: true,
+        netAmount: frozen.calculationSnapshot.netAmount,
+        currency: frozen.currency,
+        closedBy: actorUserId,
+        proposer: trail.proposer,
+        ...(trail.approvedBy ? { approvedBy: trail.approvedBy } : {}),
+        ...(trail.requirement
+          ? {
+              requiredLevel: trail.requirement.level,
+              policyVersion: trail.requirement.policyVersion,
+            }
+          : {}),
+        statementHash: statementRecord?.statementHash,
+      },
+    });
+    return {
+      settlementReference: frozen.settlementReference,
+      remittance: null,
+      closureType: 'zero_net_no_transfer' as const,
+      statement: statementRecord,
+    };
+  }
+
+  private async ensureStatementZeroNet(
+    frozen: FrozenBatchRecord,
+    closedAt: Date,
+  ) {
+    const issuedAt = this.clock.now();
+    // The closure facts are STORED facts of the terminal act — the
+    // engine-stamped closedAt travels here through the engine seam
+    // (RULE 2 perimeter: no direct batch access in this service), so
+    // a healed re-issue reproduces the identical statement.
+    const closure: ZeroNetClosureFacts = {
+      closureType: 'ZERO_NET_NO_TRANSFER',
+      closedAt: closedAt.toISOString(),
+      issuedUnderReplayEngine: REPLAY_ENGINE_VERSION,
+    };
+    const statement = generateSettlementStatement(frozen, {
+      issuedAt: issuedAt.toISOString(),
+      remittance: null,
+      closure,
+    });
+    const canonical = canonicalJson(statement);
+    try {
+      return await this.prisma.settlementStatementRecord.create({
+        data: {
+          settlementId: frozen.settlementId,
+          settlementReference: frozen.settlementReference,
+          storeId: frozen.storeId,
+          statementVersion: statement.statementVersion,
+          payload: statement as never,
+          canonicalJson: canonical,
+          statementHash: hashCanonical(canonical),
+          issuedAt,
+        },
+      });
+    } catch (e) {
+      if ((e as { code?: string })?.code === 'P2002') {
+        // Already issued — immutable; ONE statement per batch, ever.
+        return this.prisma.settlementStatementRecord.findUnique({
+          where: { settlementId: frozen.settlementId },
+        });
+      }
+      throw e;
+    }
+  }
+
+  // §32.1 basis: the financial magnitude of the action. Bank
+  // execution: the net moved. Zero-net close: the extinguished GROSS
+  // (see closeZeroNet doc) — never the zero cash figure.
+  private authorizationBasisMinor(frozen: FrozenBatchRecord): number {
+    const currency = asCurrencyCode(frozen.currency);
+    const netMinor = toMinor(frozen.calculationSnapshot.netAmount, currency);
+    if (netMinor !== 0) return netMinor;
+    const lines = frozen.calculationSnapshot.lines as unknown as Record<
+      string,
+      number
+    >;
+    return toMinor(lines.merchantGross ?? 0, currency);
   }
 
   private assertRemittanceIdentity(
@@ -804,10 +1079,23 @@ export class SettlementExecutionService {
       },
       select: { amount: true },
     });
+    // §26/§32.3: zero-net closes carry NO remittance but extinguish
+    // real positions — they contribute their GROSS at their closedAt
+    // (recording instant; a no-transfer close has no bank value date)
+    // so fragmentation across statement-only closes cannot lower the
+    // band any more than fragmented transfers can. Read through the
+    // ENGINE seam (RULE 2 perimeter).
+    const zeroNetMinor = await this.engine.zeroNetClosedGrossMinor(
+      ownSettlementId,
+      storeId,
+      currency,
+      dayStart,
+      dayEnd,
+    );
     const code = asCurrencyCode(currency);
-    return rows.reduce(
-      (s, r) => s + toMinor(moneyToNumber(r.amount), code),
-      0,
+    return (
+      rows.reduce((s, r) => s + toMinor(moneyToNumber(r.amount), code), 0) +
+      zeroNetMinor
     );
   }
 

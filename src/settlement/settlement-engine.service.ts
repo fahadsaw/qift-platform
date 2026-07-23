@@ -160,14 +160,12 @@ export class SettlementEngineService {
     const calculation = calculateSettlement(items.map(toCalculatorInput), {
       receivableRecovery: recovery.total,
     });
-    if (calculation.netAmount <= 0) {
-      // §26 blesses zero-net batches WITH statements — but the
-      // statement-only close lane has not shipped. Until it does,
-      // minting an approvable-yet-unexecutable batch (staged
-      // receivables, bound items, no lawful exit but supersession)
-      // would wedge the store's pipeline (review finding 1). Simulate
-      // still shows the honest zero-net picture; assembly refuses.
-      throw new BadRequestException('settlement_zero_net_deferred');
+    if (toMinor(calculation.netAmount, asCurrencyCode(calculation.currency)) < 0) {
+      // NEGATIVE net is the receivable flow (§4: a negative position
+      // moves nothing; recovery continues in later batches) — still a
+      // deferred lane. ZERO net now assembles: the §26 statement-only
+      // close (Lane 2 PR 2) is its lawful exit.
+      throw new BadRequestException('settlement_negative_net_deferred');
     }
 
     // §34: freeze composition + calculation AT assembly. These JSON
@@ -548,13 +546,18 @@ export class SettlementEngineService {
   ) {
     const batch = await this.loadBatch(batchId);
     if (batch.status === 'settled') {
+      if (batch.closureType === 'zero_net_no_transfer') {
+        // §26: this batch closed WITHOUT a transfer — a bank-lane
+        // execution against it is fabricating a movement. Refuse.
+        throw new ConflictException('settlement_closed_zero_net');
+      }
       // Idempotent re-run: the recorded movement stands.
       const remittance = await this.prisma.settlementRemittance.findUnique({
         where: { settlementId: batchId },
       });
       if (!remittance) {
-        // Settled without a remittance cannot exist under this
-        // atomicity — if seen, it is a §18.3 incident for repair.
+        // Settled without a remittance AND without a §26 closure
+        // cannot exist under this atomicity — §18.3 incident.
         throw new ConflictException('settled_without_remittance');
       }
       return { batch, remittance, replayed: true as const };
@@ -566,7 +569,13 @@ export class SettlementEngineService {
     const remittance = await this.prisma.$transaction(async (tx) => {
       const closed = await tx.settlementBatch.updateMany({
         where: { id: batchId, status: 'ready' },
-        data: { status: 'settled' },
+        // closureType/closedAt: HOW the terminal state was reached
+        // (SC §26 law) — written once, atomically with the close.
+        data: {
+          status: 'settled',
+          closureType: 'remitted',
+          closedAt: this.clock.now(),
+        },
       });
       if (closed.count !== 1) {
         throw new ConflictException('settlement_batch_contended');
@@ -716,6 +725,174 @@ export class SettlementEngineService {
     };
   }
 
+  // ── §26 statement-only close (Lane 2 PR 2) ────────────────────────
+  // The zero-net terminal transition: batch + items settle, staged
+  // receivable recoveries CONSUME — atomically, in ONE transaction —
+  // and NO remittance row, NO bank reference, NO cash-movement claim
+  // is created. The §13.3(a) safeguarding→operating draw has NOT
+  // physically happened at close: the recovery postings here carry
+  // internalTransferDue (a position fact), never accountFrom/To (a
+  // cash claim). The statement (issued by the execution service in
+  // the completion tail) is the sole instrument of closure.
+  async markSettledZeroNet(actorUserId: string, batchId: string) {
+    const batch = await this.loadBatch(batchId);
+    if (batch.status === 'settled') {
+      if (batch.closureType === 'zero_net_no_transfer') {
+        // Idempotent re-run / concurrent-close loser: the close
+        // stands; the caller finishes the statement tail.
+        return { batch, replayed: true as const };
+      }
+      // A REMITTED batch can never be re-closed as zero-net.
+      throw new ConflictException('settlement_already_remitted');
+    }
+    assertBatchTransition(batch.status as BatchState, 'settled');
+    // §26 exact-zero law: integer minor units, no tolerance.
+    const code = asCurrencyCode(batch.currency);
+    if (toMinor(moneyToNumber(batch.netAmount), code) !== 0) {
+      throw new ConflictException('zero_net_close_requires_exact_zero');
+    }
+    const memberIds = (
+      batch.composition as Array<{ itemId: string }>
+    ).map((c) => c.itemId);
+    const closedAt = this.clock.now();
+    await this.prisma.$transaction(async (tx) => {
+      const closed = await tx.settlementBatch.updateMany({
+        where: { id: batchId, status: 'ready' },
+        data: {
+          status: 'settled',
+          closureType: 'zero_net_no_transfer',
+          closedAt,
+        },
+      });
+      if (closed.count !== 1) {
+        throw new ConflictException('settlement_batch_contended');
+      }
+      assertItemTransition('ready', 'settled');
+      const settledItems = await tx.settlementItem.updateMany({
+        where: { id: { in: memberIds }, batchId, state: 'ready' },
+        data: { state: 'settled' satisfies ItemState },
+      });
+      if (settledItems.count !== memberIds.length) {
+        throw new ConflictException('settlement_items_contended');
+      }
+      const allocation = (batch.recoveryAllocation ?? []) as Array<{
+        receivableId: string;
+        occurrenceId: string;
+        amount: number;
+        amountRecoveredAtPlan: number;
+        balanceAfter: number;
+      }>;
+      for (const alloc of allocation) {
+        const nextState: ReceivableState =
+          alloc.balanceAfter <= 0 ? 'recovered' : 'partially_recovered';
+        const row = await tx.settlementReceivable.findUnique({
+          where: { id: alloc.receivableId },
+          select: { state: true },
+        });
+        if (!row) {
+          throw new ConflictException('settlement_receivables_contended');
+        }
+        if (row.state !== nextState) {
+          assertReceivableTransition(row.state as ReceivableState, nextState);
+        }
+        const consumed = await tx.settlementReceivable.updateMany({
+          where: {
+            id: alloc.receivableId,
+            stagedBySettlementId: batch.id,
+            state: row.state,
+            amountRecovered: alloc.amountRecoveredAtPlan,
+          },
+          data: {
+            state: nextState,
+            amountRecovered: alloc.amountRecoveredAtPlan + alloc.amount,
+            stagedBySettlementId: null,
+            ...(nextState === 'recovered'
+              ? {
+                  recoveredAt: closedAt,
+                  recoveredBySettlementId: batch.id,
+                }
+              : {}),
+          },
+        });
+        if (consumed.count !== 1) {
+          throw new ConflictException('settlement_receivables_contended');
+        }
+        await this.ledger.record(
+          {
+            eventType: FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
+            reasonCode: 'MERCHANT_RECEIVABLE',
+            actorType: 'user',
+            actorId: actorUserId,
+            amount: alloc.amount,
+            currency: batch.currency,
+            direction: 'debit', // the receivable asset shrinks
+            counterpartyType: 'merchant',
+            storeId: batch.storeId,
+            idempotencyKey: ledgerIdempotencyKey(
+              FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
+              `${alloc.receivableId}:${batch.id}`,
+            ),
+            metadata: {
+              settlementReference: batch.settlementReference,
+              receivableId: alloc.receivableId,
+              refundId: alloc.occurrenceId,
+              // §26: POSITION extinguishment, not a cash claim — the
+              // physical safeguarding→operating sweep is a FUTURE
+              // treasury action; until recorded, the money sits in
+              // safeguarding as an internal transfer DUE.
+              closureType: 'zero_net_no_transfer',
+              closedAt: closedAt.toISOString(),
+              internalTransferDue: true,
+            },
+          },
+          tx,
+        );
+      }
+      await this.ledger.record(
+        {
+          eventType: FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
+          reasonCode: 'SETTLEMENT_COMPLETED',
+          actorType: 'user',
+          actorId: actorUserId,
+          amount: 0,
+          currency: batch.currency,
+          direction: 'debit',
+          storeId: batch.storeId,
+          idempotencyKey: ledgerIdempotencyKey(
+            FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
+            batch.id,
+          ),
+          metadata: {
+            settlementReference: batch.settlementReference,
+            // NO remittanceId, NO bankTransferReference — nothing
+            // moved and nothing claims it did.
+            closureType: 'zero_net_no_transfer',
+            closedAt: closedAt.toISOString(),
+          },
+        },
+        tx,
+      );
+    });
+    await this.audit.record({
+      actorUserId,
+      actorType: 'user',
+      action: 'settlement.batch.closed_zero_net',
+      targetType: 'store',
+      targetId: batch.storeId,
+      metadata: {
+        settlementId: batchId,
+        settlementReference: batch.settlementReference,
+        itemCount: memberIds.length,
+        closedAt: closedAt.toISOString(),
+        noTransfer: true,
+      },
+    });
+    return {
+      batch: await this.loadBatch(batchId),
+      replayed: false as const,
+    };
+  }
+
   // ── Read seams (SETTLE-2) — the engine is the ONLY code that
   //    touches SettlementBatch rows; consumers read through here ─────
   async frozenRecord(batchId: string) {
@@ -723,6 +900,11 @@ export class SettlementEngineService {
     return {
       status: batch.status as BatchState,
       assembledBy: batch.assembledBy ?? null,
+      closureType: (batch.closureType ?? null) as
+        | 'remitted'
+        | 'zero_net_no_transfer'
+        | null,
+      closedAt: batch.closedAt ?? null,
       frozen: {
         settlementId: batch.id,
         settlementReference: batch.settlementReference,
@@ -742,6 +924,34 @@ export class SettlementEngineService {
         recoveryAllocation: (batch.recoveryAllocation ?? null) as never,
       },
     };
+  }
+
+  // §32.3 read seam for the day aggregate: Σ gross of OTHER zero-net
+  // closes (same store, currency) whose closedAt falls in the window.
+  // Engine-only batch access (RULE 2 perimeter) — consumers read
+  // through here.
+  async zeroNetClosedGrossMinor(
+    ownSettlementId: string,
+    storeId: string,
+    currency: string,
+    from: Date,
+    to: Date,
+  ) {
+    const rows = await this.prisma.settlementBatch.findMany({
+      where: {
+        storeId,
+        currency,
+        id: { not: ownSettlementId },
+        closureType: 'zero_net_no_transfer',
+        closedAt: { gte: from, lt: to },
+      },
+      select: { grossAmount: true },
+    });
+    const code = asCurrencyCode(currency);
+    return rows.reduce(
+      (t, r) => t + toMinor(moneyToNumber(r.grossAmount), code),
+      0,
+    );
   }
 
   async batchItems(batchId: string) {

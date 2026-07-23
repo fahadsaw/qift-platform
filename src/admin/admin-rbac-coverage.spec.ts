@@ -727,6 +727,14 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         opsPermission: 'finance.refunds',
       },
       {
+        // Lane 2 PR 2 — SC §26 zero-net statement-only close (positions
+        // extinguish, NO transfer; execution-grade permission).
+        method: 'closeSettlementZeroNet',
+        path: 'finance/settlement/:id/close-zero-net',
+        httpMethod: 'POST',
+        opsPermission: 'finance.settlement_execute',
+      },
+      {
         // Lane 2 PR 1 — treasury attestation (evidence entry, no money).
         method: 'recordTreasuryAttestation',
         path: 'finance/treasury/attestations',

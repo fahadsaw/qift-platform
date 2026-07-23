@@ -265,6 +265,54 @@ Thresholds: RESERVED — the §32 authorization matrix carries no refund
 row; adding refund thresholds is a Settlement Constitution amendment,
 not a code change.
 
+## §26 note — Zero-Net Statement-Only Close (Lane 2 PR 2)
+
+A batch whose FROZEN net is EXACTLY zero (integer minor units in the
+batch currency's exponent; ±1 minor is not zero) closes through a
+Settlement Statement with **no bank transfer**: no SettlementRemittance,
+no bank reference, no `merchant.remittance.paid`, no cash-movement
+claim of any kind. The close travels the SAME chain as bank execution
+— recorded preview → approvals bound to the frozen calculationHash →
+the RULE 6 binding gate (executor ∉ approvers; the final approver
+never closes) — and its terminal act (`markSettledZeroNet`) settles
+batch + items, consumes the frozen recovery allocation, posts the
+zero-amount `settlement.completed` marker, and stamps
+`closureType='zero_net_no_transfer'` + `closedAt` atomically. The
+statement (format v2) carries the closure block: opening position from
+the frozen lines, `ZERO_NET_NO_TRANSFER`, and the explicit no-transfer
+text — it is the sole legal instrument of closure; replay regenerates
+it byte-identically from stored facts.
+
+**Authorization level (§32.1, explained):** the basis is the
+EXTINGUISHED GROSS (= the recovery consumed), never the zero cash
+figure — extinguishing a large position can never ride a lower band
+than remitting it. Zero-net closes also feed the §32.3 day aggregate
+at their gross (closedAt basis), so fragmentation across
+statement-only closes cannot lower the band.
+
+**Recovery postings under §26 carry no cash claim:** the physical
+safeguarding→operating sweep has NOT happened at close — the postings
+carry `internalTransferDue: true` instead of accountFrom/To, and the
+treasury reconciliation classifies them as enumerated NON-CASH
+closures (internal-transfer-due), never mismatches. Recording the
+physical sweep is a future treasury action; until recorded, a
+post-sweep bank attestation will honestly mismatch — deliberate.
+
+**`closedAt` is a RECORDING instant in BOTH lanes** (the clock at the
+terminal transition), never the bank value date — the remitted lane's
+day aggregate still reads `executedAt`/`createdAt` from the remittance
+row, and the zero-net aggregate window depends on `closedAt` staying
+recording-basis; "fixing" it to `executedAt` would silently change
+§32.3 semantics. **Remitted lane unchanged:** `markSettled` now stamps
+`closureType='remitted'` + `closedAt` with its terminal transition;
+v1 statements' bytes are unchanged. A zero-net-closed batch refuses
+bank execution (`settlement_closed_zero_net`) and supersession
+(settled is terminal); a remitted batch refuses the zero-net lane
+(`settlement_already_remitted`). Assembly now mints zero-net batches
+(the §26 close is their lawful exit); negative nets remain refused
+(`settlement_negative_net_deferred`) and are structurally unreachable
+through the gross-capped §7.4 planner.
+
 ## Amending these rules
 
 A change to any rule (or its pins) must name the rule, cite the

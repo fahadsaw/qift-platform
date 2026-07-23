@@ -102,6 +102,25 @@ references only.
   expected on historical seeds, impossible in production (gates were
   closed; zero rows).
 
+## §26 non-cash closures (snapshot v2 — Lane 2 PR 2)
+
+Zero-net statement-only closes extinguish obligations WITHOUT cash:
+their recovery postings (metadata `closureType='zero_net_no_transfer'`)
+classify as an enumerated NON-CASH class — obligations leg only, value
+date = the recorded close instant, `internalTransferDueMinor` carried
+as its own leg figure. The cash-vs-obligations delta is adjusted by
+exactly that enumerated amount (raw and adjusted both in the
+snapshot), so a §26 close is `matched`, never a mismatch and never an
+unresolved-evidence exception. The safeguarding account lawfully holds
+the extinguished amount pending the PHYSICAL internal sweep — a
+future treasury action; once swept, the post-sweep attestation will
+honestly mismatch until sweep-recording ships (deliberate, recorded).
+**Ops rule for that day:** the mismatch must still be walked through
+investigated → resolved with the sweep's bank advice as evidence —
+"expected: internal sweep not yet recordable" is the resolution NOTE,
+never a reason to skip the lifecycle. Operators who learn to wave
+mismatches through defeat the entire surface.
+
 ## Deferred (recorded, deliberate)
 
 - **Reconciliation-failure batch-blocking** (SC §10.3 "failure blocks

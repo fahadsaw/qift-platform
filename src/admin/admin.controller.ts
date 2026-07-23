@@ -533,6 +533,19 @@ export class AdminController {
     return this.settlementExecution.execute(req.user.userId, id, body);
   }
 
+  // Lane 2 PR 2 — SC §26 statement-only close: zero-net batches close
+  // through a Settlement Statement with NO bank transfer. Same
+  // execution-grade permission as execute (it extinguishes positions).
+  @Post('finance/settlement/:id/close-zero-net')
+  @RequireOpsPermission('finance.settlement_execute')
+  closeSettlementZeroNet(
+    @Param('id') id: string,
+    @Body() body: { previewHash: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.settlementExecution.closeZeroNet(req.user.userId, id, body);
+  }
+
   @Get('finance/settlement/:id/statement')
   @RequireOpsPermission('finance.receipts')
   settlementStatement(@Param('id') id: string) {

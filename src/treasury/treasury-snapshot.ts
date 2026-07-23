@@ -24,7 +24,10 @@ export const TREASURY_RECON_SCOPE = 'corporate_manual_rail@pilot-1';
 
 // Snapshot format version — a format change bumps this, never edits
 // an issued record.
-export const TREASURY_SNAPSHOT_VERSION = 'treasury-3way@v1';
+// v2 (Lane 2 PR 2): adds the §26 non-cash closure classification —
+// zero-net position extinguishments enumerate as internal-transfer-
+// due, never as cash movements and never as mismatches.
+export const TREASURY_SNAPSHOT_VERSION = 'treasury-3way@v2';
 
 export type TreasuryMovement = {
   ledgerId: string;
@@ -42,6 +45,11 @@ export type TreasuryMovement = {
   reference: string;
   storeId: string | null;
   evidenceRef: string | null;
+  // §26 (Lane 2 PR 2): a zero-net position extinguishment — REAL in
+  // the obligations view, but NOT a cash movement (no bank transfer
+  // happened; the safeguarding→operating sweep is a future treasury
+  // action). Enumerated as its own classification, never a mismatch.
+  nonCash?: boolean;
 };
 
 export type TreasuryAttestationInput = {
@@ -121,7 +129,16 @@ export function buildTreasurySnapshot(inputs: TreasuryInputs): {
 
   const ledgerCashMinor = sumMinor(cash.included);
   const obligationsMinor = sumMinor(obligations.included);
-  const cashVsObligationsMinor = ledgerCashMinor - obligationsMinor;
+  // §26: non-cash closures reduce OBLIGATIONS without touching cash —
+  // the safeguarding account lawfully holds money that now belongs to
+  // Qift's operating side, pending the physical internal sweep. That
+  // exact amount is the enumerated reconciler between the two legs.
+  const internalTransferDueMinor = obligations.included
+    .filter((m) => m.nonCash)
+    .reduce((t, m) => t + (m.direction === 'in' ? -m.amountMinor : m.amountMinor), 0);
+  const rawCashVsObligationsMinor = ledgerCashMinor - obligationsMinor;
+  const cashVsObligationsMinor =
+    rawCashVsObligationsMinor - internalTransferDueMinor;
   const bankVsCashMinor = inputs.attestation
     ? inputs.attestation.balanceMinor - ledgerCashMinor
     : null;
@@ -199,6 +216,7 @@ export function buildTreasurySnapshot(inputs: TreasuryInputs): {
         ? 'pending'
         : 'matched';
 
+  const nonCashClosures = obligations.included.filter((m) => m.nonCash);
   const snapshot = {
     snapshotVersion: TREASURY_SNAPSHOT_VERSION,
     scope: TREASURY_RECON_SCOPE,
@@ -210,11 +228,16 @@ export function buildTreasurySnapshot(inputs: TreasuryInputs): {
       bankBalanceMinor: inputs.attestation?.balanceMinor ?? null,
       ledgerCashMinor,
       obligationsMinor,
+      internalTransferDueMinor,
     },
     deltas: {
       bankVsCashMinor,
-      cashVsObligationsMinor,
+      rawCashVsObligationsMinor,
+      cashVsObligationsMinor, // adjusted for enumerated non-cash closures
     },
+    // §26 closures, enumerated (req. 8: a classification value, not a
+    // free-text exception).
+    nonCashClosures,
     cash: {
       included: cash.included,
       timing: cash.timing,
