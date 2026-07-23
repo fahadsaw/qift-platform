@@ -34,6 +34,7 @@ import {
   type ExecuteInput,
 } from '../settlement/settlement-execution.service';
 import { SettlementRefundsService } from '../settlement/settlement-refunds.service';
+import { TreasuryReconciliationService } from '../treasury/treasury-reconciliation.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -57,6 +58,7 @@ export class AdminController {
     private readonly settlementEngine: SettlementEngineService,
     private readonly settlementExecution: SettlementExecutionService,
     private readonly settlementRefunds: SettlementRefundsService,
+    private readonly treasury: TreasuryReconciliationService,
   ) {}
 
   // ── Self ─────────────────────────────────────────────────────────
@@ -616,6 +618,72 @@ export class AdminController {
     @Req() req: AuthedRequest,
   ) {
     return this.settlementRefunds.replayCreditNote(req.user.userId, refundId);
+  }
+
+  // ── Three-way Treasury Reconciliation (Lane 2 PR 1) — SC §10.3 /
+  // FC Ch. 17.2. Delegating only; READ-ONLY over money.
+
+  @Post('finance/treasury/attestations')
+  @RequireOpsPermission('finance.reconcile')
+  recordTreasuryAttestation(
+    @Body()
+    body: {
+      balance: number;
+      asOfDate: string;
+      evidenceRef: string;
+      source?: string;
+      notes?: string;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.treasury.recordAttestation(req.user.userId, body);
+  }
+
+  @Get('finance/treasury/attestations')
+  @RequireOpsPermission('finance.reconcile')
+  listTreasuryAttestations() {
+    return this.treasury.listAttestations();
+  }
+
+  @Post('finance/treasury/reconciliations')
+  @RequireOpsPermission('finance.reconcile')
+  runTreasuryReconciliation(
+    @Body() body: { asOfDate: string; attestationId?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.treasury.runReconciliation(req.user.userId, body);
+  }
+
+  @Get('finance/treasury/reconciliations')
+  @RequireOpsPermission('finance.reconcile')
+  listTreasuryReconciliations(@Query('status') status?: string) {
+    return this.treasury.listReconciliations(status);
+  }
+
+  @Get('finance/treasury/reconciliations/:id')
+  @RequireOpsPermission('finance.reconcile')
+  getTreasuryReconciliation(@Param('id') id: string) {
+    return this.treasury.getReconciliation(id);
+  }
+
+  @Post('finance/treasury/reconciliations/:id/investigate')
+  @RequireOpsPermission('finance.reconcile')
+  investigateTreasuryReconciliation(
+    @Param('id') id: string,
+    @Body() body: { notes: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.treasury.investigate(req.user.userId, id, body);
+  }
+
+  @Post('finance/treasury/reconciliations/:id/resolve')
+  @RequireOpsPermission('finance.reconcile')
+  resolveTreasuryReconciliation(
+    @Param('id') id: string,
+    @Body() body: { notes: string; evidenceRef?: string },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.treasury.resolve(req.user.userId, id, body);
   }
 
   @Get('finance/reconciliation')

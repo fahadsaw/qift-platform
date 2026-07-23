@@ -9,6 +9,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { AuditModule } from '../audit/audit.module';
 import { FinancialLedgerModule } from '../financial/financial-ledger.module';
 import { SettlementModule } from '../settlement/settlement.module';
+import { TreasuryModule } from '../treasury/treasury.module';
 import { VatFactsService } from './vat-facts.service';
 
 // AdminModule. Pulls StoresModule for the v2 review endpoints
@@ -39,6 +40,7 @@ import { VatFactsService } from './vat-facts.service';
     // admin plane behind finance.receipts; the services live in the
     // settlement module (RULE 1: calculations never leave it).
     SettlementModule,
+    TreasuryModule,
   ],
   controllers: [AdminController, AdminWorkersController],
   providers: [VatFactsService, AdminService, AdminGuard],
