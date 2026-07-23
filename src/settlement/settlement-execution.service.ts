@@ -76,6 +76,7 @@ import {
 import {
   assertExecutionBinding,
   buildExecutionPreview,
+  IllegalExecutionBinding,
   REPLAY_ENGINE_VERSION,
   type ExecutionApproval,
 } from './settlement-execution-binding';
@@ -367,7 +368,25 @@ export class SettlementExecutionService {
       level: r.requiredLevel,
       approvedAt: r.approvedAt.toISOString(),
     }));
-    assertExecutionBinding(frozen, preview, approvals, actorUserId);
+    try {
+      assertExecutionBinding(frozen, preview, approvals, actorUserId);
+    } catch (e) {
+      // Founder error contract: approvals existed but ALL lapsed the
+      // §31.3 TTL — a distinct recoverable condition (obtain fresh
+      // approval). Translated ONLY from the binding's own
+      // approval_required verdict so every earlier binding check —
+      // including the §34 replay_not_verified P0 alarm — keeps its
+      // precedence exactly. The acceptance rule is unchanged: lapsed
+      // approvals never count.
+      if (
+        e instanceof IllegalExecutionBinding &&
+        e.message === 'illegal_execution_binding:approval_required' &&
+        rows.length > 0
+      ) {
+        throw new ConflictException('settlement_approval_expired');
+      }
+      throw e;
+    }
 
     // §32 level at EXECUTION time (authoritative). Anti-fragmentation:
     // the aggregate includes this action, measured on BOTH the bank-
@@ -534,7 +553,21 @@ export class SettlementExecutionService {
     }));
     // Executor ∉ approvers (final approver never closes), frozen ≡
     // preview ≡ approvals, §34 verified — the SAME gate as execute.
-    assertExecutionBinding(frozen, preview, approvals, actorUserId);
+    try {
+      assertExecutionBinding(frozen, preview, approvals, actorUserId);
+    } catch (e) {
+      // Same §31.3 TTL distinction as execute(): translated only from
+      // the binding's approval_required verdict, preserving the
+      // precedence of every earlier check (incl. replay_not_verified).
+      if (
+        e instanceof IllegalExecutionBinding &&
+        e.message === 'illegal_execution_binding:approval_required' &&
+        rows.length > 0
+      ) {
+        throw new ConflictException('settlement_approval_expired');
+      }
+      throw e;
+    }
 
     // §32 level on the EXTINGUISHED GROSS; aggregate on the recording
     // day (there is no bank value date — nothing moved).
