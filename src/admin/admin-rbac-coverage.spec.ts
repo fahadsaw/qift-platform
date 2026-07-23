@@ -141,6 +141,23 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
     opsPermission: 'finance.refunds',
   },
   {
+    // Lane 2 PR 1 — bank-balance attestations (append-only evidence).
+    method: 'listTreasuryAttestations',
+    path: 'finance/treasury/attestations',
+    opsPermission: 'finance.reconcile',
+  },
+  {
+    // Lane 2 PR 1 — three-way reconciliation records (integrity-gated).
+    method: 'listTreasuryReconciliations',
+    path: 'finance/treasury/reconciliations',
+    opsPermission: 'finance.reconcile',
+  },
+  {
+    method: 'getTreasuryReconciliation',
+    path: 'finance/treasury/reconciliations/:id',
+    opsPermission: 'finance.reconcile',
+  },
+  {
     method: 'financeStoreBalances',
     path: 'finance/stores',
     opsPermission: 'finance.read_payouts',
@@ -708,6 +725,32 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         path: 'finance/refunds/requests/:id/cancel',
         httpMethod: 'POST',
         opsPermission: 'finance.refunds',
+      },
+      {
+        // Lane 2 PR 1 — treasury attestation (evidence entry, no money).
+        method: 'recordTreasuryAttestation',
+        path: 'finance/treasury/attestations',
+        httpMethod: 'POST',
+        opsPermission: 'finance.reconcile',
+      },
+      {
+        // Lane 2 PR 1 — the three-way run (creates only recon artifacts).
+        method: 'runTreasuryReconciliation',
+        path: 'finance/treasury/reconciliations',
+        httpMethod: 'POST',
+        opsPermission: 'finance.reconcile',
+      },
+      {
+        method: 'investigateTreasuryReconciliation',
+        path: 'finance/treasury/reconciliations/:id/investigate',
+        httpMethod: 'POST',
+        opsPermission: 'finance.reconcile',
+      },
+      {
+        method: 'resolveTreasuryReconciliation',
+        path: 'finance/treasury/reconciliations/:id/resolve',
+        httpMethod: 'POST',
+        opsPermission: 'finance.reconcile',
       },
       {
         // Track B3 / PE-12 — VAT-facts maker-checker mutations. SoD

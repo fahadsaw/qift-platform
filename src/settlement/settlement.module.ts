@@ -29,6 +29,8 @@ import { SETTLEMENT_CLOCK, SystemSettlementClock } from './settlement-clock';
     SettlementEligibilityService,
     SettlementExecutionService,
     SettlementRefundsService,
+    // Exported for TreasuryModule — the clock binding site stays ONE.
+    SETTLEMENT_CLOCK,
   ],
 })
 export class SettlementModule {}

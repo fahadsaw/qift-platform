@@ -3229,3 +3229,71 @@ model SettlementReplayRecord {
 
   @@index([settlementId, ranAt])
 }
+
+// ── Three-way Treasury Reconciliation (Lane 2 PR 1) ─────────────────
+// SC §10.3: DAILY three-way — attested safeguarding bank balance vs
+// the ledger's safeguarding CASH view vs the ledger's OBLIGATIONS
+// view — required from the first collected riyal (FC Ch. 17.2).
+// READ-ONLY over money: this subsystem never posts to the ledger and
+// never moves a riyal; corrections travel the constitutional lanes
+// (refunds, receivables, compensating entries — SC §24 forward-only).
+
+// The bank leg. A balance is NEVER invented (founder mandate): it is
+// imported or manually attested from bank evidence, append-only —
+// a correction is a NEW attestation, never an edit.
+model TreasuryAttestation {
+  id          String   @id @default(cuid())
+  accountType String   @default("safeguarding")
+  currency    String   @default("SAR")
+  balance     Decimal  @db.Decimal(14, 2)
+  // Bank value date the balance is stated AT (business fact from the
+  // statement, never a machine clock).
+  asOfDate    DateTime
+  // manual_attestation | statement_import (import seam — future)
+  source      String   @default("manual_attestation")
+  // The bank statement / portal reference that evidences the number.
+  evidenceRef String
+  notes       String?
+  recordedBy  String
+  createdAt   DateTime @default(now())
+
+  @@index([accountType, asOfDate])
+}
+
+// One reconciliation run = one immutable deterministic snapshot.
+// Append-only: re-running a day creates a NEW record. Status law:
+// pending (computed WITHOUT bank evidence — ledger legs only) |
+// matched | mismatched → investigated → resolved. Resolution is
+// DOCUMENTATION (notes + evidence), never money movement.
+model TreasuryReconciliation {
+  id                     String    @id @default(cuid())
+  accountType            String    @default("safeguarding")
+  currency               String    @default("SAR")
+  asOfDate               DateTime
+  // Plain string, no FK — financial records stay survivable.
+  attestationId          String?
+  status                 String    @default("pending")
+  bankBalance            Decimal?  @db.Decimal(14, 2)
+  ledgerCashBalance      Decimal   @db.Decimal(14, 2)
+  obligationsBalance     Decimal   @db.Decimal(14, 2)
+  bankVsCashDelta        Decimal?  @db.Decimal(14, 2)
+  cashVsObligationsDelta Decimal   @db.Decimal(14, 2)
+  differenceCount        Int
+  // The deterministic snapshot: canonical JSON is the source of
+  // truth; the hash derives from the canonical bytes only (same law
+  // as Settlement Statements). Integrity is verified before render.
+  canonicalJson          String    @db.Text
+  snapshotHash           String
+  computedBy             String
+  createdAt              DateTime  @default(now())
+  investigatedBy         String?
+  investigatedAt         DateTime?
+  investigationNotes     String?
+  resolvedBy             String?
+  resolvedAt             DateTime?
+  resolutionNotes        String?
+  resolutionEvidenceRef  String?
+
+  @@index([accountType, asOfDate])
+  @@index([status])
+}
