@@ -13,7 +13,10 @@
 //   - the filter itself performs NO writes (a refusal mutates
 //     nothing at this layer by construction).
 
-jest.mock('@sentry/nestjs', () => ({ captureException: jest.fn() }));
+jest.mock('@sentry/nestjs', () => ({
+  captureException: jest.fn(),
+  captureMessage: jest.fn(),
+}));
 
 import {
   BadRequestException,
@@ -21,6 +24,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { captureMessage } from '@sentry/nestjs';
 import type { ArgumentsHost } from '@nestjs/common';
 import { IllegalExecutionBinding } from '../settlement/settlement-execution-binding';
 import {
@@ -64,17 +68,28 @@ describe('finance ops error contract (finops-errors@v1)', () => {
   });
 
   // ── 1. Canonical mapping table — every entry, exhaustively ───────
-  it('every governed legacy refusal maps to 409 with its canonical code and preserved reason', () => {
+  it('every governed legacy refusal maps to 409: canonical `code`, specific string preserved in message AND reason', () => {
     for (const [legacy, canonical] of Object.entries(LEGACY_TO_CANONICAL)) {
       const mapped = mapRefusalMessage(legacy)!;
       expect(mapped).toMatchObject({
         statusCode: 409,
         error: 'Conflict',
         code: canonical,
-        message: canonical,
+        // message stays the SPECIFIC string — pre-contract clients
+        // that key on `message` keep their precise operator copy.
+        message: legacy,
         reason: legacy,
       });
     }
+  });
+
+  it('prototype-chain names are NOT governed refusals (own-property lookups only)', () => {
+    expect(mapRefusalMessage('constructor')).toBeNull();
+    expect(mapRefusalMessage('__proto__')).toBeNull();
+    expect(mapRefusalMessage('hasOwnProperty')).toBeNull();
+    expect(
+      mapBindingViolation(new IllegalExecutionBinding('constructor')),
+    ).toBeNull();
   });
 
   it('dynamic-suffix refusals match on the base and preserve the full reason', () => {
@@ -136,10 +151,20 @@ describe('finance ops error contract (finops-errors@v1)', () => {
     expect(body).toEqual({
       statusCode: 409,
       error: 'Conflict',
-      message: CANONICAL.EXECUTOR_IS_FINAL_APPROVER,
+      message: 'illegal_execution_binding:executor_cannot_approve',
       code: CANONICAL.EXECUTOR_IS_FINAL_APPROVER,
       reason: 'illegal_execution_binding:executor_cannot_approve',
     });
+  });
+
+  it('a mapped §33 violation stays OBSERVABLE server-side (log + Sentry warning)', () => {
+    const captured = jest.mocked(captureMessage);
+    captured.mockClear();
+    run(new IllegalExecutionBinding('executor_cannot_approve'));
+    expect(captured).toHaveBeenCalledWith(
+      'finance_ops_binding_refusal:illegal_execution_binding:executor_cannot_approve',
+      'warning',
+    );
   });
 
   it.each([
@@ -206,6 +231,42 @@ describe('finance ops error contract (finops-errors@v1)', () => {
     );
     expect(status).toBe(409);
     expect(body.code).toBe('internal_transfer_evidence_reused');
+  });
+
+  it('ungoverned dynamic-suffix refusals echo only the STABLE BASE as code', () => {
+    const { status, body } = run(
+      new ConflictException(
+        'treasury_reconciliation_not_investigable:resolved',
+      ),
+    );
+    expect(status).toBe(409);
+    expect(body.message).toBe(
+      'treasury_reconciliation_not_investigable:resolved',
+    );
+    expect(body.code).toBe('treasury_reconciliation_not_investigable');
+  });
+
+  // Drift pin: every sub-code the binding module can THROW is either
+  // canonically mapped or the deliberate replay_not_verified 500 —
+  // a future sub-code without a map entry must fail here, not page
+  // on-call with a false P0.
+  it('BINDING_TO_CANONICAL covers every throwable binding sub-code except replay_not_verified', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('path') as typeof import('path');
+    const src = fs.readFileSync(
+      path.join(__dirname, '../settlement/settlement-execution-binding.ts'),
+      'utf8',
+    );
+    const thrown = [
+      ...src.matchAll(/IllegalExecutionBinding\('([a-z_]+)'\)/g),
+    ].map((m) => m[1]);
+    expect(thrown.length).toBeGreaterThan(0);
+    for (const sub of thrown) {
+      if (sub === 'replay_not_verified') continue; // deliberate 500
+      expect(Object.hasOwn(BINDING_TO_CANONICAL, sub)).toBe(true);
+    }
   });
 
   // ── 4. Unexpected errors: sanitized 500, nothing leaks ───────────

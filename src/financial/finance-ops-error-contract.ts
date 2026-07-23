@@ -72,9 +72,12 @@ export const LEGACY_TO_CANONICAL: Readonly<Record<string, CanonicalCode>> = {
   batch_proposer_unknown: CANONICAL.BATCH_STATE_CONFLICT,
   settlement_batch_contended: CANONICAL.BATCH_STATE_CONFLICT,
   settlement_items_contended: CANONICAL.BATCH_STATE_CONFLICT,
-  receipt_invoice_not_receivable: CANONICAL.BATCH_STATE_CONFLICT,
-  // Approvals absent or insufficient for the required level
+  settlement_receivables_contended: CANONICAL.BATCH_STATE_CONFLICT,
+  // Approvals absent or insufficient for the required level —
+  // including the §31.1 senior-seat requirement (the seat is a level
+  // requirement; `reason` preserves which one is unmet).
   insufficient_approvals: CANONICAL.APPROVAL_MISSING,
+  senior_approval_required: CANONICAL.APPROVAL_MISSING,
   // §33 separation
   approver_cannot_be_proposer: CANONICAL.APPROVER_IS_PROPOSER,
   // Canonical codes emitted directly by services map to themselves so
@@ -125,15 +128,22 @@ export function isMachineCode(s: unknown): s is string {
 
 // Map a known legacy/canonical refusal string → the 409 contract, or
 // null when the string is not governed by this contract.
+//
+// Body law: `code` carries the CANONICAL contract code (what clients
+// key on); `message` and `reason` both carry the SPECIFIC string
+// verbatim — message stays the legacy string so pre-contract clients
+// that read `message` keep resolving their precise operator copy.
+// Own-property lookups only (Object.hasOwn): prototype-chain names
+// like 'constructor' are NOT governed refusals.
 export function mapRefusalMessage(message: unknown): MappedRefusal | null {
   if (!isMachineCode(message)) return null;
   const base = message.split(':')[0];
+  if (!Object.hasOwn(LEGACY_TO_CANONICAL, base)) return null;
   const canonical = LEGACY_TO_CANONICAL[base];
-  if (!canonical) return null;
   return {
     statusCode: 409,
     error: 'Conflict',
-    message: canonical,
+    message,
     code: canonical,
     reason: message,
   };
@@ -147,13 +157,23 @@ export function mapBindingViolation(e: unknown): MappedRefusal | null {
   const sub = msg.startsWith('illegal_execution_binding:')
     ? msg.slice('illegal_execution_binding:'.length)
     : msg;
+  if (!Object.hasOwn(BINDING_TO_CANONICAL, sub)) {
+    return null; // replay_not_verified and unknowns → 500
+  }
   const canonical = BINDING_TO_CANONICAL[sub];
-  if (!canonical) return null; // replay_not_verified and unknowns → 500
   return {
     statusCode: 409,
     error: 'Conflict',
-    message: canonical,
+    message: msg,
     code: canonical,
     reason: msg,
   };
+}
+
+// For ungoverned machine-code refusals the pass-through echoes the
+// STABLE BASE (before any ':' suffix) as `code` — dynamic suffixes
+// (e.g. 'treasury_reconciliation_not_investigable:investigated') stay
+// visible in `message` but never pollute the stable code space.
+export function stableCodeEcho(message: string): string {
+  return message.split(':')[0];
 }

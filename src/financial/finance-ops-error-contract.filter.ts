@@ -35,6 +35,7 @@ import {
   isMachineCode,
   mapBindingViolation,
   mapRefusalMessage,
+  stableCodeEcho,
 } from './finance-ops-error-contract';
 
 const SANITIZED_500 = {
@@ -53,6 +54,17 @@ export class FinanceOpsErrorContractFilter implements ExceptionFilter {
     if (exception instanceof IllegalExecutionBinding) {
       const mapped = mapBindingViolation(exception);
       if (mapped) {
+        // A §33/§34 violation ATTEMPT is refused as 409 but stays
+        // OBSERVABLE: it never loses its server-side trail (abuse
+        // probing must not become invisible just because the client
+        // now gets a tidy conflict).
+        this.logger.warn(
+          `binding violation refused (409 ${mapped.code}): ${mapped.reason}`,
+        );
+        Sentry.captureMessage(
+          `finance_ops_binding_refusal:${mapped.reason}`,
+          'warning',
+        );
         return res.status(mapped.statusCode).json(mapped);
       }
       // Alarm class (replay_not_verified / unknown sub-reason): the
@@ -78,21 +90,26 @@ export class FinanceOpsErrorContractFilter implements ExceptionFilter {
         return res.status(mapped.statusCode).json(mapped);
       }
 
-      // Pass-through. Machine-code messages gain a `code` echo so the
-      // client contract ("read `code`") holds uniformly; prose bodies
+      // Pass-through. Machine-code messages gain a `code` echo — the
+      // STABLE BASE only, never a dynamic ':' suffix — so the client
+      // contract ("read `code`") holds uniformly; prose bodies
       // (guards, validators) are untouched.
       if (typeof body === 'string') {
-        return res
-          .status(status)
-          .json(
-            isMachineCode(body)
-              ? { statusCode: status, message: body, code: body }
-              : { statusCode: status, message: body },
-          );
+        return res.status(status).json(
+          isMachineCode(body)
+            ? {
+                statusCode: status,
+                message: body,
+                code: stableCodeEcho(body),
+              }
+            : { statusCode: status, message: body },
+        );
       }
       const obj = body as Record<string, unknown>;
       if (isMachineCode(obj?.message) && obj.code === undefined) {
-        return res.status(status).json({ ...obj, code: obj.message });
+        return res
+          .status(status)
+          .json({ ...obj, code: stableCodeEcho(obj.message) });
       }
       return res.status(status).json(obj);
     }

@@ -784,10 +784,29 @@ describe('SettlementExecutionService (SETTLE-2)', () => {
       w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(p2.calculationHash)),
     ).rejects.toThrow('settlement_approval_expired');
 
-    // Same distinction on the §26 close lane.
-    const wz = world();
-    (wz.batches.get('stl-1')!.calculationSnapshot as Row).netAmount = 0;
-    (wz.batches.get('stl-1')! as Row).netAmount = 0;
+    // PRECEDENCE (adversarial-review blocker): the §34 P0 alarm wins
+    // over the expired translation. A frozen record that no longer
+    // reproduces itself (composition corrupted; hash unchanged since
+    // the hash covers only the calculationSnapshot) with all
+    // approvals lapsed must still surface replay_not_verified — the
+    // operator must NEVER be told to simply re-approve.
+    const wr = world();
+    const pr = await wr.exec.preview('finance-2', 'stl-1');
+    await wr.exec.approve('finance-2', 'stl-1', {
+      calculationHash: pr.calculationHash,
+    });
+    wr.clockState.now = new Date('2026-07-25T09:00:01.000Z');
+    (
+      (wr.batches.get('stl-1')!.composition as Array<Record<string, unknown>>)[0]
+    ).amount = 9999;
+    await wr.exec.preview('finance-2', 'stl-1'); // fresh act, replayVerified=false
+    await expect(
+      wr.exec.execute('proposer-1', 'stl-1', EXEC_INPUT(pr.calculationHash)),
+    ).rejects.toThrow('illegal_execution_binding:replay_not_verified');
+
+    // Same distinction on the §26 close lane (a LEGITIMATE zero-net
+    // batch — snapshot and composition stay §34-consistent).
+    const wz = world({ net: 0 });
     const pz = await wz.exec.preview('finance-2', 'stl-1');
     await wz.exec.approve('finance-2', 'stl-1', {
       calculationHash: pz.calculationHash,

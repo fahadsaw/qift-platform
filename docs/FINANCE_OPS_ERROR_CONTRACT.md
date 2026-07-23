@@ -26,13 +26,17 @@ error-contract block in `settlement-execution.spec.ts`.
 
 ```json
 { "statusCode": 409, "error": "Conflict",
-  "message": "<canonical>", "code": "<canonical>", "reason": "<specific legacy code>" }
+  "message": "<specific legacy code>", "code": "<canonical>", "reason": "<specific legacy code>" }
 ```
 
-Clients key behavior on **`code` only**. `reason` preserves the finer legacy
-string (still stable) for precise operator messages. Ungoverned machine-code
-refusals pass through with `code` echoed from their message, so `code` is always
-readable; prose bodies (guards/validators) pass through untouched.
+Clients key behavior on **`code` only**. `message` and `reason` both carry the
+specific legacy string verbatim — `message` stays legacy so pre-contract
+clients that read `message` keep resolving their precise operator copy through
+the deploy window. Ungoverned machine-code refusals pass through with `code`
+echoed as the **stable base** of their message (dynamic `:suffix`es stay in
+`message`, never in `code`); prose bodies (guards/validators) pass through
+untouched. Mapping lookups are own-property only (`Object.hasOwn`) — prototype
+names like `constructor` are not governed refusals.
 
 ## Canonical codes → sources
 
@@ -40,8 +44,8 @@ readable; prose bodies (guards/validators) pass through untouched.
 |---|---|
 | `settlement_preview_stale` | `preview_act_required` |
 | `settlement_calculation_hash_mismatch` | `preview_hash_mismatch`, `approval_snapshot_stale`, binding `preview_batch/reference/snapshot_mismatch`, `approval_batch/snapshot_mismatch` |
-| `settlement_batch_state_conflict` | `preview/approval/execution_requires_ready:<status>`, `batch_drifted`, `settlement_already_remitted`, `settlement_closed_zero_net`, `execution_use_zero_net_close`, `execution_requires_positive_net`, `zero_net_close_requires_exact_zero`, `settled_without_remittance`, `batch_proposer_unknown`, `settlement_batch/items_contended`, `receipt_invoice_not_receivable:<status>` |
-| `settlement_approval_missing` | binding `approval_required` (no votes exist), `insufficient_approvals` (below required level) |
+| `settlement_batch_state_conflict` | `preview/approval/execution_requires_ready:<status>`, `batch_drifted`, `settlement_already_remitted`, `settlement_closed_zero_net`, `execution_use_zero_net_close`, `execution_requires_positive_net`, `zero_net_close_requires_exact_zero`, `settled_without_remittance`, `batch_proposer_unknown`, `settlement_batch/items/receivables_contended` |
+| `settlement_approval_missing` | binding `approval_required` (no votes exist), `insufficient_approvals` (below required level), `senior_approval_required` (§31.1 senior seat unmet — a level requirement; `reason` says which) |
 | `settlement_approval_expired` | new service-level distinction: votes exist but **all lapsed the §31.3 TTL** (acceptance rule unchanged — lapsed votes never counted) |
 | `settlement_executor_is_final_approver` | binding `executor_cannot_approve` (§33 strict form; **was a 500**) |
 | `settlement_approver_is_proposer` | `approver_cannot_be_proposer` |
@@ -50,9 +54,35 @@ readable; prose bodies (guards/validators) pass through untouched.
 
 ## Deliberate decisions
 
-- **`replay_not_verified` stays 500.** A frozen record that no longer reproduces
-  itself is a P0 integrity alarm, not an operator-recoverable conflict. The body
-  is the sanitized fixed 500; the detail goes to the server log and Sentry only.
+- **`replay_not_verified` stays 500 — and always wins.** A frozen record that no
+  longer reproduces itself is a P0 integrity alarm, not an operator-recoverable
+  conflict. The body is the sanitized fixed 500; the detail goes to the server
+  log and Sentry only. The `settlement_approval_expired` distinction is
+  translated FROM the binding's own `approval_required` verdict (never a
+  pre-check), so every earlier binding check — including the §34 replay alarm —
+  keeps its exact precedence (pinned).
+- **Mapped §33 violation attempts remain observable**: the filter logs a
+  warning and sends a Sentry `warning` message for every mapped binding
+  refusal — abuse probing does not become invisible behind a tidy 409 (pinned).
+- **`receipt_invoice_not_receivable:<status>` is NOT canonicalized** — it is an
+  invoice-document state, not a settlement-batch state; it passes through as its
+  own stable code (400, base echoed in `code`).
+- **`settlement_nothing_eligible` / `settlement_negative_net_deferred` stay
+  400** — pre-batch assembly refusals with long-standing stable codes the
+  console already maps; neither is a "changed or closed batch". Kept as-is,
+  documented here.
+- **`statement_integrity_violation` stays 409** (vs `replay_not_verified`'s
+  500): it refuses to RENDER a stored document as authentic — a read-path
+  refusal the operator resolves with an administrator — while the replay alarm
+  guards EXECUTION off a non-reproducing frozen record.
+- **Refund maker–checker refusals** (`refund_self_approval_rejected`, …) keep
+  their own stable 409 codes — the refund workflow's separation vocabulary is
+  its own; statuses already conform.
+- **`reason` echoes `execution_requires_ready:<status>` verbatim** — for a
+  caller holding `finance.settlement_execute` this reveals batch lifecycle
+  state even without `finance.receipts`. Accepted and documented: every current
+  role bundle granting execute also grants receipts, so the boundary is
+  presently vacuous; revisit if execute-only roles are ever minted.
 - **State-fact refusals thrown as 400 today are corrected to 409 at the
   boundary** (`preview_requires_ready`, `execution_use_zero_net_close`, …): a
   not-ready batch is a state conflict, not malformed input. Service exception
