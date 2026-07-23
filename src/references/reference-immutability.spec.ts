@@ -93,10 +93,15 @@ describe('reference immutability tripwire (source pins)', () => {
     // into the immutable remittance record, RC 14.4, never a rewrite
     // of the batch column) + completed-marker metadata + markSettled
     // audit + the frozenRecord read seam + (SETTLE-3b) the recovery-
-    // posting metadata (key + read). No update path writes it —
-    // the write-once law (RC Ch. 8.1/10.2 replacement pin).
+    // posting metadata (key + read) + (Lane 2 PR 2, §26) the six
+    // markSettledZeroNet READS — recovery-posting metadata (key +
+    // read), completed-marker metadata (key + read), close audit
+    // (key + read) — the zero-net close copies the reference into
+    // its immutable postings/audit exactly like markSettled, never
+    // writes it. No update path writes it — the write-once law
+    // (RC Ch. 8.1/10.2 replacement pin).
     expect(
       count('settlement/settlement-engine.service.ts', 'settlementReference'),
-    ).toBe(25);
+    ).toBe(31);
   });
 });

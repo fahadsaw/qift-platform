@@ -146,6 +146,18 @@ describe('Track C PR 3 — end-to-end financial walkthrough (S01: assembly → a
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
       settlementBatch: {
+        // §32.3 zero-net aggregate seam (Lane 2 PR 2) — this world
+        // closes by remittance only; no zero-net rows exist.
+        findMany: jest.fn().mockImplementation(({ where }: never) => {
+          const w = where as { closureType?: string };
+          return Promise.resolve(
+            [...batches.values()].filter(
+              (b) =>
+                w.closureType === undefined ||
+                b.closureType === w.closureType,
+            ),
+          );
+        }),
         findUnique: jest.fn().mockImplementation(({ where }: never) => {
           const w = where as { id?: string; settlementReference?: string };
           if (w.id) return Promise.resolve(batches.get(w.id) ?? null);

@@ -511,15 +511,48 @@ describe('SETTLE-3b — §7.4 receivable recovery', () => {
         },
       ],
     });
-    // Simulate still shows the honest zero-net picture (§26)...
+    // Simulate shows the honest zero-net picture (§26)...
     const sim = await w.engine.simulate('fin-1', 's-1');
     expect(sim.calculation!.netAmount).toBe(0);
-    // ...but assembly refuses until the statement-only close lane ships.
-    await expect(w.engine.assembleBatch('proposer-1', 's-1')).rejects.toThrow(
-      'settlement_zero_net_deferred',
-    );
-    expect(w.receivables[0].stagedBySettlementId).toBeNull(); // nothing staged
-    expect(w.batches.size).toBe(0);
+    // ...and assembly now MINTS the zero-net batch (Lane 2 PR 2): the
+    // §26 statement-only close is its lawful exit — QS born, items
+    // bound, receivable staged, net exactly zero.
+    const batch = await w.engine.assembleBatch('proposer-1', 's-1');
+    expect(batch.netAmount).toBe(0);
+    expect(batch.settlementReference).toMatch(/^QS-/);
+    expect(w.receivables[0].stagedBySettlementId).toBe(batch.id);
+  });
+
+  it('Lane 2 PR 2: an OVERSIZED receivable caps at gross — net is exactly zero, never negative; the remainder stays open for the next batch', async () => {
+    // §7.4's gross cap makes negative nets structurally impossible
+    // through the planner: a 5,000 receivable against 4,600 gross
+    // recovers 4,600 (net exactly 0, the §26 close's territory) and
+    // 400 remains open. The assembly-time negative-net refusal
+    // ('settlement_negative_net_deferred') stands as a DEFENSIVE
+    // invariant behind the cap, not a reachable lane.
+    const w = world({
+      receivables: [
+        {
+          id: 'rcv-neg',
+          storeId: 's-1',
+          currency: 'SAR',
+          amount: 5000, // exceeds the gross → capped at 4,600
+          amountRecovered: 0,
+          occurrenceType: 'refund',
+          occurrenceId: 'ref-neg',
+          state: 'open',
+          stagedBySettlementId: null,
+          accruedAt: new Date('2026-07-22T12:00:00.000Z'),
+        },
+      ],
+    });
+    const batch = await w.engine.assembleBatch('proposer-1', 's-1');
+    expect(batch.netAmount).toBe(0);
+    const alloc = (
+      batch.recoveryAllocation as Array<{ amount: number; balanceAfter: number }>
+    )[0];
+    expect(alloc.amount).toBe(4600); // capped
+    expect(alloc.balanceAfter).toBe(400); // remainder stays open
   });
 
   it('review finding 2: a partial roll-forward CONSUMES without a state transition — the second partial batch never wedges', async () => {

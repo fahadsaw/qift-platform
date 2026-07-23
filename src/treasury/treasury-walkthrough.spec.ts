@@ -523,6 +523,63 @@ describe('Treasury walkthrough — a pilot day reconciled three ways', () => {
     ).toBe('led-orphan');
   });
 
+  it('§26 ZERO-NET CLOSE (Lane 2 PR 2): classified NON-CASH — matched with the internal-transfer-due enumerated, never a mismatch', async () => {
+    const w = world();
+    // Goods receipt 4,600 lands in safeguarding (payable accrues)...
+    w.addReceipt({
+      receiptId: 'rcpt-1', amount: 4600, receivedAt: D('20'),
+      invoiceType: 'merchant_invoice', bankReference: 'TT-9001',
+    });
+    // ...then a §26 statement-only close extinguishes the payable via
+    // receivable recovery — the posting carries closureType +
+    // closedAt and NO cash-account claim, exactly as the engine
+    // writes it. No remittance row exists anywhere.
+    w.ledgerRows.push({
+      id: 'led-zn-1',
+      eventType: 'merchant.receivable.recovered',
+      amount: 4600,
+      currency: 'SAR',
+      direction: 'debit',
+      orderId: null,
+      storeId: 's-1',
+      createdAt: D('21'),
+      idempotencyKey: 'merchant.receivable.recovered:rcv-1:stl-zn',
+      metadata: {
+        settlementReference: 'QS-ZERO-0001',
+        receivableId: 'rcv-1',
+        refundId: 'ref-1',
+        closureType: 'zero_net_no_transfer',
+        closedAt: D('21').toISOString(),
+        internalTransferDue: true,
+      },
+    });
+    // The bank still holds the 4,600 — nothing moved at close.
+    await w.service.recordAttestation(FIN, {
+      balance: 4600,
+      asOfDate: '2026-07-21T23:59:59.000Z',
+      evidenceRef: 'STMT-2026-07-21',
+    });
+    const rec = await w.service.runReconciliation(FIN, {
+      asOfDate: '2026-07-21T23:59:59.000Z',
+    });
+    // MATCHED: cash 4,600 = bank 4,600; obligations 0 (payable
+    // extinguished); the 4,600 gap between the legs is EXPLAINED by
+    // the enumerated internal-transfer-due classification.
+    expect(rec.status).toBe('matched');
+    expect(rec.differenceCount).toBe(0);
+    const full = await w.service.getReconciliation(rec.id as string);
+    const snap = full.snapshot as {
+      legs: { internalTransferDueMinor: number };
+      nonCashClosures: Array<{ ledgerId: string; nonCash?: boolean }>;
+      deltas: { rawCashVsObligationsMinor: number; cashVsObligationsMinor: number };
+    };
+    expect(snap.legs.internalTransferDueMinor).toBe(460000);
+    expect(snap.nonCashClosures).toHaveLength(1);
+    expect(snap.nonCashClosures[0].ledgerId).toBe('led-zn-1');
+    expect(snap.deltas.rawCashVsObligationsMinor).toBe(460000);
+    expect(snap.deltas.cashVsObligationsMinor).toBe(0); // adjusted
+  });
+
   it('INTEGRITY GATE: a tampered stored snapshot refuses to render', async () => {
     const w = world();
     await w.service.recordAttestation(FIN, {

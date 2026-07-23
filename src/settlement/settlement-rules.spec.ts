@@ -267,7 +267,16 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
   // The ONLY batch columns any engine update may ever touch. Frozen
   // forever: settlementReference, storeId, currency, windowType,
   // grossAmount, netAmount, composition, calculationSnapshot.
-  const MUTABLE_BATCH_KEYS = ['status', 'failureEvidence', 'supersededById'];
+  // closureType/closedAt (Lane 2 PR 2, SC §26): HOW/WHEN the terminal
+  // state was reached — written once, atomically with the close, in
+  // the RULE 3 lifecycle sense (like failureEvidence).
+  const MUTABLE_BATCH_KEYS = [
+    'status',
+    'failureEvidence',
+    'supersededById',
+    'closureType',
+    'closedAt',
+  ];
 
   it('every settlementBatch update site in the engine writes ONLY lifecycle keys (source pin)', () => {
     const engine = read(join(SETTLEMENT, 'settlement-engine.service.ts'));
@@ -278,12 +287,19 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
     //                                frozen fact, §31.1 proposer)
     //   settlementBatch.update   4  (markFailed, retry, holdBatch,
     //                                supersede: status/evidence only)
-    //   settlementBatch.updateMany 2 (linkSuccessor: supersededById,
+    //   settlementBatch.updateMany 3 (linkSuccessor: supersededById,
     //                                 write-once guarded; markSettled:
-    //                                 guarded ready→settled, SETTLE-2)
+    //                                 guarded ready→settled + the §26
+    //                                 closureType='remitted'/closedAt
+    //                                 stamp, SETTLE-2 + Lane 2 PR 2;
+    //                                 markSettledZeroNet: guarded
+    //                                 ready→settled + closureType=
+    //                                 'zero_net_no_transfer'/closedAt —
+    //                                 the statement-only close, NO
+    //                                 remittance created)
     expect(count(engine, 'settlementBatch.create(')).toBe(1);
     expect(count(engine, 'settlementBatch.update(')).toBe(4);
-    expect(count(engine, 'settlementBatch.updateMany(')).toBe(2);
+    expect(count(engine, 'settlementBatch.updateMany(')).toBe(3);
 
     // Extract each update's data block and assert its keys.
     const sites = [
@@ -291,7 +307,7 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
         /settlementBatch\.update(?:Many)?\(\s*\{[\s\S]*?data:\s*\{([\s\S]*?)\},?\s*\}\s*\)/g,
       ),
     ];
-    expect(sites.length).toBe(6);
+    expect(sites.length).toBe(7);
     for (const m of sites) {
       const keys = [...m[1].matchAll(/(?:^|[,{])\s*(\w+)\s*:/gm)].map(
         (k) => k[1],
@@ -310,8 +326,11 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
     //     (an item can never be bound INTO an already-assembled batch);
     //   supersede — batch is transitioning to terminal 'superseded';
     //   markSettled — guarded ready→settled of the batch's OWN items
-    //     (SETTLE-2), count-checked against the frozen composition.
-    expect(count(engine, 'settlementItem.updateMany(')).toBe(3);
+    //     (SETTLE-2), count-checked against the frozen composition;
+    //   markSettledZeroNet — the SAME guarded ready→settled of the
+    //     batch's own items for the §26 statement-only close
+    //     (Lane 2 PR 2), count-checked identically.
+    expect(count(engine, 'settlementItem.updateMany(')).toBe(4);
     // The bind guard pins state + unbound + the EXACT frozen amount
     // (SETTLE-3a review finding 1: amounts became mutable via refunds;
     // a racing shrink must fail the bind, never freeze stale money).
@@ -338,11 +357,13 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
       'loadBatch',
       'markFailed',
       'markSettled', // SETTLE-2: ready→settled + completed marker
+      'markSettledZeroNet', // Lane 2 PR 2 (§26): statement-only close — NO remittance
       'occurrenceReferences', // §15.1 reference denormalization at assembly
       'planRecovery', // §7.4 offset planning (SETTLE-3b)
       'retry',
       'simulate',
       'supersede',
+      'zeroNetClosedGrossMinor', // §32.3 read seam: zero-net day-aggregate (Lane 2 PR 2)
     ]);
   });
 

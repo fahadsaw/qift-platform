@@ -2798,6 +2798,16 @@ model SettlementBatch {
   // Set when superseded: the successor batch id (new QS). Terminal.
   supersededById      String?
   failureEvidence     String?
+  // HOW the batch reached 'settled' (Lane 2 PR 2, SC §26): 'remitted'
+  // (bank transfer, remittance row exists) | 'zero_net_no_transfer'
+  // (statement-only close — NO remittance, NO bank movement). Written
+  // ONCE, atomically with the terminal transition; lifecycle column
+  // in the RULE 3 sense (like failureEvidence). Null only on rows
+  // settled before this column existed.
+  closureType         String?
+  // The recording instant of the terminal close (clock, not a bank
+  // fact) — the §32 day-aggregate basis for no-transfer closes.
+  closedAt            DateTime?
   // The PROPOSER (§31.1 L2 maker–checker; §33.4 evidence chain):
   // recorded at assembly, immutable. Approvers must differ from it;
   // nullable only for pre-SETTLE-2 rows — approval refuses null.

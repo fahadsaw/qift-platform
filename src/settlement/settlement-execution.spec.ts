@@ -566,9 +566,13 @@ describe('SettlementExecutionService (SETTLE-2)', () => {
     ).rejects.toThrow('remittance_conflict');
   });
 
-  it('zero/negative nets never fabricate a transfer', async () => {
+  it('zero/negative nets never fabricate a transfer — zero redirects to the §26 close, negative stays deferred', async () => {
     const w = world();
     (w.batches.get('stl-1')!.calculationSnapshot as Row).netAmount = 0;
+    await expect(
+      w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT('x')),
+    ).rejects.toThrow('execution_use_zero_net_close');
+    (w.batches.get('stl-1')!.calculationSnapshot as Row).netAmount = -0.01;
     await expect(
       w.exec.execute('proposer-1', 'stl-1', EXEC_INPUT('x')),
     ).rejects.toThrow('execution_requires_positive_net');

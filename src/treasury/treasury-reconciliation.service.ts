@@ -440,6 +440,24 @@ export class TreasuryReconciliationService {
           break;
         }
         case FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED: {
+          if (meta.closureType === 'zero_net_no_transfer') {
+            // §26 (Lane 2 PR 2): a statement-only close extinguished
+            // this position WITHOUT any bank movement — the posting
+            // itself says so (closureType + internalTransferDue, no
+            // account claim). Obligations leg only, classified
+            // non-cash; value date = the recorded close instant.
+            // NEVER an unresolved-evidence mismatch.
+            obligationMovements.push({
+              ...base,
+              direction: 'out',
+              valueDate:
+                typeof meta.closedAt === 'string' ? meta.closedAt : null,
+              reference: String(meta.settlementReference ?? row.id),
+              evidenceRef: null, // the Settlement Statement IS the evidence
+              nonCash: true,
+            });
+            break;
+          }
           const idx = anchor ? anchor.indexOf(':') : -1;
           const settlementId =
             anchor && idx > 0 ? anchor.slice(idx + 1) : null;

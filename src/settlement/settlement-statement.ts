@@ -66,8 +66,23 @@ export type RemittanceEvidence = {
   amount: number;
 };
 
+// SC §26 (Lane 2 PR 2): the statement-only close facts. Every field
+// is a SUPPLIED stored fact (like remittance evidence) except the
+// openingPosition and the no-transfer text, which the generator
+// derives PURELY from the frozen lines / a fixed constant.
+export type ZeroNetClosureFacts = {
+  closureType: 'ZERO_NET_NO_TRANSFER';
+  closedAt: string; // ISO — recording instant of the close (stored fact)
+  issuedUnderReplayEngine: string; // replay-engine version at issuance
+};
+
+// The explicit legal text (SC §26): the statement IS the instrument
+// of closure — fixed bytes, part of the hashed document.
+export const ZERO_NET_NO_TRANSFER_TEXT =
+  'No bank transfer occurred. The frozen net of this settlement batch is exactly zero; this Settlement Statement is the sole and complete instrument of closure (Settlement Constitution §26). No remittance exists for this batch and none is due.';
+
 export type SettlementStatement = {
-  statementVersion: 'v1';
+  statementVersion: 'v1' | 'v2';
   settlementReference: string;
   settlementId: string;
   storeId: string;
@@ -87,6 +102,23 @@ export type SettlementStatement = {
   itemCount: number;
   remittance: RemittanceEvidence | null;
   calculationHash: string;
+  // Present ONLY on §26 statement-only closes (statementVersion v2).
+  // canonicalJson drops undefined — every v1 remitted statement's
+  // bytes are UNCHANGED by this field's existence.
+  closure?: {
+    closureType: 'ZERO_NET_NO_TRANSFER';
+    noTransferStatement: string;
+    closedAt: string;
+    issuedUnderReplayEngine: string;
+    // The signed merchant position this close extinguishes, carried
+    // from the FROZEN lines verbatim (never recomputed): payables
+    // gross, receivable recovery consumed, net — exactly zero.
+    openingPosition: {
+      merchantGross: number;
+      receivableRecovery: number;
+      net: number;
+    };
+  };
 };
 
 // Recursive stable-key-order JSON: the same data always serializes to
@@ -147,8 +179,55 @@ export function signableDigest(statement: SettlementStatement): string {
 
 export function generateSettlementStatement(
   frozen: FrozenBatchRecord,
-  opts: { issuedAt: string; remittance?: RemittanceEvidence | null },
+  opts: {
+    issuedAt: string;
+    remittance?: RemittanceEvidence | null;
+    // SC §26: supplying closure facts produces the v2 statement-only
+    // close variant — remittance MUST be null/absent with it.
+    closure?: ZeroNetClosureFacts | null;
+  },
 ): SettlementStatement {
+  if (opts.closure && opts.remittance) {
+    // A close cannot both remit and not-remit — refusing here keeps
+    // the document space unambiguous forever.
+    throw new Error('statement_closure_and_remittance_exclusive');
+  }
+  if (opts.closure) {
+    const lines = frozen.calculationSnapshot.lines as Record<string, number>;
+    return {
+      statementVersion: 'v2',
+      settlementReference: frozen.settlementReference,
+      settlementId: frozen.settlementId,
+      storeId: frozen.storeId,
+      currency: frozen.currency,
+      windowType: frozen.windowType,
+      issuedAt: opts.issuedAt,
+      coveredOccurrences: frozen.composition.map((co) => ({
+        occurrenceType: co.occurrenceType,
+        occurrenceId: co.occurrenceId,
+        amount: co.amount,
+        currency: co.currency,
+        references: co.references ?? {},
+      })),
+      // VERBATIM — never recomputed here (RULE 4).
+      lines: frozen.calculationSnapshot.lines,
+      netAmount: frozen.calculationSnapshot.netAmount,
+      itemCount: frozen.calculationSnapshot.itemCount,
+      remittance: null,
+      calculationHash: calculationHash(frozen.calculationSnapshot),
+      closure: {
+        closureType: opts.closure.closureType,
+        noTransferStatement: ZERO_NET_NO_TRANSFER_TEXT,
+        closedAt: opts.closure.closedAt,
+        issuedUnderReplayEngine: opts.closure.issuedUnderReplayEngine,
+        openingPosition: {
+          merchantGross: lines.merchantGross ?? 0,
+          receivableRecovery: lines.receivableRecovery ?? 0,
+          net: frozen.calculationSnapshot.netAmount,
+        },
+      },
+    };
+  }
   return {
     statementVersion: 'v1',
     settlementReference: frozen.settlementReference,
