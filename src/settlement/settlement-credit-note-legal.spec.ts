@@ -126,6 +126,10 @@ function world() {
       auditRows.push(row);
       return Promise.resolve(undefined);
     }),
+    recordGuaranteed: jest.fn().mockImplementation((row: Row) => {
+      auditRows.push(row);
+      return Promise.resolve(undefined);
+    }),
   };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'l' }) };
   const service = new SettlementRefundsService(

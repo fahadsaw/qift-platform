@@ -359,6 +359,10 @@ function world(opts?: { receivables?: Row[] }) {
       auditRows.push(row);
       return Promise.resolve(undefined);
     }),
+    recordGuaranteed: jest.fn().mockImplementation((row: Row) => {
+      auditRows.push(row);
+      return Promise.resolve(undefined);
+    }),
   };
   const ledgerRowsStore = ledgerRows;
   const ledger = {

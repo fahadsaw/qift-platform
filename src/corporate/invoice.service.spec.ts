@@ -71,7 +71,10 @@ function build(
   prisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
     fn(prisma),
   );
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'ledger-1' }) };
   const service = new InvoiceService(
     prisma as never,

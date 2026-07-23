@@ -62,7 +62,10 @@ function mk(missing: {
         .mockResolvedValue([{ id: 'camp-1', referenceNumber: 'QB-TEST-2026' }]),
     },
   };
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
   const reconciliation = {
     findMissing: jest.fn().mockResolvedValue(report),
     repairAll: jest.fn().mockResolvedValue({ missing: report, posted: 2 }),

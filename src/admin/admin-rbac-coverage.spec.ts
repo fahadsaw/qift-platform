@@ -158,6 +158,19 @@ const ADMIN_GET_ROUTES: readonly AdminGetRoute[] = [
     opsPermission: 'finance.reconcile',
   },
   {
+    // Lane 2 PR 3 (Scope C) — internal-transfer evidence rows + the
+    // derived pending view.
+    method: 'listTreasuryInternalTransfers',
+    path: 'finance/treasury/internal-transfers',
+    opsPermission: 'finance.reconcile',
+  },
+  {
+    // Lane 2 PR 3 (Scope D) — treasury health (metrics + alerts).
+    method: 'treasuryHealth',
+    path: 'finance/treasury/health',
+    opsPermission: 'finance.reconcile',
+  },
+  {
     method: 'financeStoreBalances',
     path: 'finance/stores',
     opsPermission: 'finance.read_payouts',
@@ -733,6 +746,14 @@ describe('AdminController authorization-flow coverage (B-5)', () => {
         path: 'finance/settlement/:id/close-zero-net',
         httpMethod: 'POST',
         opsPermission: 'finance.settlement_execute',
+      },
+      {
+        // Lane 2 PR 3 (Scope C) — internal-transfer EVIDENCE recording
+        // (the one treasury writer; masked accounts, occurrence key).
+        method: 'recordTreasuryInternalTransfer',
+        path: 'finance/treasury/internal-transfers',
+        httpMethod: 'POST',
+        opsPermission: 'finance.reconcile',
       },
       {
         // Lane 2 PR 1 — treasury attestation (evidence entry, no money).

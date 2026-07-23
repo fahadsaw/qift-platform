@@ -112,7 +112,10 @@ function build(
     store,
     organization,
   };
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'ledger-1' }) };
   const service = new MerchantInvoiceService(
     prisma as never,

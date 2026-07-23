@@ -151,6 +151,9 @@ function buildService() {
   // PR 7 — the persistent audit trail; purge asserts the row shape
   // elsewhere, here a recording stub keeps construction honest.
   const audit = {
+    recordGuaranteed: jest.fn().mockImplementation(function (this: unknown, row: unknown) {
+      return (audit as { record: (r: unknown) => Promise<void> }).record(row);
+    }),
     record: jest.fn().mockResolvedValue(undefined),
   } as unknown as ConstructorParameters<typeof AdminService>[2];
   const opsRoles = {

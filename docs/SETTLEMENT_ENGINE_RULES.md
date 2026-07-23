@@ -313,6 +313,39 @@ bank execution (`settlement_closed_zero_net`) and supersession
 (`settlement_negative_net_deferred`) and are structurally unreachable
 through the gross-capped §7.4 planner.
 
+## Integrity-hardening note (Lane 2 PR 3)
+
+**Guaranteed audit (Scope A).** High-sensitivity financial mutations
+never complete while their audit evidence is silently lost:
+`AuditService.recordGuaranteed` (deterministic occurrence `auditKey`,
+P2002 collide-not-duplicate, PII-stripped, failures THROW). In-tx for
+non-idempotent acts (assembly, supersession, settle, zero-net close,
+refund request/approve/execute/cancel, preview, approval, attestation,
+reconciliation run, investigate/resolve, internal transfer);
+guaranteed-with-heal for idempotent completion tails (receipt replay,
+coverage flips, execution/statement tails — the §18.2 heal lanes
+re-deliver on the same key). Best-effort `record()` remains only for
+non-financial or read-act audits (simulate, replay, list surfaces).
+
+**One consumption path (Scope G).** `consumeRecoveryAllocation` is the
+ONLY §7.4 consumption implementation; both terminal lanes call it
+(amount-pin, lifecycle law, deterministic per-(receivable,batch)
+postings, partial behavior, contended rollbacks identical). Pinned:
+exactly two callers, amount-pin sites = staging + the helper.
+
+**DB append-only (Scope B).** See `docs/APPEND_ONLY_PROTECTION.md` —
+UPDATE/DELETE on constitutionally immutable tables is rejected by the
+DATABASE itself.
+
+**Currency scale (Scope H).** KWD/BHD/OMR (3-decimal) refuse at
+`asCurrencyCode` (`settlement_currency_scale_unsupported`) until
+settlement storage is widened — never silently rounded.
+
+**PayoutEvent (Scope E).** Retired as a financial truth source
+(producer removed, readers marked legacy, zero rows existed).
+Financial truth: ledger + invoices/credit notes + receipts +
+settlement batches/remittances/statements + treasury reconciliation.
+
 ## Amending these rules
 
 A change to any rule (or its pins) must name the rule, cite the

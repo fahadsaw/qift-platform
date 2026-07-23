@@ -510,7 +510,10 @@ describe('QB reference discipline (Track A.5)', () => {
       corporateContact: { findMany: jest.fn() },
       product: { findFirst: jest.fn() },
     };
-    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
     const invoices = { ensureForCampaign: jest.fn() };
     const merchantInvoices = { ensureForCampaign: jest.fn() };
     const service = new CampaignService(

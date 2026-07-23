@@ -23,8 +23,23 @@ import { fromMinor, toMinor, type CurrencyCode } from '../fees/money';
 // Widening first, then registry addition (review finding 11a).
 const KNOWN_CURRENCIES: ReadonlySet<string> = new Set(['SAR', 'AED', 'QAR']);
 
+// Lane 2 PR 3 (Scope H): Track C settlement records store DECIMAL(12,2)
+// — 3-decimal GCC currencies CANNOT be represented at their legal
+// exponent yet. They refuse EXPLICITLY (never silently rounded to two
+// decimals) until storage scale is widened by a dedicated migration.
+const UNSAFE_3DP_CURRENCIES: ReadonlySet<string> = new Set([
+  'KWD',
+  'BHD',
+  'OMR',
+]);
+
 export function asCurrencyCode(raw: string): CurrencyCode {
   const c = raw.toUpperCase();
+  if (UNSAFE_3DP_CURRENCIES.has(c)) {
+    throw new Error(
+      `settlement_currency_scale_unsupported:${c} — 3-decimal currencies require widened settlement storage (never silently rounded)`,
+    );
+  }
   if (!KNOWN_CURRENCIES.has(c)) {
     // FC Ch. 5.4 storage law: an unregistered currency has no defined
     // scale — refusing is the only lawful move.

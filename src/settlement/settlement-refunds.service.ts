@@ -572,13 +572,34 @@ export class SettlementRefundsService {
       ) {
         throw new ConflictException('refund_evidence_conflict');
       }
+      // Scope A heal: a replay re-delivers the recorded audits with
+      // the same deterministic keys — collides, never duplicates.
+      await this.audit.recordGuaranteed({
+        auditKey: `finance.refund.recorded:${outcome.existing.id}`,
+        actorUserId,
+        actorType: 'user',
+        action: 'finance.refund.recorded',
+        targetType: 'store',
+        targetId: outcome.existing.storeId,
+        metadata: {
+          refundId: outcome.existing.id,
+          invoiceType: 'merchant_invoice',
+          invoiceId: outcome.existing.invoiceId,
+          amount,
+          currency: 'SAR',
+          reason,
+          evidenceRef,
+          replayed: true,
+        },
+      });
       return { refund: outcome.existing, replayed: true as const };
     }
     const issuedNote = await this.prisma.creditNote.findUnique({
       where: { refundId: outcome.refund!.id },
       select: { referenceNumber: true },
     });
-    await this.audit.record({
+    await this.audit.recordGuaranteed({
+      auditKey: `finance.credit_note.issued:${outcome.refund!.id}`,
       actorUserId,
       actorType: 'user',
       action: 'finance.credit_note.issued',
@@ -592,7 +613,8 @@ export class SettlementRefundsService {
         vatComponent: moneyToNumber(outcome.refund!.vatComponent),
       },
     });
-    await this.audit.record({
+    await this.audit.recordGuaranteed({
+      auditKey: `finance.refund.recorded:${outcome.refund!.id}`,
       actorUserId,
       actorType: 'user',
       action: 'finance.refund.recorded',
@@ -1173,9 +1195,30 @@ export class SettlementRefundsService {
           outcome.existing.invoiceId,
         );
       }
+      // Scope A heal: the replay re-delivers the recorded audit with
+      // the same deterministic key — collides, never duplicates.
+      await this.audit.recordGuaranteed({
+        auditKey: `finance.refund.recorded:${outcome.existing.id}`,
+        actorUserId,
+        actorType: 'user',
+        action: 'finance.refund.recorded',
+        targetType: 'organization',
+        targetId: outcome.existing.orgId,
+        metadata: {
+          refundId: outcome.existing.id,
+          invoiceType: 'corporate_invoice',
+          invoiceId: outcome.existing.invoiceId,
+          amount,
+          currency: 'SAR',
+          reason,
+          evidenceRef,
+          replayed: true,
+        },
+      });
       return { refund: outcome.existing, replayed: true as const };
     }
-    await this.audit.record({
+    await this.audit.recordGuaranteed({
+      auditKey: `finance.credit_note.issued:${outcome.refund!.id}`,
       actorUserId,
       actorType: 'user',
       action: 'finance.credit_note.issued',
@@ -1191,7 +1234,8 @@ export class SettlementRefundsService {
         vatComponent: moneyToNumber(outcome.refund!.vatComponent),
       },
     });
-    await this.audit.record({
+    await this.audit.recordGuaranteed({
+      auditKey: `finance.refund.recorded:${outcome.refund!.id}`,
       actorUserId,
       actorType: 'user',
       action: 'finance.refund.recorded',
@@ -1327,42 +1371,52 @@ export class SettlementRefundsService {
       recipientOrgId: invoice.orgId,
       method: 'manual_bank_transfer',
     };
-    const request = await this.prisma.refundRequest.create({
-      data: {
-        invoiceType: input.invoiceType,
-        invoiceId: invoice.id,
-        orgId: invoice.orgId,
-        storeId: fee
-          ? null
-          : ((invoice as { storeId: string }).storeId ?? null),
-        currency: 'SAR',
-        amount,
-        vatComponent,
-        reason,
-        reasonCode,
-        recipientType: 'company',
-        method: 'manual_bank_transfer',
-        snapshotHash: this.refundSnapshotHash(snapshot),
-        state: 'requested',
-        requestedBy: actorUserId,
-        requestedAt: this.clock.now(),
-      },
-    });
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.refund.requested',
-      targetType: 'organization',
-      targetId: invoice.orgId,
-      metadata: {
-        requestId: request.id,
-        invoiceType: input.invoiceType,
-        invoiceId: invoice.id,
-        amount,
-        vatComponent,
-        reasonCode,
-        snapshotHash: request.snapshotHash,
-      },
+    // Scope A: request creation and its audit are ONE transaction —
+    // requesting is not idempotent (a retry files a new request), so
+    // the audit must ride the same commit.
+    const request = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.refundRequest.create({
+        data: {
+          invoiceType: input.invoiceType,
+          invoiceId: invoice.id,
+          orgId: invoice.orgId,
+          storeId: fee
+            ? null
+            : ((invoice as { storeId: string }).storeId ?? null),
+          currency: 'SAR',
+          amount,
+          vatComponent,
+          reason,
+          reasonCode,
+          recipientType: 'company',
+          method: 'manual_bank_transfer',
+          snapshotHash: this.refundSnapshotHash(snapshot),
+          state: 'requested',
+          requestedBy: actorUserId,
+          requestedAt: this.clock.now(),
+        },
+      });
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `finance.refund.requested:${created.id}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.refund.requested',
+          targetType: 'organization',
+          targetId: invoice.orgId,
+          metadata: {
+            requestId: created.id,
+            invoiceType: input.invoiceType,
+            invoiceId: invoice.id,
+            amount,
+            vatComponent,
+            reasonCode,
+            snapshotHash: created.snapshotHash,
+          },
+        },
+        tx,
+      );
+      return created;
     });
     return request;
   }
@@ -1377,28 +1431,37 @@ export class SettlementRefundsService {
       throw new ConflictException('refund_self_approval_rejected');
     }
     await this.verifySnapshot(request);
-    const moved = await this.prisma.refundRequest.updateMany({
-      where: { id: requestId, state: 'requested' },
-      data: {
-        state: 'approved',
-        approvedBy: actorUserId,
-        approvedAt: this.clock.now(),
-      },
-    });
-    if (moved.count !== 1) {
-      throw new ConflictException('refund_request_contended');
-    }
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.refund.approved',
-      targetType: 'organization',
-      targetId: request.orgId,
-      metadata: {
-        requestId,
-        snapshotHash: request.snapshotHash,
-        requestedBy: request.requestedBy,
-      },
+    // Scope A: the guarded transition and its audit are ONE
+    // transaction — a one-shot state move must never commit while its
+    // audit is lost.
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.refundRequest.updateMany({
+        where: { id: requestId, state: 'requested' },
+        data: {
+          state: 'approved',
+          approvedBy: actorUserId,
+          approvedAt: this.clock.now(),
+        },
+      });
+      if (moved.count !== 1) {
+        throw new ConflictException('refund_request_contended');
+      }
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `finance.refund.approved:${requestId}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.refund.approved',
+          targetType: 'organization',
+          targetId: request.orgId,
+          metadata: {
+            requestId,
+            snapshotHash: request.snapshotHash,
+            requestedBy: request.requestedBy,
+          },
+        },
+        tx,
+      );
     });
     return this.loadRequest(requestId);
   }
@@ -1509,14 +1572,41 @@ export class SettlementRefundsService {
     }
     let done: { count: number };
     try {
-      done = await this.prisma.refundRequest.updateMany({
-        where: { id: requestId, state: 'executing' },
-        data: {
-          state: 'executed',
-          executedBy: actorUserId,
-          executedAt: this.clock.now(),
-          refundId: result.refund.id,
-        },
+      // Scope A: finalize + audit ride ONE transaction. On the
+      // replayed roll-forward the same deterministic key collides.
+      done = await this.prisma.$transaction(async (tx) => {
+        const moved = await tx.refundRequest.updateMany({
+          where: { id: requestId, state: 'executing' },
+          data: {
+            state: 'executed',
+            executedBy: actorUserId,
+            executedAt: this.clock.now(),
+            refundId: result.refund.id,
+          },
+        });
+        if (moved.count === 1 || result.replayed) {
+          await this.audit.recordGuaranteed(
+            {
+              auditKey: `finance.refund.executed:${requestId}`,
+              actorUserId,
+              actorType: 'user',
+              action: 'finance.refund.executed',
+              targetType: 'organization',
+              targetId: request.orgId,
+              metadata: {
+                requestId,
+                refundId: result.refund.id,
+                snapshotHash: request.snapshotHash,
+                requestedBy: request.requestedBy,
+                approvedBy: request.approvedBy,
+                executedBy: actorUserId,
+                replayed: result.replayed,
+              },
+            },
+            tx,
+          );
+        }
+        return moved;
       });
     } catch (err) {
       // refundId is @unique: a concurrent roll-forward that bound the
@@ -1536,22 +1626,6 @@ export class SettlementRefundsService {
     if (done.count !== 1 && !result.replayed) {
       throw new ConflictException('refund_request_contended');
     }
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.refund.executed',
-      targetType: 'organization',
-      targetId: request.orgId,
-      metadata: {
-        requestId,
-        refundId: result.refund.id,
-        snapshotHash: request.snapshotHash,
-        requestedBy: request.requestedBy,
-        approvedBy: request.approvedBy,
-        executedBy: actorUserId,
-        replayed: result.replayed,
-      },
-    });
     return { request: await this.loadRequest(requestId), ...result };
   }
 
@@ -1560,24 +1634,31 @@ export class SettlementRefundsService {
     if (request.state !== 'requested' && request.state !== 'approved') {
       throw new ConflictException(`refund_request_not_cancellable:${request.state}`);
     }
-    const moved = await this.prisma.refundRequest.updateMany({
-      where: { id: requestId, state: request.state },
-      data: {
-        state: 'cancelled',
-        cancelledBy: actorUserId,
-        cancelledAt: this.clock.now(),
-      },
-    });
-    if (moved.count !== 1) {
-      throw new ConflictException('refund_request_contended');
-    }
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.refund.cancelled',
-      targetType: 'organization',
-      targetId: request.orgId,
-      metadata: { requestId, priorState: request.state },
+    // Scope A: one-shot transition + audit, one transaction.
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.refundRequest.updateMany({
+        where: { id: requestId, state: request.state },
+        data: {
+          state: 'cancelled',
+          cancelledBy: actorUserId,
+          cancelledAt: this.clock.now(),
+        },
+      });
+      if (moved.count !== 1) {
+        throw new ConflictException('refund_request_contended');
+      }
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `finance.refund.cancelled:${requestId}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.refund.cancelled',
+          targetType: 'organization',
+          targetId: request.orgId,
+          metadata: { requestId, priorState: request.state },
+        },
+        tx,
+      );
     });
     return this.loadRequest(requestId);
   }

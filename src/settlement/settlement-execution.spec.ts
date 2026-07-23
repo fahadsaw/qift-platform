@@ -260,6 +260,10 @@ function world(opts?: { net?: number; assembledBy?: string | null }) {
       auditRows.push(row);
       return Promise.resolve(undefined);
     }),
+    recordGuaranteed: jest.fn().mockImplementation((row: Row) => {
+      auditRows.push(row);
+      return Promise.resolve(undefined);
+    }),
   };
   const ledger = {
     record: jest.fn().mockImplementation((row: Row) => {

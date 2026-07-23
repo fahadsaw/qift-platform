@@ -1297,59 +1297,10 @@ export class AdminService {
   }
 
   // Record a finance event. Admin-only with the
-  // `finance.record_payout_event` permission. Validates the type
-  // against the known vocabulary and stamps `recordedBy` so every
-  // row has an audit trail.
-  async recordPayoutEvent(
-    adminUserId: string,
-    storeId: string,
-    body: {
-      type?: string;
-      amount?: number;
-      currency?: string;
-      reason?: string;
-      giftId?: string;
-      occurredAt?: string;
-    },
-  ) {
-    const allowedTypes = new Set([
-      'accrued',
-      'held',
-      'released',
-      'paid',
-      'reversed',
-      'adjustment',
-    ]);
-    const type = (body.type ?? '').trim();
-    if (!allowedTypes.has(type)) {
-      throw new BadRequestException('Invalid event type');
-    }
-    const amount = typeof body.amount === 'number' ? body.amount : NaN;
-    if (!Number.isFinite(amount)) {
-      throw new BadRequestException('amount must be a number');
-    }
-    const currency = (body.currency ?? 'SAR').trim() || 'SAR';
-    const store = await this.prisma.store.findUnique({
-      where: { id: storeId },
-      select: { id: true },
-    });
-    if (!store) throw new NotFoundException('Store not found');
-    if (type === 'adjustment' && !body.reason?.trim()) {
-      throw new BadRequestException('Reason is required for adjustment events');
-    }
-    return this.prisma.payoutEvent.create({
-      data: {
-        storeId,
-        giftId: body.giftId?.trim() || null,
-        type,
-        amount,
-        currency,
-        reason: body.reason?.trim() || null,
-        recordedBy: adminUserId,
-        occurredAt: body.occurredAt ? new Date(body.occurredAt) : new Date(),
-      },
-    });
-  }
+  // Lane 2 PR 3 (Scope E): recordPayoutEvent REMOVED — PayoutEvent is
+  // retired as a financial truth source (legacy read-only history;
+  // zero rows existed at retirement). New financial flows never write
+  // it (census-pinned).
 
   // Lightweight ops dashboard: totals + which optional integrations
   // are configured. No secrets are echoed back — only positive flags

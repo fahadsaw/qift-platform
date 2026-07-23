@@ -35,6 +35,7 @@ import {
 } from '../settlement/settlement-execution.service';
 import { SettlementRefundsService } from '../settlement/settlement-refunds.service';
 import { TreasuryReconciliationService } from '../treasury/treasury-reconciliation.service';
+import { TreasuryInternalTransferService } from '../treasury/treasury-internal-transfer.service';
 
 type AuthedRequest = { user: { userId: string; qiftUsername: string } };
 
@@ -59,6 +60,7 @@ export class AdminController {
     private readonly settlementExecution: SettlementExecutionService,
     private readonly settlementRefunds: SettlementRefundsService,
     private readonly treasury: TreasuryReconciliationService,
+    private readonly treasuryTransfers: TreasuryInternalTransferService,
   ) {}
 
   // ── Self ─────────────────────────────────────────────────────────
@@ -693,10 +695,55 @@ export class AdminController {
   @RequireOpsPermission('finance.reconcile')
   resolveTreasuryReconciliation(
     @Param('id') id: string,
-    @Body() body: { notes: string; evidenceRef?: string },
+    @Body()
+    body: {
+      notes: string;
+      resolutionKind: string;
+      evidenceRef?: string;
+      matchedReconciliationId?: string;
+    },
     @Req() req: AuthedRequest,
   ) {
     return this.treasury.resolve(req.user.userId, id, body);
+  }
+
+  // Lane 2 PR 3 (Scopes C+D) — internal-transfer evidence + health.
+
+  @Post('finance/treasury/internal-transfers')
+  @RequireOpsPermission('finance.reconcile')
+  recordTreasuryInternalTransfer(
+    @Body()
+    body: {
+      settlementId: string;
+      bankReference: string;
+      valueDate: string;
+      confirmedAmount: number;
+      accountFromMasked: string;
+      accountToMasked: string;
+      status?: string;
+      notes?: string;
+    },
+    @Req() req: AuthedRequest,
+  ) {
+    return this.treasuryTransfers.recordInternalTransfer(
+      req.user.userId,
+      body,
+    );
+  }
+
+  @Get('finance/treasury/internal-transfers')
+  @RequireOpsPermission('finance.reconcile')
+  async listTreasuryInternalTransfers() {
+    return {
+      transfers: await this.treasuryTransfers.listInternalTransfers(),
+      pending: await this.treasuryTransfers.pendingInternalTransfers(),
+    };
+  }
+
+  @Get('finance/treasury/health')
+  @RequireOpsPermission('finance.reconcile')
+  treasuryHealth() {
+    return this.treasury.health();
   }
 
   @Get('finance/reconciliation')
@@ -713,33 +760,32 @@ export class AdminController {
 
   @Get('finance/stores')
   @RequireOpsPermission('finance.read_payouts')
-  financeStoreBalances() {
-    return this.admin.financeStoreBalances();
+  async financeStoreBalances() {
+    return {
+      legacy: true,
+      supersededBy:
+        'FinancialLedgerEntry + settlement remittances/statements + treasury reconciliation',
+      stores: await this.admin.financeStoreBalances(),
+    };
   }
 
   @Get('finance/stores/:id/events')
   @RequireOpsPermission('finance.read_payouts')
-  financeStoreEvents(@Param('id') id: string) {
-    return this.admin.financeStoreEvents(id);
+  async financeStoreEvents(@Param('id') id: string) {
+    return {
+      legacy: true,
+      supersededBy:
+        'FinancialLedgerEntry + settlement remittances/statements + treasury reconciliation',
+      events: await this.admin.financeStoreEvents(id),
+    };
   }
 
-  @Post('finance/stores/:id/events')
-  @RequireOpsPermission('finance.record_payout_event')
-  recordFinanceEvent(
-    @Param('id') id: string,
-    @Body()
-    body: {
-      type?: string;
-      amount?: number;
-      currency?: string;
-      reason?: string;
-      giftId?: string;
-      occurredAt?: string;
-    },
-    @Req() req: AuthedRequest,
-  ) {
-    return this.admin.recordPayoutEvent(req.user.userId, id, body);
-  }
+  // Lane 2 PR 3 (Scope E): the PayoutEvent PRODUCER is RETIRED.
+  // Financial truth comes from the ledger, invoices/credit notes,
+  // receipts, settlement batches/remittances/statements, and treasury
+  // reconciliation — never from manually recorded payout events. The
+  // read endpoints below remain for historical visibility only and
+  // are marked legacy in their responses.
 
   // ── Diagnostics ─────────────────────────────────────────────────
   //

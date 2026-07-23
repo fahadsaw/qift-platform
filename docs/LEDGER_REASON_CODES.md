@@ -36,3 +36,5 @@ recovery (metadata `account` records which).
 
 Reserved next (enter here before first use): reserve held/released,
 fee-leg refunds, chargeback family.
+
+| `TREASURY_INTERNAL_TRANSFER` | `treasury.internal_transfer.completed` | The evidenced physical safeguarding→operating sweep of a §26 zero-net close's internal-transfer-due (Lane 2 PR 3, Scope C). Anchored on settlementId; posted only with bank evidence; cash movement (safeguarding out). |

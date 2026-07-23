@@ -238,6 +238,9 @@ describe('Track C PR 3 — end-to-end financial walkthrough (S01: assembly → a
       fn(prisma),
     );
     const audit = {
+      recordGuaranteed: jest.fn().mockImplementation(function (this: unknown, row: unknown) {
+        return (audit as { record: (r: unknown) => Promise<void> }).record(row);
+      }),
       record: jest.fn().mockImplementation((row: Row) => {
         auditRows.push(row);
         return Promise.resolve(undefined);

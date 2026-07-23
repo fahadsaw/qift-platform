@@ -53,7 +53,10 @@ function mk(opts: { pending?: unknown } = {}) {
     // for corporateInvoice/merchantInvoice, the test would crash —
     // issued documents are immutable (future-issuances-only, Ch. 7.2).
   };
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
   const service = new VatFactsService(
     prisma as unknown as PrismaService,
     audit as unknown as AuditService,
