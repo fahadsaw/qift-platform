@@ -126,29 +126,37 @@ export class SettlementExecutionService {
       asOf: this.clock.now().toISOString(),
     });
     // RULE 5: the preview ACT is a recorded fact execution checks for.
-    await this.prisma.settlementExecutionPreview.create({
-      data: {
-        settlementId: frozen.settlementId,
-        settlementReference: frozen.settlementReference,
-        calculationHash: preview.calculationHash,
-        replayVerified: preview.replayVerified,
-        previewedBy: actorUserId,
-        previewedAt: this.clock.now(),
-      },
-    });
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'settlement.execution.previewed',
-      targetType: 'store',
-      targetId: frozen.storeId,
-      metadata: {
-        settlementId: frozen.settlementId,
-        settlementReference: frozen.settlementReference,
-        calculationHash: preview.calculationHash,
-        replayVerified: preview.replayVerified,
-        itemCount: preview.itemCount,
-      },
+    // Scope A: the act row and its audit are ONE transaction, keyed on
+    // the act row id (each preview is its own lawful act).
+    await this.prisma.$transaction(async (tx) => {
+      const act = await tx.settlementExecutionPreview.create({
+        data: {
+          settlementId: frozen.settlementId,
+          settlementReference: frozen.settlementReference,
+          calculationHash: preview.calculationHash,
+          replayVerified: preview.replayVerified,
+          previewedBy: actorUserId,
+          previewedAt: this.clock.now(),
+        },
+      });
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `settlement.execution.previewed:${act.id}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'settlement.execution.previewed',
+          targetType: 'store',
+          targetId: frozen.storeId,
+          metadata: {
+            settlementId: frozen.settlementId,
+            settlementReference: frozen.settlementReference,
+            calculationHash: preview.calculationHash,
+            replayVerified: preview.replayVerified,
+            itemCount: preview.itemCount,
+          },
+        },
+        tx,
+      );
     });
     return preview;
   }
@@ -202,16 +210,40 @@ export class SettlementExecutionService {
     );
     let approval;
     try {
-      approval = await this.prisma.settlementApproval.create({
-        data: {
-          settlementId: frozen.settlementId,
-          settlementReference: frozen.settlementReference,
-          calculationHash: frozenHash,
-          requiredLevel: requirement.level,
-          approvedBy: actorUserId,
-          approvedAt: this.clock.now(),
-          note: input.note?.trim() || null,
-        },
+      // Scope A: the vote row and its audit are ONE transaction,
+      // keyed on the vote row id (each recast is its own lawful row).
+      approval = await this.prisma.$transaction(async (tx) => {
+        const vote = await tx.settlementApproval.create({
+          data: {
+            settlementId: frozen.settlementId,
+            settlementReference: frozen.settlementReference,
+            calculationHash: frozenHash,
+            requiredLevel: requirement.level,
+            approvedBy: actorUserId,
+            approvedAt: this.clock.now(),
+            note: input.note?.trim() || null,
+          },
+        });
+        await this.audit.recordGuaranteed(
+          {
+            auditKey: `settlement.execution.approved:${vote.id}`,
+            actorUserId,
+            actorType: 'user',
+            action: 'settlement.execution.approved',
+            targetType: 'store',
+            targetId: frozen.storeId,
+            metadata: {
+              settlementId: frozen.settlementId,
+              settlementReference: frozen.settlementReference,
+              calculationHash: frozenHash,
+              requiredLevel: requirement.level,
+              band: requirement.aggregateBand,
+              policyVersion: requirement.policyVersion,
+            },
+          },
+          tx,
+        );
+        return vote;
       });
     } catch (e) {
       if ((e as { code?: string })?.code === 'P2002') {
@@ -220,21 +252,6 @@ export class SettlementExecutionService {
       }
       throw e;
     }
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'settlement.execution.approved',
-      targetType: 'store',
-      targetId: frozen.storeId,
-      metadata: {
-        settlementId: frozen.settlementId,
-        settlementReference: frozen.settlementReference,
-        calculationHash: frozenHash,
-        requiredLevel: requirement.level,
-        band: requirement.aggregateBand,
-        policyVersion: requirement.policyVersion,
-      },
-    });
     return { approval, requirement };
   }
 
@@ -744,8 +761,11 @@ export class SettlementExecutionService {
     // hashed document), audited — never a silent rewrite.
     await this.attachStatementToCreditNotes(actorUserId, frozen);
     // §33.4 evidence chain — the heal lane audits too (a crashed
-    // execution's completion must appear in the trail).
-    await this.audit.record({
+    // execution's completion must appear in the trail). Scope A:
+    // guaranteed, keyed per settlement — the tail is idempotent, so a
+    // lost audit re-delivers on the next heal and collides after.
+    await this.audit.recordGuaranteed({
+      auditKey: `settlement.execution.completed:${frozen.settlementId}`,
       actorUserId,
       actorType: 'user',
       action: trail.healed
@@ -799,7 +819,11 @@ export class SettlementExecutionService {
       closedAt,
     );
     await this.attachStatementToCreditNotes(actorUserId, frozen);
-    await this.audit.record({
+    // Scope A: guaranteed, keyed per settlement — the completion tail
+    // is idempotent (the healed lane re-runs it), so a lost audit is
+    // re-delivered on the next run and the key collides thereafter.
+    await this.audit.recordGuaranteed({
+      auditKey: `settlement.zero_net_statement:${frozen.settlementId}`,
       actorUserId,
       actorType: 'user',
       action: trail.healed
@@ -976,7 +1000,8 @@ export class SettlementExecutionService {
             createdBy: actorUserId,
           },
         });
-        await this.audit.record({
+        await this.audit.recordGuaranteed({
+          auditKey: `settlement.credit_note.statement_attached:${note.refundId}`,
           actorUserId,
           actorType: 'user',
           action: 'settlement.credit_note.statement_attached',

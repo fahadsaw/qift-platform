@@ -281,7 +281,10 @@ describe('lookupClaimByReference (Track A.5 PR 3 — support lookup)', () => {
     const prisma = {
       claimableGift: { findUnique: jest.fn().mockResolvedValue(CLAIM) },
     };
-    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
     const service = new FulfillmentExportService(
       prisma as unknown as PrismaService,
       audit as unknown as AuditService,

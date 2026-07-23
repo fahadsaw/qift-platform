@@ -121,13 +121,42 @@ investigated → resolved with the sweep's bank advice as evidence —
 never a reason to skip the lifecycle. Operators who learn to wave
 mismatches through defeat the entire surface.
 
+## PR 3 hardening (snapshot v3 — Scopes C + D)
+
+**Internal-transfer lifecycle (Scope C):** not_required (remitted
+closes) · **pending** (DERIVED — due postings with no completed
+evidence; aged; alerting past 3 days, `treasury-alerts@pilot-1`) ·
+failed (evidenced attempt; stays outstanding) · **completed**
+(evidence only: bank reference [unique — duplicate evidence refuses],
+value date, bank-confirmed amount [must equal the FULL outstanding
+exactly], executor identity, MASKED account identifiers [raw
+identifiers refuse], occurrence-keyed
+`treasury.internal_transfer.completed` posting — the REAL cash event,
+posted only with evidence). Recording lives in
+`treasury-internal-transfer.service.ts` — the ONE treasury writer;
+the reconciliation service stays read-only (census-pinned). No
+merchant remittance is ever created.
+
+**Run hardening (Scope D):** every run carries identity
+(accountType + currency + cutoffAt + timezone UTC) and the
+attestation's evidence source + content hash; enumerated ALERTS
+(reconciliation_zero_violated, mismatched_run, unresolved_evidence,
+internal_transfer_pending_aging) ride the snapshot and the
+`finance/treasury/health` endpoint (reconciliation-zero metric).
+Outstanding internal transfers are enumerated on every run — the
+explained classification adjusts by the OUTSTANDING amount only and
+NEVER hides a pending transfer. Mismatch resolution now requires a
+STRUCTURED basis (new_evidence + reference | accepted_timing + dated
+evidence | superseded_by_matched + a LATER matched run) — free-text
+alone refuses — and the ATTESTER of the mismatched run's bank leg can
+never be its resolver.
+
 ## Deferred (recorded, deliberate)
 
 - **Reconciliation-failure batch-blocking** (SC §10.3 "failure blocks
-  batches") and **health alerts** — arrive with Lane 2 PR 3
-  (reconciliation-zero health alerts). Until then a `mismatched` day
-  is surfaced by this API and the audit trail, not enforced against
-  assembly.
+  batches") — alerts shipped in PR 3; the assembly-blocking
+  enforcement remains deferred (no automatic money impact from
+  reconciliation state yet).
 - `statement_import` source — the import seam exists as a source
   value; a real bank-statement importer is a later PR.
 - Multi-account (operating-account reconciliation) — safeguarding

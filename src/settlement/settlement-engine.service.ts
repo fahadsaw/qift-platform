@@ -37,6 +37,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { FinancialLedgerService } from '../financial/financial-ledger.service';
@@ -291,23 +292,30 @@ export class SettlementEngineService {
             },
             tx,
           );
+          // Scope A (Lane 2 PR 3): the assembly audit rides the SAME
+          // transaction — assembly is NOT idempotent (a retry mints a
+          // new QS), so a post-commit audit failure would be
+          // unrecoverable. In-tx, it cannot be lost.
+          await this.audit.recordGuaranteed(
+            {
+              auditKey: `settlement.batch.assembled:${created.id}`,
+              actorUserId,
+              actorType: 'user',
+              action: 'settlement.batch.assembled',
+              targetType: 'store',
+              targetId: storeId,
+              metadata: {
+                settlementId: created.id,
+                settlementReference,
+                itemCount: items.length,
+                grossAmount: calculation.lines.merchantGross,
+                netAmount: calculation.netAmount,
+                currency: calculation.currency,
+              },
+            },
+            tx,
+          );
           return created;
-        });
-
-        await this.audit.record({
-          actorUserId,
-          actorType: 'user',
-          action: 'settlement.batch.assembled',
-          targetType: 'store',
-          targetId: storeId,
-          metadata: {
-            settlementId: batch.id,
-            settlementReference,
-            itemCount: items.length,
-            grossAmount: calculation.lines.merchantGross,
-            netAmount: calculation.netAmount,
-            currency: calculation.currency,
-          },
         });
         return batch;
       } catch (e) {
@@ -505,21 +513,26 @@ export class SettlementEngineService {
         },
         tx,
       );
-    });
-
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'settlement.batch.superseded',
-      targetType: 'store',
-      targetId: batch.storeId,
-      metadata: {
-        settlementId: batchId,
-        settlementReference: batch.settlementReference,
-        cause,
-        affectedItemIds,
-        ...(hold ? { holdType: hold.holdType } : {}),
-      },
+      // Scope A: the supersession audit rides the SAME transaction —
+      // a supersede whose audit cannot land does not happen.
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `settlement.batch.superseded:${batchId}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'settlement.batch.superseded',
+          targetType: 'store',
+          targetId: batch.storeId,
+          metadata: {
+            settlementId: batchId,
+            settlementReference: batch.settlementReference,
+            cause,
+            affectedItemIds,
+            ...(hold ? { holdType: hold.holdType } : {}),
+          },
+        },
+        tx,
+      );
     });
     return this.loadBatch(batchId);
   }
@@ -603,84 +616,20 @@ export class SettlementEngineService {
         },
       });
       // §7.4 recovery CONSUMES at execution — atomically with the
-      // settle: each staged receivable advances through the lifecycle
-      // law and posts merchant.receivable.recovered (the §13.3(a)
-      // safeguarding→operating draw), keyed per (receivable, batch)
-      // so partial recoveries across batches never collide.
-      const allocation = (batch.recoveryAllocation ?? []) as Array<{
-        receivableId: string;
-        occurrenceId: string;
-        amount: number;
-        amountRecoveredAtPlan: number;
-        balanceAfter: number;
-      }>;
-      for (const alloc of allocation) {
-        const nextState: ReceivableState =
-          alloc.balanceAfter <= 0 ? 'recovered' : 'partially_recovered';
-        const row = await tx.settlementReceivable.findUnique({
-          where: { id: alloc.receivableId },
-          select: { state: true },
-        });
-        if (!row) throw new ConflictException('settlement_receivables_contended');
-        // A same-state partial roll-forward is not a transition (the
-        // lifecycle law has no self-loops by design — review finding
-        // 2): assert only when the state actually changes.
-        if (row.state !== nextState) {
-          assertReceivableTransition(row.state as ReceivableState, nextState);
-        }
-        const consumed = await tx.settlementReceivable.updateMany({
-          where: {
-            id: alloc.receivableId,
-            stagedBySettlementId: batch.id,
-            state: row.state,
-            // The amount-pin discipline (review finding 4): the row
-            // must still carry the recovered-so-far the plan froze —
-            // any future writer that moved it rolls this settle back.
-            amountRecovered: alloc.amountRecoveredAtPlan,
-          },
-          data: {
-            state: nextState,
-            amountRecovered: alloc.amountRecoveredAtPlan + alloc.amount,
-            stagedBySettlementId: null,
-            ...(nextState === 'recovered'
-              ? {
-                  recoveredAt: evidence.executedAt,
-                  recoveredBySettlementId: batch.id,
-                }
-              : {}),
-          },
-        });
-        if (consumed.count !== 1) {
-          throw new ConflictException('settlement_receivables_contended');
-        }
-        await this.ledger.record(
-          {
-            eventType: FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
-            reasonCode: 'MERCHANT_RECEIVABLE',
-            actorType: 'user',
-            actorId: actorUserId,
-            amount: alloc.amount,
-            currency: batch.currency,
-            direction: 'debit', // the receivable asset shrinks
-            counterpartyType: 'merchant',
-            storeId: batch.storeId,
-            idempotencyKey: ledgerIdempotencyKey(
-              FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
-              `${alloc.receivableId}:${batch.id}`,
-            ),
-            metadata: {
-              settlementReference: batch.settlementReference,
-              receivableId: alloc.receivableId,
-              refundId: alloc.occurrenceId,
-              // §13.3(a): the recovery draw moves safeguarding →
-              // operating against this posting.
-              accountFrom: 'safeguarding',
-              accountTo: 'operating',
-            },
-          },
-          tx,
-        );
-      }
+      // settle, through the ONE consumption path (Scope G). The
+      // remitted lane's postings claim the §13.3(a) cash draw.
+      await this.consumeRecoveryAllocation(
+        tx,
+        actorUserId,
+        batch,
+        evidence.executedAt,
+        () => ({
+          // §13.3(a): the recovery draw moves safeguarding →
+          // operating against this posting.
+          accountFrom: 'safeguarding',
+          accountTo: 'operating',
+        }),
+      );
       await this.ledger.record(
         {
           eventType: FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
@@ -703,26 +652,132 @@ export class SettlementEngineService {
         },
         tx,
       );
+      // Scope A: the settle audit rides the SAME transaction as the
+      // remittance + terminal transition — it cannot be lost.
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `settlement.batch.settled:${batchId}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'settlement.batch.settled',
+          targetType: 'store',
+          targetId: batch.storeId,
+          metadata: {
+            settlementId: batchId,
+            settlementReference: batch.settlementReference,
+            remittanceId: created.id,
+            itemCount: memberIds.length,
+          },
+        },
+        tx,
+      );
       return created;
-    });
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'settlement.batch.settled',
-      targetType: 'store',
-      targetId: batch.storeId,
-      metadata: {
-        settlementId: batchId,
-        settlementReference: batch.settlementReference,
-        remittanceId: remittance.id,
-        itemCount: memberIds.length,
-      },
     });
     return {
       batch: await this.loadBatch(batchId),
       remittance,
       replayed: false as const,
     };
+  }
+
+  // ── Scope G (Lane 2 PR 3): the ONE recovery-consumption path ──────
+  // Both terminal lanes (bank-remitted markSettled and the §26
+  // statement-only close) consume the batch's FROZEN allocation
+  // through THIS function: same amount-pin, same lifecycle law, same
+  // deterministic per-(receivable,batch) postings, same
+  // partial-recovery behavior, same contended rollbacks. The lanes
+  // differ ONLY in the metadata their postings carry (a cash-draw
+  // claim vs an internal-transfer-due position fact) and the
+  // timestamp basis — passed in, never re-implemented.
+  private async consumeRecoveryAllocation(
+    tx: Prisma.TransactionClient,
+    actorUserId: string,
+    batch: {
+      id: string;
+      settlementReference: string;
+      storeId: string;
+      currency: string;
+      recoveryAllocation: unknown;
+    },
+    at: Date,
+    postingMetadata: (alloc: {
+      receivableId: string;
+      occurrenceId: string;
+    }) => Record<string, unknown>,
+  ) {
+    const allocation = (batch.recoveryAllocation ?? []) as Array<{
+      receivableId: string;
+      occurrenceId: string;
+      amount: number;
+      amountRecoveredAtPlan: number;
+      balanceAfter: number;
+    }>;
+    for (const alloc of allocation) {
+      const nextState: ReceivableState =
+        alloc.balanceAfter <= 0 ? 'recovered' : 'partially_recovered';
+      const row = await tx.settlementReceivable.findUnique({
+        where: { id: alloc.receivableId },
+        select: { state: true },
+      });
+      if (!row) {
+        throw new ConflictException('settlement_receivables_contended');
+      }
+      // A same-state partial roll-forward is not a transition (the
+      // lifecycle law has no self-loops by design): assert only when
+      // the state actually changes.
+      if (row.state !== nextState) {
+        assertReceivableTransition(row.state as ReceivableState, nextState);
+      }
+      const consumed = await tx.settlementReceivable.updateMany({
+        where: {
+          id: alloc.receivableId,
+          stagedBySettlementId: batch.id,
+          state: row.state,
+          // The amount-pin discipline: the row must still carry the
+          // recovered-so-far the plan froze — any future writer that
+          // moved it rolls this close back.
+          amountRecovered: alloc.amountRecoveredAtPlan,
+        },
+        data: {
+          state: nextState,
+          amountRecovered: alloc.amountRecoveredAtPlan + alloc.amount,
+          stagedBySettlementId: null,
+          ...(nextState === 'recovered'
+            ? {
+                recoveredAt: at,
+                recoveredBySettlementId: batch.id,
+              }
+            : {}),
+        },
+      });
+      if (consumed.count !== 1) {
+        throw new ConflictException('settlement_receivables_contended');
+      }
+      await this.ledger.record(
+        {
+          eventType: FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
+          reasonCode: 'MERCHANT_RECEIVABLE',
+          actorType: 'user',
+          actorId: actorUserId,
+          amount: alloc.amount,
+          currency: batch.currency,
+          direction: 'debit', // the receivable asset shrinks
+          counterpartyType: 'merchant',
+          storeId: batch.storeId,
+          idempotencyKey: ledgerIdempotencyKey(
+            FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
+            `${alloc.receivableId}:${batch.id}`,
+          ),
+          metadata: {
+            settlementReference: batch.settlementReference,
+            receivableId: alloc.receivableId,
+            refundId: alloc.occurrenceId,
+            ...postingMetadata(alloc),
+          },
+        },
+        tx,
+      );
+    }
   }
 
   // ── §26 statement-only close (Lane 2 PR 2) ────────────────────────
@@ -775,79 +830,15 @@ export class SettlementEngineService {
       if (settledItems.count !== memberIds.length) {
         throw new ConflictException('settlement_items_contended');
       }
-      const allocation = (batch.recoveryAllocation ?? []) as Array<{
-        receivableId: string;
-        occurrenceId: string;
-        amount: number;
-        amountRecoveredAtPlan: number;
-        balanceAfter: number;
-      }>;
-      for (const alloc of allocation) {
-        const nextState: ReceivableState =
-          alloc.balanceAfter <= 0 ? 'recovered' : 'partially_recovered';
-        const row = await tx.settlementReceivable.findUnique({
-          where: { id: alloc.receivableId },
-          select: { state: true },
-        });
-        if (!row) {
-          throw new ConflictException('settlement_receivables_contended');
-        }
-        if (row.state !== nextState) {
-          assertReceivableTransition(row.state as ReceivableState, nextState);
-        }
-        const consumed = await tx.settlementReceivable.updateMany({
-          where: {
-            id: alloc.receivableId,
-            stagedBySettlementId: batch.id,
-            state: row.state,
-            amountRecovered: alloc.amountRecoveredAtPlan,
-          },
-          data: {
-            state: nextState,
-            amountRecovered: alloc.amountRecoveredAtPlan + alloc.amount,
-            stagedBySettlementId: null,
-            ...(nextState === 'recovered'
-              ? {
-                  recoveredAt: closedAt,
-                  recoveredBySettlementId: batch.id,
-                }
-              : {}),
-          },
-        });
-        if (consumed.count !== 1) {
-          throw new ConflictException('settlement_receivables_contended');
-        }
-        await this.ledger.record(
-          {
-            eventType: FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
-            reasonCode: 'MERCHANT_RECEIVABLE',
-            actorType: 'user',
-            actorId: actorUserId,
-            amount: alloc.amount,
-            currency: batch.currency,
-            direction: 'debit', // the receivable asset shrinks
-            counterpartyType: 'merchant',
-            storeId: batch.storeId,
-            idempotencyKey: ledgerIdempotencyKey(
-              FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
-              `${alloc.receivableId}:${batch.id}`,
-            ),
-            metadata: {
-              settlementReference: batch.settlementReference,
-              receivableId: alloc.receivableId,
-              refundId: alloc.occurrenceId,
-              // §26: POSITION extinguishment, not a cash claim — the
-              // physical safeguarding→operating sweep is a FUTURE
-              // treasury action; until recorded, the money sits in
-              // safeguarding as an internal transfer DUE.
-              closureType: 'zero_net_no_transfer',
-              closedAt: closedAt.toISOString(),
-              internalTransferDue: true,
-            },
-          },
-          tx,
-        );
-      }
+      // Scope G: the SAME consumption path as the remitted lane. §26:
+      // POSITION extinguishment metadata, never a cash claim — the
+      // physical safeguarding→operating sweep is a FUTURE treasury
+      // action recorded with evidence (Scope C).
+      await this.consumeRecoveryAllocation(tx, actorUserId, batch, closedAt, () => ({
+        closureType: 'zero_net_no_transfer',
+        closedAt: closedAt.toISOString(),
+        internalTransferDue: true,
+      }));
       await this.ledger.record(
         {
           eventType: FINANCIAL_EVENTS.SETTLEMENT_COMPLETED,
@@ -872,20 +863,27 @@ export class SettlementEngineService {
         },
         tx,
       );
-    });
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'settlement.batch.closed_zero_net',
-      targetType: 'store',
-      targetId: batch.storeId,
-      metadata: {
-        settlementId: batchId,
-        settlementReference: batch.settlementReference,
-        itemCount: memberIds.length,
-        closedAt: closedAt.toISOString(),
-        noTransfer: true,
-      },
+      // Scope A: the close audit rides the SAME transaction as the
+      // §26 terminal act — a close whose audit cannot land does not
+      // happen.
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `settlement.batch.closed_zero_net:${batchId}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'settlement.batch.closed_zero_net',
+          targetType: 'store',
+          targetId: batch.storeId,
+          metadata: {
+            settlementId: batchId,
+            settlementReference: batch.settlementReference,
+            itemCount: memberIds.length,
+            closedAt: closedAt.toISOString(),
+            noTransfer: true,
+          },
+        },
+        tx,
+      );
     });
     return {
       batch: await this.loadBatch(batchId),

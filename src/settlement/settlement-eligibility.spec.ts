@@ -78,6 +78,10 @@ function harness(opts: {
       auditRows.push(row);
       return Promise.resolve(undefined);
     }),
+    recordGuaranteed: jest.fn().mockImplementation((row: Row) => {
+      auditRows.push(row);
+      return Promise.resolve(undefined);
+    }),
   };
   const service = new SettlementEligibilityService(
     prisma as unknown as PrismaService,

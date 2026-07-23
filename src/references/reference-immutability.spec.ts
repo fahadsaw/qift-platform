@@ -100,8 +100,11 @@ describe('reference immutability tripwire (source pins)', () => {
     // its immutable postings/audit exactly like markSettled, never
     // writes it. No update path writes it — the write-once law
     // (RC Ch. 8.1/10.2 replacement pin).
+    // Lane 2 PR 3 (Scope G): the shared consumeRecoveryAllocation
+    // helper consolidated the two lanes' recovery-posting metadata
+    // reads into one site — 31 → 30, still all reads.
     expect(
       count('settlement/settlement-engine.service.ts', 'settlementReference'),
-    ).toBe(31);
+    ).toBe(30);
   });
 });

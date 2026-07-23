@@ -11,6 +11,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { TreasuryReconciliationService } from './treasury-reconciliation.service';
+import { TreasuryInternalTransferService } from './treasury-internal-transfer.service';
 import { hashCanonical } from '../settlement/settlement-statement';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { AuditService } from '../audit/audit.service';
@@ -28,15 +29,18 @@ function world() {
   const refunds: Row[] = [];
   const attestations: Row[] = [];
   const reconciliations: Row[] = [];
+  const transfers: Row[] = [];
   const auditRows: Row[] = [];
 
   const prisma = {
     financialLedgerEntry: {
       findMany: jest.fn().mockImplementation(({ where }: never) => {
-        const w = where as { eventType: { in: string[] } };
+        const w = where as { eventType: string | { in: string[] } };
+        const wanted =
+          typeof w.eventType === 'string' ? [w.eventType] : w.eventType.in;
         return Promise.resolve(
           ledgerRows
-            .filter((r) => w.eventType.in.includes(r.eventType as string))
+            .filter((r) => wanted.includes(r.eventType as string))
             .map((r) => ({ ...r })),
         );
       }),
@@ -106,6 +110,20 @@ function world() {
       ),
     },
     treasuryReconciliation: {
+      findFirst: jest.fn().mockImplementation(() => {
+        const sorted = [...reconciliations].sort((x, y) =>
+          (y.asOfDate as Date).getTime() - (x.asOfDate as Date).getTime(),
+        );
+        return Promise.resolve(sorted[0] ? { ...sorted[0] } : null);
+      }),
+      count: jest.fn().mockImplementation(({ where }: never) => {
+        const w = (where ?? {}) as { status?: string };
+        return Promise.resolve(
+          reconciliations.filter(
+            (r) => w.status === undefined || r.status === w.status,
+          ).length,
+        );
+      }),
       create: jest.fn().mockImplementation(({ data }: never) => {
         const row: Row = {
           id: `rec-${++seq}`,
@@ -148,17 +166,77 @@ function world() {
         return Promise.resolve({ count: hits.length });
       }),
     },
+    treasuryInternalTransfer: {
+      create: jest.fn().mockImplementation(({ data }: never) => {
+        const d = data as Row;
+        if (
+          transfers.some((t) => t.bankReference === d.bankReference)
+        ) {
+          return Promise.reject(
+            Object.assign(new Error('unique'), { code: 'P2002' }),
+          );
+        }
+        const row: Row = {
+          id: `itx-${transfers.length + 1}`,
+          notes: null,
+          createdAt: new Date(NOW),
+          ...d,
+        };
+        transfers.push(row);
+        return Promise.resolve({ ...row });
+      }),
+      findFirst: jest.fn().mockImplementation(({ where }: never) => {
+        const w = where as { settlementId: string; status: string };
+        const found = transfers.find(
+          (t) => t.settlementId === w.settlementId && t.status === w.status,
+        );
+        return Promise.resolve(found ? { ...found } : null);
+      }),
+      findMany: jest.fn().mockImplementation(({ where }: never) => {
+        const w = (where ?? {}) as { status?: string };
+        return Promise.resolve(
+          transfers
+            .filter((t) => w.status === undefined || t.status === w.status)
+            .map((t) => ({ ...t })),
+        );
+      }),
+    },
+    $transaction: jest.fn(),
   };
+  (prisma as { $transaction: jest.Mock }).$transaction.mockImplementation(
+    (fn: (tx: unknown) => unknown) => fn(prisma),
+  );
   const audit = {
     record: jest.fn().mockImplementation((row: Row) => {
       auditRows.push(row);
       return Promise.resolve(undefined);
     }),
+    recordGuaranteed: jest.fn().mockImplementation((row: Row) => {
+      auditRows.push(row);
+      return Promise.resolve(undefined);
+    }),
   };
+  const ledgerService = {
+    record: jest.fn().mockImplementation((row: Row) => {
+      const existing = ledgerRows.find(
+        (r) => r.idempotencyKey === row.idempotencyKey,
+      );
+      if (existing) return Promise.resolve(existing);
+      ledgerRows.push({ ...row, createdAt: new Date(NOW) });
+      return Promise.resolve(row);
+    }),
+  };
+  const internalTransfers = new TreasuryInternalTransferService(
+    prisma as unknown as PrismaService,
+    audit as unknown as AuditService,
+    ledgerService as never,
+    { now: () => new Date(NOW) },
+  );
   const service = new TreasuryReconciliationService(
     prisma as unknown as PrismaService,
     audit as unknown as AuditService,
     { now: () => new Date(NOW) },
+    internalTransfers,
   );
 
   // Ledger scenario helpers — rows shaped EXACTLY like the real
@@ -301,6 +379,8 @@ function world() {
 
   return {
     service,
+    internalTransfers,
+    transfers,
     prisma,
     audit,
     auditRows,
@@ -404,15 +484,36 @@ describe('Treasury walkthrough — a pilot day reconciled three ways', () => {
     // evidence required, all audited. Resolution documents; it never
     // moves money.
     await expect(
-      w.service.resolve(FIN, bad.id as string, { notes: 'skip investigation' }),
+      w.service.resolve(FIN, bad.id as string, {
+        notes: 'skip investigation',
+        resolutionKind: 'new_evidence',
+        evidenceRef: 'X',
+      }),
     ).rejects.toThrow('treasury_reconciliation_not_resolvable:mismatched');
     const inv = await w.service.investigate(FIN, bad.id as string, {
       notes: 'Bank shows unidentified 300.00 credit — querying bank.',
     });
     expect(inv.status).toBe('investigated');
-    const res = await w.service.resolve(FIN, bad.id as string, {
+    // Scope D separation: FIN attested the bank leg — FIN cannot also
+    // resolve; a free-text-only resolution refuses; a second finance
+    // identity resolves with STRUCTURED new evidence.
+    await expect(
+      w.service.resolve(FIN, bad.id as string, {
+        notes: 'closing',
+        resolutionKind: 'new_evidence',
+        evidenceRef: 'BANK-ADVICE-4471',
+      }),
+    ).rejects.toThrow('treasury_attester_cannot_resolve');
+    await expect(
+      w.service.resolve('fin-2', bad.id as string, {
+        notes: 'just trust me',
+        resolutionKind: '',
+      } as never),
+    ).rejects.toThrow('treasury_resolution_kind_required');
+    const res = await w.service.resolve('fin-2', bad.id as string, {
       notes:
         'Bank confirmed misrouted deposit; returned by bank same day — see advice note.',
+      resolutionKind: 'new_evidence',
       evidenceRef: 'BANK-ADVICE-4471',
     });
     expect(res.status).toBe('resolved');
@@ -601,6 +702,257 @@ describe('Treasury walkthrough — a pilot day reconciled three ways', () => {
     expect(hashCanonical(stored.canonicalJson as string)).not.toBe(
       stored.snapshotHash,
     );
+  });
+
+  it('GRAND WALKTHROUGH (PR 3): receipt → payable → receivable → zero-net close → statement due → explained recon → evidence → completed → matched with NO outstanding — audited end to end', async () => {
+    const w = world();
+    // Business event: goods receipt 4,600 lands (payable accrues)...
+    w.addReceipt({
+      receiptId: 'rcpt-1', amount: 4600, receivedAt: D('20'),
+      invoiceType: 'merchant_invoice', bankReference: 'TT-9001',
+    });
+    // ...a post-settlement refund fronted by Qift became a receivable,
+    // and the next batch closed ZERO-NET (§26): the engine posted the
+    // position extinguishment with closureType + closedAt and NO cash
+    // claim, exactly as markSettledZeroNet writes it.
+    w.ledgerRows.push({
+      id: 'led-zn-1',
+      eventType: 'merchant.receivable.recovered',
+      amount: 4600,
+      currency: 'SAR',
+      direction: 'debit',
+      orderId: null,
+      storeId: 's-1',
+      createdAt: D('21'),
+      idempotencyKey: 'merchant.receivable.recovered:rcv-1:stl-zn',
+      metadata: {
+        settlementReference: 'QS-ZERO-0001',
+        receivableId: 'rcv-1',
+        refundId: 'ref-1',
+        closureType: 'zero_net_no_transfer',
+        closedAt: D('21').toISOString(),
+        internalTransferDue: true,
+      },
+    });
+
+    // Day 21: bank still holds 4,600 — the reconciliation MATCHES
+    // with the outstanding internal transfer EXPLAINED and VISIBLE.
+    await w.service.recordAttestation(FIN, {
+      balance: 4600,
+      asOfDate: '2026-07-21T23:59:59.000Z',
+      evidenceRef: 'STMT-21',
+    });
+    const rec1 = await w.service.runReconciliation(FIN, {
+      asOfDate: '2026-07-21T23:59:59.000Z',
+    });
+    expect(rec1.status).toBe('matched');
+    const full1 = await w.service.getReconciliation(rec1.id as string);
+    const snap1 = full1.snapshot as {
+      identity: { timezone: string; cutoffAt: string };
+      attestationEvidenceHash: string;
+      legs: { internalTransferOutstandingMinor: number };
+      pendingInternalTransfers: Array<{ settlementReference: string }>;
+    };
+    // Scope D run identity + evidence hash on every run.
+    expect(snap1.identity.timezone).toBe('UTC');
+    expect(snap1.attestationEvidenceHash).toMatch(/^[0-9a-f]{64}$/);
+    // The outstanding transfer is NEVER hidden by the explanation.
+    expect(snap1.legs.internalTransferOutstandingMinor).toBe(460000);
+    expect(snap1.pendingInternalTransfers).toHaveLength(1);
+    expect(snap1.pendingInternalTransfers[0].settlementReference).toBe(
+      'QS-ZERO-0001',
+    );
+    // Pending view with aging (Scope C).
+    const pending = await w.internalTransfers.pendingInternalTransfers();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].outstandingMinor).toBe(460000);
+
+    // Evidence law: completion REQUIRES full evidence — masked
+    // accounts only, exact confirmed amount, unique bank reference.
+    await expect(
+      w.internalTransfers.recordInternalTransfer(FIN, {
+        settlementId: 'stl-zn',
+        bankReference: 'ITX-100',
+        valueDate: '2026-07-22T09:00:00.000Z',
+        confirmedAmount: 4600,
+        accountFromMasked: 'SA4412345678901234567890', // RAW — refuse
+        accountToMasked: '****9012',
+      }),
+    ).rejects.toThrow('internal_transfer_account_not_masked');
+    await expect(
+      w.internalTransfers.recordInternalTransfer(FIN, {
+        settlementId: 'stl-zn',
+        bankReference: 'ITX-100',
+        valueDate: '2026-07-22T09:00:00.000Z',
+        confirmedAmount: 4599.99, // one minor short — refuse
+        accountFromMasked: '****5678',
+        accountToMasked: '****9012',
+      }),
+    ).rejects.toThrow('internal_transfer_amount_mismatch');
+
+    // The evidenced completion: bank ref, value date, confirmed
+    // amount, executor, masked accounts — posts the REAL cash event.
+    const done = await w.internalTransfers.recordInternalTransfer(FIN, {
+      settlementId: 'stl-zn',
+      bankReference: 'ITX-100',
+      valueDate: '2026-07-22T09:00:00.000Z',
+      confirmedAmount: 4600,
+      accountFromMasked: '****5678',
+      accountToMasked: '****9012',
+    });
+    expect(done.status).toBe('completed');
+    const cashEvent = w.ledgerRows.find(
+      (r) => r.eventType === 'treasury.internal_transfer.completed',
+    )!;
+    expect(cashEvent.amount).toBe(4600);
+    expect((cashEvent.metadata as Row).accountFromMasked).toBe('****5678');
+
+    // Duplicate evidence rejected; double completion rejected.
+    await expect(
+      w.internalTransfers.recordInternalTransfer(FIN, {
+        settlementId: 'stl-zn',
+        bankReference: 'ITX-100',
+        valueDate: '2026-07-22T09:00:00.000Z',
+        confirmedAmount: 4600,
+        accountFromMasked: '****5678',
+        accountToMasked: '****9012',
+      }),
+    ).rejects.toThrow('internal_transfer_already_completed');
+
+    // Day 22: bank swept to 0 — the next reconciliation MATCHES with
+    // NO outstanding transfer.
+    await w.service.recordAttestation(FIN, {
+      balance: 0,
+      asOfDate: '2026-07-22T23:59:59.000Z',
+      evidenceRef: 'STMT-22',
+    });
+    const rec2 = await w.service.runReconciliation(FIN, {
+      asOfDate: '2026-07-22T23:59:59.000Z',
+    });
+    expect(rec2.status).toBe('matched');
+    const full2 = await w.service.getReconciliation(rec2.id as string);
+    const snap2 = full2.snapshot as {
+      legs: {
+        internalTransferOutstandingMinor: number;
+        internalTransferCompletedMinor: number;
+      };
+      pendingInternalTransfers: unknown[];
+      alerts: unknown[];
+    };
+    expect(snap2.legs.internalTransferCompletedMinor).toBe(460000);
+    expect(snap2.legs.internalTransferOutstandingMinor).toBe(0);
+    expect(snap2.pendingInternalTransfers).toHaveLength(0);
+    expect(snap2.alerts).toHaveLength(0);
+
+    // Guaranteed audit trail names every act.
+    const actions = w.auditRows.map((a) => a.action);
+    expect(actions).toContain('finance.treasury.internal_transfer.completed');
+    expect(actions.filter((x) => x === 'finance.treasury.attested')).toHaveLength(2);
+    expect(actions.filter((x) => x === 'finance.treasury.reconciled')).toHaveLength(2);
+
+    // Health endpoint: reconciliation-zero holds, nothing pending.
+    const health = await w.service.health();
+    expect(health.reconciliationZero).toBe(true);
+    expect(health.pendingInternalTransfers).toHaveLength(0);
+  });
+
+  it('SCOPE C: an outstanding transfer stays VISIBLY pending, ages, and alerts past the threshold', async () => {
+    const w = world();
+    w.addReceipt({
+      receiptId: 'rcpt-old', amount: 1000, receivedAt: D('14'),
+      invoiceType: 'merchant_invoice', bankReference: 'TT-OLD-1',
+    });
+    w.ledgerRows.push({
+      id: 'led-zn-old',
+      eventType: 'merchant.receivable.recovered',
+      amount: 1000,
+      currency: 'SAR',
+      direction: 'debit',
+      orderId: null,
+      storeId: 's-1',
+      createdAt: D('15'),
+      idempotencyKey: 'merchant.receivable.recovered:rcv-9:stl-old',
+      metadata: {
+        settlementReference: 'QS-OLD-0001',
+        receivableId: 'rcv-9',
+        refundId: 'ref-9',
+        closureType: 'zero_net_no_transfer',
+        closedAt: '2026-07-15T10:00:00.000Z', // 8 days before NOW
+        internalTransferDue: true,
+      },
+    });
+    const pending = await w.internalTransfers.pendingInternalTransfers();
+    expect(pending[0].ageDays).toBeGreaterThanOrEqual(3);
+    await w.service.recordAttestation(FIN, {
+      balance: 1000,
+      asOfDate: '2026-07-21T23:59:59.000Z',
+      evidenceRef: 'STMT-21',
+    });
+    const rec = await w.service.runReconciliation(FIN, {
+      asOfDate: '2026-07-21T23:59:59.000Z',
+    });
+    const full = await w.service.getReconciliation(rec.id as string);
+    const snap = full.snapshot as { alerts: Array<{ kind: string }> };
+    expect(
+      snap.alerts.some((x) => x.kind === 'internal_transfer_pending_aging'),
+    ).toBe(true);
+    // Matched (explained) — but the alert still fires: explained
+    // NEVER means hidden.
+    expect(rec.status).toBe('matched');
+  });
+
+  it('SCOPE C: evidence is mandatory — completion without outstanding due, or with a reused bank reference, refuses', async () => {
+    const w = world();
+    await expect(
+      w.internalTransfers.recordInternalTransfer(FIN, {
+        settlementId: 'stl-none',
+        bankReference: 'ITX-1',
+        valueDate: '2026-07-22T09:00:00.000Z',
+        confirmedAmount: 100,
+        accountFromMasked: '****1111',
+        accountToMasked: '****2222',
+      }),
+    ).rejects.toThrow('internal_transfer_nothing_outstanding');
+    // Two dues, one bank reference: the second refuses (unique).
+    for (const [sid, ref] of [['stl-a', 'rcv-a'], ['stl-b', 'rcv-b']] as const) {
+      w.ledgerRows.push({
+        id: `led-${sid}`,
+        eventType: 'merchant.receivable.recovered',
+        amount: 500,
+        currency: 'SAR',
+        direction: 'debit',
+        orderId: null,
+        storeId: 's-1',
+        createdAt: D('21'),
+        idempotencyKey: `merchant.receivable.recovered:${ref}:${sid}`,
+        metadata: {
+          settlementReference: `QS-${sid}`,
+          receivableId: ref,
+          refundId: 'ref-x',
+          closureType: 'zero_net_no_transfer',
+          closedAt: D('21').toISOString(),
+          internalTransferDue: true,
+        },
+      });
+    }
+    await w.internalTransfers.recordInternalTransfer(FIN, {
+      settlementId: 'stl-a',
+      bankReference: 'ITX-SAME',
+      valueDate: '2026-07-22T09:00:00.000Z',
+      confirmedAmount: 500,
+      accountFromMasked: '****1111',
+      accountToMasked: '****2222',
+    });
+    await expect(
+      w.internalTransfers.recordInternalTransfer(FIN, {
+        settlementId: 'stl-b',
+        bankReference: 'ITX-SAME', // duplicate evidence
+        valueDate: '2026-07-22T09:00:00.000Z',
+        confirmedAmount: 500,
+        accountFromMasked: '****1111',
+        accountToMasked: '****2222',
+      }),
+    ).rejects.toThrow('internal_transfer_evidence_reused');
   });
 
   it('READ-ONLY LAW (census pin): the treasury service contains no ledger writes and touches no money table', () => {

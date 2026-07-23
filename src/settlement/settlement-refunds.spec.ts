@@ -167,6 +167,10 @@ function world(opts?: {
       auditRows.push(row);
       return Promise.resolve(undefined);
     }),
+    recordGuaranteed: jest.fn().mockImplementation((row: Row) => {
+      auditRows.push(row);
+      return Promise.resolve(undefined);
+    }),
   };
   const ledger = {
     record: jest.fn().mockImplementation((row: Row, client?: unknown) => {

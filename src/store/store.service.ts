@@ -748,21 +748,23 @@ export class StoreService {
       if (o.giftId) orderByGift.set(o.giftId, o);
     }
 
-    // Single source of truth — same rate the FeeEngine charges at checkout.
-    const PLATFORM_FEE_PCT = QIFT_SERVICE_FEE_RATE;
+    // Lane 2 PR 3 (Scope F): NO derived fee fallback. Only the fee the
+    // FeeEngine actually RECORDED on the order counts; an order
+    // without a recorded fee reports null and flags the summary
+    // incomplete — a percentage is never manufactured here.
     let grossRevenue = 0;
     let platformFees = 0;
     let deliveryFees = 0;
-    let netPayable = 0;
+    let feesIncomplete = false;
     let currency = 'SAR';
     const items: Array<{
       giftId: string;
       productName: string;
       status: GiftStatus;
       gross: number;
-      platformFee: number;
+      platformFee: number | null; // RECORDED fee only — never derived
       deliveryFee: number;
-      net: number;
+      net: null; // finality exists only on Settlement Statements
       currency: string;
       createdAt: Date;
     }> = [];
@@ -770,45 +772,51 @@ export class StoreService {
     for (const g of gifts) {
       const order = orderByGift.get(g.id);
       const gross = order?.totalAmount ?? 0;
-      const fee =
-        order?.serviceFee ?? Math.round(gross * PLATFORM_FEE_PCT * 100) / 100;
+      // RECORDED fee only — null when the order carries none.
+      const fee = order?.serviceFee ?? null;
+      if (fee === null && gross > 0) feesIncomplete = true;
       const delivery = order?.deliveryFee ?? 0;
-      const net = round2(gross - fee - delivery);
       if (order?.currency) currency = order.currency;
       // Cancelled rows are surfaced for transparency but contribute
       // nothing to the totals — refund flow zeroes the order.
       if (g.status !== 'cancelled') {
         grossRevenue += gross;
-        platformFees += fee;
+        platformFees += fee ?? 0;
         deliveryFees += delivery;
-        netPayable += net;
       }
       items.push({
         giftId: g.id,
         productName: g.productName,
         status: g.status as GiftStatus,
         gross: round2(gross),
-        platformFee: round2(fee),
+        platformFee: fee === null ? null : round2(fee),
         deliveryFee: round2(delivery),
-        net,
+        net: null,
         currency: order?.currency ?? currency,
         createdAt: g.createdAt,
       });
     }
 
+    // Scope F (founder mandate): this is an ORDERS/REVENUE SUMMARY,
+    // never a payout statement. No 'paid', no 'pending', no
+    // 'available', no net finality — those exist ONLY when backed by
+    // the ledger/settlement system (statements + remittances). The
+    // estimate is labelled as such and computed from RECORDED facts.
+    const estimatedNetBeforeSettlement = feesIncomplete
+      ? null
+      : round2(grossRevenue - platformFees - deliveryFees);
     return {
+      kind: 'orders_revenue_summary' as const,
+      authoritative: false,
+      disclaimer:
+        'Not a payout statement. Final payout figures exist only on Settlement Statements issued by the settlement system.',
       currency,
       grossRevenue: round2(grossRevenue),
-      platformFees: round2(platformFees),
+      recordedPlatformFees: round2(platformFees),
+      feesIncomplete,
       deliveryFees: round2(deliveryFees),
-      netPayable: round2(netPayable),
-      // Real settlement is future work. Today everything sits as
-      // pending so the merchant can see what they're owed; once
-      // we have a Payout record the math will split.
-      paid: 0,
-      pending: round2(netPayable),
+      estimatedNetBeforeSettlement,
       items,
-      platformFeePercent: PLATFORM_FEE_PCT * 100,
     };
   }
 

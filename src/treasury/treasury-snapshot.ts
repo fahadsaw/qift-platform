@@ -27,7 +27,15 @@ export const TREASURY_RECON_SCOPE = 'corporate_manual_rail@pilot-1';
 // v2 (Lane 2 PR 2): adds the §26 non-cash closure classification —
 // zero-net position extinguishments enumerate as internal-transfer-
 // due, never as cash movements and never as mismatches.
-export const TREASURY_SNAPSHOT_VERSION = 'treasury-3way@v2';
+// v3 (Lane 2 PR 3, Scopes C+D): run identity (account + currency +
+// cutoffAt + timezone), attestation evidence hash, completed
+// internal-transfer cash movements, OUTSTANDING internal-due
+// derivation, and enumerated alerts.
+export const TREASURY_SNAPSHOT_VERSION = 'treasury-3way@v3';
+
+// Pilot alert policy — enumerated, versioned like every pilot policy.
+export const TREASURY_ALERT_POLICY = 'treasury-alerts@pilot-1';
+export const INTERNAL_TRANSFER_AGING_ALERT_DAYS = 3;
 
 export type TreasuryMovement = {
   ledgerId: string;
@@ -60,11 +68,37 @@ export type TreasuryAttestationInput = {
   evidenceRef: string;
 };
 
+export type PendingInternalTransfer = {
+  settlementId: string;
+  settlementReference: string;
+  currency: string;
+  outstandingMinor: number;
+  closedAt: string | null;
+  ageDays: number;
+  failedAttempts: number;
+};
+
+export type TreasuryAlert = {
+  kind:
+    | 'reconciliation_zero_violated'
+    | 'mismatched_run'
+    | 'unresolved_evidence'
+    | 'internal_transfer_pending_aging';
+  detail: string;
+};
+
 export type TreasuryInputs = {
   accountType: string;
   currency: string;
   asOfDate: string;
+  // Run-identity timezone: the cut instant is interpreted in UTC —
+  // recorded on every run (Scope D).
+  timezone?: string;
   attestation: TreasuryAttestationInput | null;
+  // Scope C: pending internal transfers (derived by the service from
+  // due postings minus completed evidence) — enumerated, aged,
+  // NEVER hidden by the explained classification.
+  pendingInternalTransfers?: PendingInternalTransfer[];
   // Leg 2 — safeguarding CASH movements (receipts in; remittances,
   // safeguarding refunds, recovery draws out).
   cashMovements: TreasuryMovement[];
@@ -126,6 +160,23 @@ export function buildTreasurySnapshot(inputs: TreasuryInputs): {
 } {
   const cash = splitByAsOf(inputs.cashMovements, inputs.asOfDate);
   const obligations = splitByAsOf(inputs.obligationMovements, inputs.asOfDate);
+  // Scope D: the attestation's evidence carries a content hash so any
+  // later drift in the stored evidence facts is detectable.
+  const attestationEvidenceHash = inputs.attestation
+    ? hashCanonical(
+        canonicalJson({
+          source: inputs.attestation.source,
+          evidenceRef: inputs.attestation.evidenceRef,
+          balanceMinor: inputs.attestation.balanceMinor,
+          asOfDate: inputs.attestation.asOfDate,
+        }),
+      )
+    : null;
+  // Scope C: completed internal transfers are REAL cash movements
+  // (evidence-backed); their sum reduces the outstanding due.
+  const internalTransferCompletedMinor = cash.included
+    .filter((m) => m.eventType === 'treasury.internal_transfer.completed')
+    .reduce((t, m) => t + m.amountMinor, 0);
 
   const ledgerCashMinor = sumMinor(cash.included);
   const obligationsMinor = sumMinor(obligations.included);
@@ -136,9 +187,15 @@ export function buildTreasurySnapshot(inputs: TreasuryInputs): {
   const internalTransferDueMinor = obligations.included
     .filter((m) => m.nonCash)
     .reduce((t, m) => t + (m.direction === 'in' ? -m.amountMinor : m.amountMinor), 0);
+  // OUTSTANDING = due − evidenced completions. The explained
+  // classification adjusts by the OUTSTANDING amount only — a
+  // completed transfer stops explaining anything (its cash movement
+  // already landed in the cash view).
+  const internalTransferOutstandingMinor =
+    internalTransferDueMinor - internalTransferCompletedMinor;
   const rawCashVsObligationsMinor = ledgerCashMinor - obligationsMinor;
   const cashVsObligationsMinor =
-    rawCashVsObligationsMinor - internalTransferDueMinor;
+    rawCashVsObligationsMinor - internalTransferOutstandingMinor;
   const bankVsCashMinor = inputs.attestation
     ? inputs.attestation.balanceMinor - ledgerCashMinor
     : null;
@@ -217,8 +274,51 @@ export function buildTreasurySnapshot(inputs: TreasuryInputs): {
         : 'matched';
 
   const nonCashClosures = obligations.included.filter((m) => m.nonCash);
+  const pendingTransfers = [...(inputs.pendingInternalTransfers ?? [])].sort(
+    (x, y) => (x.settlementId < y.settlementId ? -1 : 1),
+  );
+  // Scope D: enumerated alerts — never free-text, never silent.
+  const alerts: TreasuryAlert[] = [];
+  if (
+    (bankVsCashMinor !== null && bankVsCashMinor !== 0) ||
+    cashVsObligationsMinor !== 0
+  ) {
+    alerts.push({
+      kind: 'reconciliation_zero_violated',
+      detail: `Reconciliation-zero health metric violated: bankVsCash=${bankVsCashMinor ?? 'n/a'}, cashVsObligations(adjusted)=${cashVsObligationsMinor} (minor units).`,
+    });
+  }
+  if (status === 'mismatched') {
+    alerts.push({
+      kind: 'mismatched_run',
+      detail: `Run is MISMATCHED with ${differences.length} enumerated difference(s) — investigate → resolve required.`,
+    });
+  }
+  if (differences.some((di) => di.kind === 'unresolved_evidence')) {
+    alerts.push({
+      kind: 'unresolved_evidence',
+      detail: 'One or more ledger rows have no resolvable evidence — excluded from balances and enumerated.',
+    });
+  }
+  for (const t of pendingTransfers) {
+    if (t.ageDays >= INTERNAL_TRANSFER_AGING_ALERT_DAYS) {
+      alerts.push({
+        kind: 'internal_transfer_pending_aging',
+        detail: `Internal transfer for ${t.settlementReference} outstanding ${t.outstandingMinor} minor units for ${t.ageDays} day(s) (threshold ${INTERNAL_TRANSFER_AGING_ALERT_DAYS}).`,
+      });
+    }
+  }
   const snapshot = {
     snapshotVersion: TREASURY_SNAPSHOT_VERSION,
+    alertPolicy: TREASURY_ALERT_POLICY,
+    // Scope D run identity: account + currency + cutoffAt + timezone.
+    identity: {
+      accountType: inputs.accountType,
+      currency: inputs.currency,
+      cutoffAt: inputs.asOfDate,
+      timezone: inputs.timezone ?? 'UTC',
+    },
+    attestationEvidenceHash,
     scope: TREASURY_RECON_SCOPE,
     accountType: inputs.accountType,
     currency: inputs.currency,
@@ -229,12 +329,16 @@ export function buildTreasurySnapshot(inputs: TreasuryInputs): {
       ledgerCashMinor,
       obligationsMinor,
       internalTransferDueMinor,
+      internalTransferCompletedMinor,
+      internalTransferOutstandingMinor,
     },
     deltas: {
       bankVsCashMinor,
       rawCashVsObligationsMinor,
-      cashVsObligationsMinor, // adjusted for enumerated non-cash closures
+      cashVsObligationsMinor, // adjusted by the OUTSTANDING due only
     },
+    pendingInternalTransfers: pendingTransfers,
+    alerts,
     // §26 closures, enumerated (req. 8: a classification value, not a
     // free-text exception).
     nonCashClosures,

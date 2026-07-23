@@ -102,18 +102,24 @@ describe('RULE 1 — settlement calculations live ONLY in the Settlement Engine'
     // guard (asCurrencyCode) — both are pinned below to ZERO
     // calculateSettlement invocations.
     expect(nonSpec).toEqual([
+      // Lane 2 PR 3 (Scopes C+H): the integrity spec and the treasury
+      // transfer service import ONLY asCurrencyCode (the currency
+      // registry guard carrying the 3-dp refusal) — pinned below to
+      // ZERO calculateSettlement invocations.
       'settlement-engine.service.ts',
       'settlement-execution-binding.ts',
       'settlement-execution.service.ts',
       'settlement-statement.ts',
+      'treasury-internal-transfer.service.ts',
     ]);
     for (const nonCalculating of [
-      'settlement-statement.ts',
-      'settlement-execution.service.ts',
+      join(SETTLEMENT, 'settlement-statement.ts'),
+      join(SETTLEMENT, 'settlement-execution.service.ts'),
+      join(SETTLEMENT, '..', 'treasury', 'treasury-internal-transfer.service.ts'),
     ]) {
       expect({
         file: nonCalculating,
-        hits: count(read(join(SETTLEMENT, nonCalculating)), 'calculateSettlement'),
+        hits: count(read(nonCalculating), 'calculateSettlement'),
       }).toEqual({ file: nonCalculating, hits: 0 });
     }
   });
@@ -232,7 +238,10 @@ describe('RULE 2 — no direct system time in the Settlement Engine', () => {
         },
         $transaction: jest.fn(),
       };
-      const audit = { record: jest.fn().mockResolvedValue(undefined) };
+      const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
       const ledger = { record: jest.fn().mockResolvedValue({ id: 'l' }) };
       return new SettlementEngineService(
         prisma as unknown as PrismaService,
@@ -349,6 +358,7 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
       'assembleBatch',
       'batchItems', // SETTLE-2 read seam (items of a batch)
       'constructor',
+      'consumeRecoveryAllocation', // Scope G (Lane 2 PR 3): the ONE §7.4 consumption path — both terminal lanes call it
       'eligibleItems',
       'frozenRecord', // SETTLE-2 read seam (the §34 frozen record)
       'holdBatch',
@@ -471,7 +481,10 @@ describe('RULE 3 — SettlementBatch is immutable after assembly', () => {
     );
     const engine = new SettlementEngineService(
       prisma as unknown as PrismaService,
-      { record: jest.fn().mockResolvedValue(undefined) } as never,
+      {
+        record: jest.fn().mockResolvedValue(undefined),
+        recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+      } as never,
       { record: jest.fn().mockResolvedValue({ id: 'l' }) } as never,
       { now: () => new Date('2026-07-20T12:00:00.000Z') },
     );

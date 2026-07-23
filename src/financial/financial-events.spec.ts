@@ -30,6 +30,9 @@ describe('financial event taxonomy (FIN-4)', () => {
       MERCHANT_RECEIVABLE_ACCRUED: 'merchant.receivable.accrued',
       MERCHANT_RECEIVABLE_RECOVERED: 'merchant.receivable.recovered',
       CHARGEBACK_CREATED: 'chargeback.created',
+      // Lane 2 PR 3 (Scope C): the evidenced physical safeguarding →
+      // operating sweep of a §26 zero-net close's internal due.
+      INTERNAL_TRANSFER_COMPLETED: 'treasury.internal_transfer.completed',
     });
   });
 

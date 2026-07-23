@@ -64,6 +64,13 @@ export const FINANCIAL_EVENTS = {
   // batches never collide. The §13.3(a) safeguarding→operating draw.
   MERCHANT_RECEIVABLE_RECOVERED: 'merchant.receivable.recovered',
   CHARGEBACK_CREATED: 'chargeback.created',
+  // ── Treasury (Lane 2 PR 3, Scope C) ──────────────────────────────
+  // The PHYSICAL safeguarding→operating internal transfer a §26
+  // zero-net close leaves due — posted ONLY when bank evidence exists
+  // (reference, value date, confirmed amount, executor, masked
+  // accounts). Anchored on the settlementId: one completed movement
+  // per settlement, ever.
+  INTERNAL_TRANSFER_COMPLETED: 'treasury.internal_transfer.completed',
 } as const;
 
 export type FinancialEventType =

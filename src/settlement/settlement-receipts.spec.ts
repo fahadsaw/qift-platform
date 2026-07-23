@@ -155,6 +155,10 @@ function harness(opts?: {
       auditRows.push(row);
       return Promise.resolve(undefined);
     }),
+    recordGuaranteed: jest.fn().mockImplementation((row: Row) => {
+      auditRows.push(row);
+      return Promise.resolve(undefined);
+    }),
   };
   const ledger = {
     // Emulates the real single write path: deterministic-key replays

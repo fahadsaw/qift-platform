@@ -2063,6 +2063,10 @@ model BetaAllowlistEntry {
 // returned on a public endpoint.
 model AuditLog {
   id          String   @id @default(cuid())
+  // Lane 2 PR 3 (Scope A): deterministic occurrence key for
+  // GUARANTEED financial audits — retries collide here instead of
+  // duplicating; unique when present. Null on best-effort rows.
+  auditKey    String?  @unique
   // Nullable to match production reality: the table predated the
   // migration history (created by the week2-era audit experiment)
   // and carries legacy rows with NULL actors. New writers ALWAYS
@@ -3303,7 +3307,42 @@ model TreasuryReconciliation {
   resolvedAt             DateTime?
   resolutionNotes        String?
   resolutionEvidenceRef  String?
+  // Lane 2 PR 3 (Scope D): resolution requires a STRUCTURED basis —
+  // new_evidence | accepted_timing | superseded_by_matched — never a
+  // free-text note alone.
+  resolutionKind         String?
+  resolutionMatchedRunId String?
 
   @@index([accountType, asOfDate])
+  @@index([status])
+}
+
+// Lane 2 PR 3 (Scope C): EVIDENCE of the physical safeguarding →
+// operating internal transfer a §26 zero-net close leaves due. A row
+// exists ONLY when bank evidence exists — 'pending' is DERIVED (due
+// postings without a completed row), never fabricated. status:
+// completed | failed (a failed attempt keeps the transfer outstanding
+// and retryable with NEW evidence). Append-only.
+model TreasuryInternalTransfer {
+  id                  String   @id @default(cuid())
+  settlementId        String
+  settlementReference String
+  currency            String   @default("SAR")
+  // The bank-confirmed amount — must equal the outstanding
+  // internal-transfer-due for the settlement, exactly.
+  confirmedAmount     Decimal  @db.Decimal(14, 2)
+  // SC §13.2: the bank's reference IS the evidence. Unique — the
+  // same transfer can never satisfy two dues.
+  bankReference       String   @unique
+  valueDate           DateTime
+  // Masked account identifiers only (e.g. '****1234') — never raw.
+  accountFromMasked   String
+  accountToMasked     String
+  status              String   @default("completed")
+  recordedBy          String
+  notes               String?
+  createdAt           DateTime @default(now())
+
+  @@index([settlementId])
   @@index([status])
 }

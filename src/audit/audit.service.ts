@@ -31,11 +31,91 @@ export type AuditRecordInput = {
   metadata?: Record<string, unknown> | null;
 };
 
+// Scope A (Lane 2 PR 3): keys the ledger's PII denylist posture —
+// guaranteed financial audits must never carry personal data.
+const PII_DENYLIST = new Set([
+  'recipientname', 'name', 'phone', 'phonenumber', 'email', 'address',
+  'addressline', 'city', 'district', 'lat', 'lng', 'location', 'note',
+  'giftmessage',
+]);
+function stripPii(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripPii);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (PII_DENYLIST.has(k.toLowerCase())) continue;
+      out[k] = stripPii(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+// The narrow client shape both prisma and a transaction handle satisfy.
+type AuditClient = {
+  auditLog: {
+    create: (args: {
+      data: Record<string, unknown>;
+    }) => Promise<{ id: string }>;
+  };
+};
+
 @Injectable()
 export class AuditService {
   private readonly logger = new Logger('Audit');
 
   constructor(private prisma: PrismaService) {}
+
+  // ── Scope A (Lane 2 PR 3): GUARANTEED financial audit ────────────
+  //
+  // High-sensitivity financial mutations must never complete while
+  // their audit evidence is silently lost (founder mandate). This
+  // primitive is the constitutionally safe design 1: the audit row
+  // rides the SAME database transaction when the caller passes its
+  // `tx`; callers whose mutation is already committed (idempotent,
+  // re-runnable completion tails) call it without a tx and its
+  // failure THROWS — the §18.2 heal lane re-attempts with the same
+  // deterministic key.
+  //
+  // Laws: NO best-effort (errors propagate); deterministic
+  // occurrence-anchored `auditKey` (a retry collides P2002 and
+  // returns the existing row — never a duplicate); PII stripped from
+  // metadata (denylist, ledger posture); canonical references travel
+  // in metadata as plain strings.
+  async recordGuaranteed(
+    input: AuditRecordInput & { auditKey: string },
+    tx?: unknown,
+  ): Promise<void> {
+    if (!input.auditKey || !input.auditKey.trim()) {
+      throw new Error('audit_key_required');
+    }
+    const client = (tx as AuditClient | undefined) ?? this.prisma;
+    try {
+      await client.auditLog.create({
+        data: {
+          auditKey: input.auditKey,
+          actorUserId: input.actorUserId,
+          actorType: input.actorType,
+          action: input.action,
+          targetType: input.targetType,
+          targetId: input.targetId,
+          metadata:
+            input.metadata == null
+              ? Prisma.JsonNull
+              : (stripPii(input.metadata) as Prisma.InputJsonValue),
+        },
+      });
+    } catch (err) {
+      if ((err as { code?: string })?.code === 'P2002') {
+        // Deterministic idempotency: the act was already audited —
+        // the existing row stands, nothing duplicates.
+        return;
+      }
+      // NO swallow: the caller's transaction rolls back (in-tx) or
+      // the caller's idempotent tail retries (post-commit).
+      throw err;
+    }
+  }
 
   async record(input: AuditRecordInput): Promise<void> {
     try {

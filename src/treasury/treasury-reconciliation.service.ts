@@ -41,6 +41,7 @@ import { SETTLEMENT_CLOCK, type SettlementClock } from '../settlement/settlement
 import { toMinor, fromMinor } from '../fees/money';
 import { buildTreasurySnapshot } from './treasury-snapshot';
 import type { TreasuryMovement } from './treasury-snapshot';
+import { TreasuryInternalTransferService } from './treasury-internal-transfer.service';
 import { hashCanonical } from '../settlement/settlement-statement';
 
 type MoneyLike = number | { toNumber(): number } | string;
@@ -72,6 +73,8 @@ export class TreasuryReconciliationService {
     private prisma: PrismaService,
     private audit: AuditService,
     @Inject(SETTLEMENT_CLOCK) private clock: SettlementClock,
+    // Scope C: the pending-transfer derivation (read-only here).
+    private internalTransfers: TreasuryInternalTransferService,
   ) {}
 
   // ── Bank leg: attestations (append-only evidence) ────────────────
@@ -105,31 +108,39 @@ export class TreasuryReconciliationService {
       throw new BadRequestException('treasury_source_unknown');
     }
     const balance = fromMinor(toMinor(input.balance, 'SAR'), 'SAR');
-    const row = await this.prisma.treasuryAttestation.create({
-      data: {
-        accountType: SAFEGUARDING,
-        currency: 'SAR',
-        balance,
-        asOfDate,
-        source,
-        evidenceRef,
-        notes: input.notes?.trim() || null,
-        recordedBy: actorUserId,
-      },
-    });
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.treasury.attested',
-      targetType: 'system',
-      targetId: row.id,
-      metadata: {
-        attestationId: row.id,
-        balance,
-        asOfDate: asOfDate.toISOString(),
-        source,
-        evidenceRef,
-      },
+    // Scope A: evidence row + audit are ONE transaction.
+    const row = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.treasuryAttestation.create({
+        data: {
+          accountType: SAFEGUARDING,
+          currency: 'SAR',
+          balance,
+          asOfDate,
+          source,
+          evidenceRef,
+          notes: input.notes?.trim() || null,
+          recordedBy: actorUserId,
+        },
+      });
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `finance.treasury.attested:${created.id}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.treasury.attested',
+          targetType: 'system',
+          targetId: created.id,
+          metadata: {
+            attestationId: created.id,
+            balance,
+            asOfDate: asOfDate.toISOString(),
+            source,
+            evidenceRef,
+          },
+        },
+        tx,
+      );
+      return created;
     });
     return row;
   }
@@ -183,10 +194,14 @@ export class TreasuryReconciliationService {
     const { cashMovements, obligationMovements, excluded } =
       await this.gatherMovements();
 
+    const pendingInternalTransfers =
+      await this.internalTransfers.pendingInternalTransfers();
     const built = buildTreasurySnapshot({
       accountType: SAFEGUARDING,
       currency: 'SAR',
       asOfDate: asOfIso,
+      timezone: 'UTC',
+      pendingInternalTransfers,
       attestation: attestation
         ? {
             id: attestation.id,
@@ -201,7 +216,9 @@ export class TreasuryReconciliationService {
       excluded,
     });
 
-    const row = await this.prisma.treasuryReconciliation.create({
+    // Scope A: the run record + its audit are ONE transaction.
+    const row = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.treasuryReconciliation.create({
       data: {
         accountType: SAFEGUARDING,
         currency: 'SAR',
@@ -223,15 +240,17 @@ export class TreasuryReconciliationService {
         snapshotHash: built.hash,
         computedBy: actorUserId,
       },
-    });
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.treasury.reconciled',
-      targetType: 'system',
-      targetId: row.id,
-      metadata: {
-        reconciliationId: row.id,
+      });
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `finance.treasury.reconciled:${created.id}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.treasury.reconciled',
+          targetType: 'system',
+          targetId: created.id,
+          metadata: {
+            reconciliationId: created.id,
         asOfDate: asOfIso,
         status: built.status,
         snapshotHash: built.hash,
@@ -239,6 +258,10 @@ export class TreasuryReconciliationService {
         bankVsCashMinor: built.bankVsCashMinor,
         cashVsObligationsMinor: built.cashVsObligationsMinor,
       },
+        },
+        tx,
+      );
+      return created;
     });
     return this.render(row);
   }
@@ -261,6 +284,7 @@ export class TreasuryReconciliationService {
             FINANCIAL_EVENTS.MERCHANT_REMITTANCE_PAID,
             FINANCIAL_EVENTS.REFUND_PAID,
             FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED,
+            FINANCIAL_EVENTS.INTERNAL_TRANSFER_COMPLETED,
           ],
         },
       },
@@ -439,6 +463,19 @@ export class TreasuryReconciliationService {
           obligationMovements.push({ ...movement });
           break;
         }
+        case FINANCIAL_EVENTS.INTERNAL_TRANSFER_COMPLETED: {
+          // Scope C: the evidenced physical sweep — REAL safeguarding
+          // cash-out at the bank value date carried in the posting.
+          cashMovements.push({
+            ...base,
+            direction: 'out',
+            valueDate:
+              typeof meta.valueDate === 'string' ? meta.valueDate : null,
+            reference: String(meta.settlementReference ?? row.id),
+            evidenceRef: String(meta.bankReference ?? ''),
+          });
+          break;
+        }
         case FINANCIAL_EVENTS.MERCHANT_RECEIVABLE_RECOVERED: {
           if (meta.closureType === 'zero_net_no_transfer') {
             // §26 (Lane 2 PR 2): a statement-only close extinguished
@@ -525,25 +562,32 @@ export class TreasuryReconciliationService {
         `treasury_reconciliation_not_investigable:${row.status}`,
       );
     }
-    const moved = await this.prisma.treasuryReconciliation.updateMany({
-      where: { id, status: 'mismatched' },
-      data: {
-        status: 'investigated',
-        investigatedBy: actorUserId,
-        investigatedAt: this.clock.now(),
-        investigationNotes: notes,
-      },
-    });
-    if (moved.count !== 1) {
-      throw new ConflictException('treasury_reconciliation_contended');
-    }
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.treasury.investigated',
-      targetType: 'system',
-      targetId: id,
-      metadata: { reconciliationId: id, notes },
+    // Scope A: one-shot transition + audit, one transaction.
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.treasuryReconciliation.updateMany({
+        where: { id, status: 'mismatched' },
+        data: {
+          status: 'investigated',
+          investigatedBy: actorUserId,
+          investigatedAt: this.clock.now(),
+          investigationNotes: notes,
+        },
+      });
+      if (moved.count !== 1) {
+        throw new ConflictException('treasury_reconciliation_contended');
+      }
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `finance.treasury.investigated:${id}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.treasury.investigated',
+          targetType: 'system',
+          targetId: id,
+          metadata: { reconciliationId: id, notes },
+        },
+        tx,
+      );
     });
     return this.render(await this.load(id));
   }
@@ -551,7 +595,12 @@ export class TreasuryReconciliationService {
   async resolve(
     actorUserId: string,
     id: string,
-    input: { notes: string; evidenceRef?: string },
+    input: {
+      notes: string;
+      resolutionKind: string;
+      evidenceRef?: string;
+      matchedReconciliationId?: string;
+    },
   ) {
     const row = await this.load(id);
     const notes = typeof input.notes === 'string' ? input.notes.trim() : '';
@@ -563,32 +612,139 @@ export class TreasuryReconciliationService {
         `treasury_reconciliation_not_resolvable:${row.status}`,
       );
     }
-    const moved = await this.prisma.treasuryReconciliation.updateMany({
-      where: { id, status: 'investigated' },
-      data: {
-        status: 'resolved',
-        resolvedBy: actorUserId,
-        resolvedAt: this.clock.now(),
-        resolutionNotes: notes,
-        resolutionEvidenceRef: input.evidenceRef?.trim() || null,
-      },
-    });
-    if (moved.count !== 1) {
-      throw new ConflictException('treasury_reconciliation_contended');
+    // Scope D: resolution requires a STRUCTURED basis — a free-text
+    // note alone can never close a mismatch.
+    const kind = input.resolutionKind?.trim();
+    const evidenceRef = input.evidenceRef?.trim() || null;
+    let matchedRunId: string | null = null;
+    if (kind === 'new_evidence') {
+      if (!evidenceRef) {
+        throw new BadRequestException('treasury_resolution_evidence_required');
+      }
+    } else if (kind === 'accepted_timing') {
+      if (!evidenceRef) {
+        // A dated timing item names the expected clearing evidence.
+        throw new BadRequestException('treasury_resolution_evidence_required');
+      }
+    } else if (kind === 'superseded_by_matched') {
+      const matchedId = input.matchedReconciliationId?.trim();
+      if (!matchedId) {
+        throw new BadRequestException('treasury_resolution_matched_required');
+      }
+      const matched = await this.prisma.treasuryReconciliation.findUnique({
+        where: { id: matchedId },
+      });
+      if (!matched || matched.status !== 'matched') {
+        throw new ConflictException('treasury_resolution_matched_not_matched');
+      }
+      if (matched.asOfDate.getTime() <= row.asOfDate.getTime()) {
+        // Only a LATER matched run can supersede an earlier mismatch.
+        throw new ConflictException('treasury_resolution_matched_not_later');
+      }
+      if (
+        matched.accountType !== row.accountType ||
+        matched.currency !== row.currency
+      ) {
+        // Review finding 4: a matched run of a DIFFERENT account or
+        // currency proves nothing about this mismatch.
+        throw new ConflictException('treasury_resolution_matched_wrong_scope');
+      }
+      matchedRunId = matched.id;
+    } else {
+      throw new BadRequestException('treasury_resolution_kind_required');
     }
-    await this.audit.record({
-      actorUserId,
-      actorType: 'user',
-      action: 'finance.treasury.resolved',
-      targetType: 'system',
-      targetId: id,
-      metadata: {
-        reconciliationId: id,
-        notes,
-        evidenceRef: input.evidenceRef?.trim() || null,
-      },
+    // Scope D: attester ≠ resolver — whoever supplied the bank leg of
+    // a mismatched run may not also close its investigation.
+    if (row.attestationId) {
+      const attestation = await this.prisma.treasuryAttestation.findUnique({
+        where: { id: row.attestationId },
+      });
+      if (attestation && attestation.recordedBy === actorUserId) {
+        throw new ConflictException('treasury_attester_cannot_resolve');
+      }
+    }
+    // Scope A: one-shot transition + audit, one transaction.
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.treasuryReconciliation.updateMany({
+        where: { id, status: 'investigated' },
+        data: {
+          status: 'resolved',
+          resolvedBy: actorUserId,
+          resolvedAt: this.clock.now(),
+          resolutionNotes: notes,
+          resolutionEvidenceRef: evidenceRef,
+          resolutionKind: kind,
+          resolutionMatchedRunId: matchedRunId,
+        },
+      });
+      if (moved.count !== 1) {
+        throw new ConflictException('treasury_reconciliation_contended');
+      }
+      await this.audit.recordGuaranteed(
+        {
+          auditKey: `finance.treasury.resolved:${id}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.treasury.resolved',
+          targetType: 'system',
+          targetId: id,
+          metadata: {
+            reconciliationId: id,
+            notes,
+            resolutionKind: kind,
+            evidenceRef,
+            matchedReconciliationId: matchedRunId,
+          },
+        },
+        tx,
+      );
     });
     return this.render(await this.load(id));
+  }
+
+  // ── Scope D: treasury health (metrics + enumerated alerts) ───────
+  async health() {
+    const latest = await this.prisma.treasuryReconciliation.findFirst({
+      orderBy: [{ asOfDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    const [mismatchedOpen, investigatedOpen] = await Promise.all([
+      this.prisma.treasuryReconciliation.count({
+        where: { status: 'mismatched' },
+      }),
+      this.prisma.treasuryReconciliation.count({
+        where: { status: 'investigated' },
+      }),
+    ]);
+    const pendingInternalTransfers =
+      await this.internalTransfers.pendingInternalTransfers();
+    const latestSnapshot = latest
+      ? (JSON.parse(latest.canonicalJson) as {
+          alerts?: unknown[];
+          deltas?: Record<string, unknown>;
+        })
+      : null;
+    return {
+      // Reconciliation-zero health metric: the latest run matched and
+      // nothing is open — anything else is an alert state.
+      reconciliationZero:
+        latest?.status === 'matched' &&
+        mismatchedOpen === 0 &&
+        investigatedOpen === 0,
+      latestRun: latest
+        ? {
+            id: latest.id,
+            asOfDate: latest.asOfDate.toISOString(),
+            status: latest.status,
+            differenceCount: latest.differenceCount,
+            snapshotHash: latest.snapshotHash,
+            alerts: latestSnapshot?.alerts ?? [],
+            deltas: latestSnapshot?.deltas ?? null,
+          }
+        : null,
+      mismatchedOpen,
+      investigatedOpen,
+      pendingInternalTransfers,
+    };
   }
 
   private async load(id: string) {

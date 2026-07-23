@@ -318,7 +318,30 @@ export class SettlementReceiptsService {
           }
           // Replay still derives coverage (review finding 3): retrying
           // the SAME receipt is the natural repair for a crash between
-          // the receipt commit and the coverage flip.
+          // the receipt commit and the coverage flip — and (Scope A)
+          // it also HEALS a lost receipt audit: same deterministic
+          // key, collides when already delivered.
+          const inv = await this.loadInvoice(invoiceType, input.invoiceId);
+          await this.audit.recordGuaranteed({
+            auditKey: `finance.receipt.recorded:${existing.id}`,
+            actorUserId,
+            actorType: 'user',
+            action: 'finance.receipt.recorded',
+            targetType:
+              invoiceType === 'merchant_invoice' ? 'store' : 'organization',
+            targetId:
+              invoiceType === 'merchant_invoice' ? inv.storeId : inv.orgId,
+            metadata: {
+              receiptId: existing.id,
+              invoiceType,
+              invoiceId: inv.id,
+              invoiceNumber: inv.invoiceNumber,
+              amount,
+              currency: 'SAR',
+              bankReference,
+              rail: existing.rail,
+            },
+          });
           const coverage = await this.deriveAndApplyCoverage(
             actorUserId,
             invoiceType,
@@ -329,7 +352,11 @@ export class SettlementReceiptsService {
       }
       throw e;
     }
-    await this.audit.record({
+    // Scope A: guaranteed, occurrence-keyed. A failure here throws —
+    // the operator's retry replays the receipt by evidence identity
+    // and the replay lane heals the audit with the same key.
+    await this.audit.recordGuaranteed({
+      auditKey: `finance.receipt.recorded:${receipt.id}`,
       actorUserId,
       actorType: 'user',
       action: 'finance.receipt.recorded',
@@ -423,8 +450,17 @@ export class SettlementReceiptsService {
           where: { id: invoiceId, status: 'issued', balanceStatus: { not: 'closed_by_credit' } },
           data: { balanceStatus: 'closed_by_credit' },
         });
-        if (closed.count === 1) {
-          await this.audit.record({
+        // Scope A: guaranteed + healed. The flip is write-once; a lost
+        // audit after a committed flip is re-delivered on ANY later
+        // re-derive (coverage is idempotent and self-healing) because
+        // the deterministic key collides instead of duplicating.
+        if (
+          closed.count === 1 ||
+          (invoice as { balanceStatus?: string }).balanceStatus ===
+            'closed_by_credit'
+        ) {
+          await this.audit.recordGuaranteed({
+            auditKey: `finance.invoice.closed_by_credit:${invoiceId}`,
             actorUserId,
             actorType: 'user',
             action: 'finance.invoice.closed_by_credit',
@@ -453,6 +489,30 @@ export class SettlementReceiptsService {
       // artifacts exist (heals a crash between flip and artifacts).
       if (invoice.status === 'paid') {
         await this.ensureCoverageArtifacts(actorUserId, invoiceType, invoice);
+        // Scope A heal (review finding 2): a crash between the paid
+        // flip and its audit must not lose the audit forever — every
+        // re-derive of an already-paid invoice re-attempts the SAME
+        // keyed audit; delivered once, it collides forever after.
+        await this.audit.recordGuaranteed({
+          auditKey: `finance.invoice.paid:${invoiceType}:${invoiceId}`,
+          actorUserId,
+          actorType: 'user',
+          action: 'finance.invoice.paid',
+          targetType:
+            invoiceType === 'merchant_invoice' ? 'store' : 'organization',
+          targetId:
+            invoiceType === 'merchant_invoice'
+              ? invoice.storeId
+              : invoice.orgId,
+          metadata: {
+            invoiceType,
+            invoiceId,
+            invoiceNumber: invoice.invoiceNumber,
+            totalAmount: result.totalAmount,
+            receiptCount: receipts.length,
+            healed: true,
+          },
+        });
         // Heal (adversarial finding 4): invoices paid BEFORE the
         // balanceStatus column existed defaulted to 'open' — stamp
         // closed_by_payment retroactively, guarded so it runs once.
@@ -487,7 +547,11 @@ export class SettlementReceiptsService {
             },
           });
     if (flipped.count === 1) {
-      await this.audit.record({
+      // Scope A: guaranteed, keyed per invoice. A lost audit after
+      // the flip commit re-delivers via the already-paid heal branch
+      // above (same key) on any later derive.
+      await this.audit.recordGuaranteed({
+        auditKey: `finance.invoice.paid:${invoiceType}:${invoiceId}`,
         actorUserId,
         actorType: 'user',
         action: 'finance.invoice.paid',

@@ -230,7 +230,10 @@ function mkEngine(items: Row[]) {
   prisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
     fn(prisma),
   );
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordGuaranteed: jest.fn().mockResolvedValue(undefined),
+  };
   const ledger = { record: jest.fn().mockResolvedValue({ id: 'led-1' }) };
   // Rule 2: tests inject a FIXED clock — engine time is deterministic.
   const clock = { now: () => new Date('2026-07-20T12:00:00.000Z') };
